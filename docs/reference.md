@@ -58,8 +58,9 @@ an elevated guard while excluding low-IL processes.
 Atomic writes: tmp → `FlushFileBuffers` → rename, so a torn write can never
 land at the final name (matters most on FAT32/exFAT drives with no journal).
 `config.json.bak` mirrors every save — a corrupt primary is quarantined to
-`.bad` and the backup loads instead. Secrets are **hashes only** — the raw secret
-lives only on the drive.
+`.bad` and the backup loads instead; a corrupt backup is quarantined to
+`.bak.bad` and the chain falls through to the registry copy. Secrets are
+**hashes only** — the raw secret lives only on the drive.
 
 | Field | Meaning |
 |---|---|
@@ -78,7 +79,7 @@ lives only on the drive.
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
-| `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it |
+| `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One lock per idle streak — re-arms only after input returns, so a present key's auto-unlock can't flap |
 | `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad passphrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
 | `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
 
@@ -86,6 +87,8 @@ lives only on the drive.
 on every save — a third copy on a different kill surface. Load chain:
 primary → `.bak` → registry (a registry restore rewrites both files and
 is logged as a tamper event; the watchdog's respawn gate accepts any copy).
+Consequence: deleting `%APPDATA%\CryptoKey` no longer resets CryptoKey —
+a full reset is the folder **and** the `HKCU\Software\CryptoKey` key.
 
 ## Keyfile — `<drive>:\.cryptokey`
 

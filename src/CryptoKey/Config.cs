@@ -109,7 +109,9 @@ internal static class ConfigStore
     // registry, a registry delete can't reach the folder. Same trust bar
     // as .bak — only ever honored *after* the keyfile's own attestation
     // verifies, so a planted config still can't unlock anything.
-    private const string RegKeyPath = @"Software\CryptoKey";
+    // Mutable so tests can redirect it — without that seam, every Save in
+    // a test writes into the user's real HKCU backup.
+    internal static string RegKeyPath = @"Software\CryptoKey";
     private const string RegValueName = "Config";
 
     /// <summary>Set when the last Load came from the registry — means the
@@ -163,25 +165,39 @@ internal static class ConfigStore
 
         if (File.Exists(BackupPath))
         {
-            KeyConfig? backup = Parse(File.ReadAllText(BackupPath));
-            restoredFromBackup = true;
-            return backup;
+            try
+            {
+                KeyConfig backup = Parse(File.ReadAllText(BackupPath));
+                restoredFromBackup = true;
+                return backup;
+            }
+            catch (Exception)
+            {
+                // Corrupt .bak must NOT end the chain — the registry copy
+                // exists precisely for the both-files-dead case.
+                try { File.Move(BackupPath, BackupPath + ".bad", overwrite: true); }
+                catch (Exception) { }
+            }
         }
 
         string? reg = ReadRegistryBackup();
         if (reg != null)
         {
-            KeyConfig? restored = Parse(reg);
             try
             {
-                Directory.CreateDirectory(ConfigDir);
-                AtomicFile.WriteAllText(ConfigPath, reg);
-                AtomicFile.WriteAllText(BackupPath, reg);
+                KeyConfig restored = Parse(reg);
+                try
+                {
+                    Directory.CreateDirectory(ConfigDir);
+                    AtomicFile.WriteAllText(ConfigPath, reg);
+                    AtomicFile.WriteAllText(BackupPath, reg);
+                }
+                catch (Exception) { /* restore best-effort — the copy in hand still works */ }
+                restoredFromBackup = true;
+                LastRestoreFromRegistry = true;
+                return restored;
             }
-            catch (Exception) { /* restore best-effort — the copy in hand still works */ }
-            restoredFromBackup = true;
-            LastRestoreFromRegistry = true;
-            return restored;
+            catch (Exception) { /* corrupt registry copy — fall through */ }
         }
 
         if (primaryExisted)
@@ -190,11 +206,12 @@ internal static class ConfigStore
         return null;
     }
 
-    private static KeyConfig? Parse(string json)
+    private static KeyConfig Parse(string json)
     {
         KeyConfig? config = JsonSerializer.Deserialize<KeyConfig>(json);
-        if (config != null)
-            config.Guard ??= new GuardSettings();
+        if (config == null)
+            throw new InvalidDataException("Config payload was empty.");
+        config.Guard ??= new GuardSettings();
         return config;
     }
 

@@ -193,6 +193,9 @@ internal sealed class GuardService : IDisposable
         catch (Exception) { }
     }
 
+    private IdleLockGate? _idleGate;
+    private int _idleGateMins = -1;
+
     private void IdleTick()
     {
         int mins = _config.Guard.IdleLockMinutes;
@@ -200,12 +203,18 @@ internal sealed class GuardService : IDisposable
             return;
         try
         {
-            if (NativeMethods.IdleMilliseconds() < (uint)mins * 60_000)
-                return;
+            if (_idleGate == null || _idleGateMins != mins)
+            {
+                _idleGate = new IdleLockGate(mins);
+                _idleGateMins = mins;
+            }
+            uint idleMs = NativeMethods.IdleMilliseconds();
             // Lock on the UI thread — the timer callback is a pool thread.
             _monitor.BeginInvoke(new Action(() =>
             {
-                if (State == GuardState.Unlocked) // Paused/Locked suppress it
+                // Paused/Locked suppress it; the gate stops re-locking on
+                // the same idle streak after a key-present auto-unlock.
+                if (State == GuardState.Unlocked && _idleGate.ShouldLock(idleMs))
                     LockNow($"idle {mins} min");
             }));
         }
@@ -909,5 +918,34 @@ internal sealed class GuardService : IDisposable
         LockPolicies.Restore(Log);
         _surface.Dispose();
         _monitor.Dispose();
+    }
+}
+
+/// <summary>
+/// One lock per idle streak. Fires the first time the idle counter
+/// crosses the threshold, then stays suppressed until input brings it
+/// back under — without this, idle-locking a machine whose key is still
+/// inserted flaps forever: lock → key auto-unlock → re-lock, plus an
+/// alert pair per cycle.
+/// </summary>
+internal sealed class IdleLockGate
+{
+    private readonly uint _thresholdMs;
+    private bool _suppressed;
+
+    internal IdleLockGate(int minutes)
+        => _thresholdMs = (uint)minutes * 60_000;
+
+    /// <summary>True once when idle crosses the threshold; re-arms when input returns.</summary>
+    internal bool ShouldLock(uint idleMs)
+    {
+        if (idleMs < _thresholdMs)
+        {
+            _suppressed = false;
+            return false;
+        }
+        if (_suppressed)
+            return false;
+        return _suppressed = true;
     }
 }

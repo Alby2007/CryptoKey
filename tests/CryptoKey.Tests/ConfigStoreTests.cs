@@ -88,12 +88,63 @@ public class ConfigStoreTests
     }
 
     [Fact]
-    public void Both_files_corrupt_throws()
+    public void All_copies_dead_throws()
     {
         ConfigStore.Save(ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pp"));
         File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
         File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
+        DeleteRegistryBackup();
         Assert.ThrowsAny<Exception>(() => ConfigStore.Load());
+    }
+
+    [Fact]
+    public void Corrupt_files_fall_through_to_registry()
+    {
+        // The registry copy exists precisely for the both-files-dead case —
+        // a corrupt .bak must not end the chain before it's tried.
+        ConfigStore.Save(ConfigStore.CreateNew("SER-REG", TestDisk.RandomSecret(), "pp"));
+        File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
+        File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
+
+        KeyConfig? loaded = ConfigStore.Load(out bool fromBackup);
+
+        Assert.NotNull(loaded);
+        Assert.True(fromBackup);
+        Assert.True(ConfigStore.LastRestoreFromRegistry);
+        Assert.Equal("SER-REG", loaded!.DeviceSerial);
+        // Both files got re-created from the registry copy.
+        Assert.True(File.Exists(ConfigStore.ConfigPath));
+        Assert.True(File.Exists(ConfigStore.BackupPath));
+    }
+
+    [Fact]
+    public void Folder_wipe_restores_from_registry()
+    {
+        ConfigStore.Save(ConfigStore.CreateNew("SER-WIPE", TestDisk.RandomSecret(), "pp"));
+        Directory.Delete(ConfigStore.ConfigDir, recursive: true);
+
+        KeyConfig? loaded = ConfigStore.Load(out _);
+
+        Assert.Equal("SER-WIPE", loaded!.DeviceSerial);
+        Assert.True(ConfigStore.LastRestoreFromRegistry);
+        Assert.True(File.Exists(ConfigStore.ConfigPath));
+    }
+
+    [Fact]
+    public void Corrupt_registry_copy_falls_to_throw()
+    {
+        ConfigStore.Save(ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pp"));
+        File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
+        File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
+        using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(ConfigStore.RegKeyPath))
+            key.SetValue("Config", "{ corrupt json");
+        Assert.ThrowsAny<Exception>(() => ConfigStore.Load());
+    }
+
+    private static void DeleteRegistryBackup()
+    {
+        Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(
+            ConfigStore.RegKeyPath, throwOnMissingSubKey: false);
     }
 
     [Fact]

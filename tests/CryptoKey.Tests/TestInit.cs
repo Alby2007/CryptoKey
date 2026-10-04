@@ -1,4 +1,9 @@
 using System.Runtime.CompilerServices;
+using Xunit;
+
+// The suite shares one redirected config dir + one registry key — classes
+// must not race each other's Saves/Loads.
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace CryptoKey.Tests;
 
@@ -25,5 +30,12 @@ internal static class TestInit
         if (!ConfigStore.ConfigDir.StartsWith(Dir, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"Config root redirect failed — got {ConfigStore.ConfigDir}");
+
+        // Same redirect for the registry copy — otherwise every Save/
+        // CreateNew in a test writes into the user's real HKCU backup
+        // (the file redirect doesn't cover it).
+        ConfigStore.RegKeyPath = @"Software\CryptoKeyTests";
+        Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(
+            ConfigStore.RegKeyPath, throwOnMissingSubKey: false);
     }
 }

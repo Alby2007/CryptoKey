@@ -32,7 +32,9 @@ the lock working.
 
 | Failure | What happens | Rescue |
 |---|---|---|
-| `config.json` corrupt | Quarantined to `config.json.bad`; `config.json.bak` (last-good mirror, written on every save) loads instead | Modal warning on boot (autostart hides the console — a silent fail-open would mean "no protection, no sign"); only if **both** are corrupt does the app refuse to run → re-enroll |
+| `config.json` corrupt | Quarantined to `config.json.bad`; `config.json.bak` (last-good mirror, written on every save) loads instead | Modal warning on boot (autostart hides the console — a silent fail-open would mean "no protection, no sign") |
+| `config.json` **and** `.bak` corrupt | `.bak` quarantined to `.bak.bad`; `HKCU\Software\CryptoKey\Config` restores both files and flags `LastRestoreFromRegistry` | Distinct "folder was wiped" modal + guard-log tamper line + remote alert; only if **all three** copies are dead does the app refuse to run → re-enroll |
+| Whole `%APPDATA%\CryptoKey` folder wiped | Both files re-created from the registry copy on next launch; watchdog respawns via `ConfigStore.Resumable` | Same tamper modal — deleting the folder alone can't disarm CryptoKey; a real reset also deletes `HKCU\Software\CryptoKey` |
 | Hand-edited config overwritten | A running guard saves in-memory state on every rotation | `cryptokey quit` before hand-editing — documented |
 | Re-enroll while guard runs | `reenrolled` IPC → in-place `ReloadConfig` — serial, hashes, guard settings all refresh | Old passphrase dies immediately; if the new key isn't inserted the fail-closed check locks |
 | `.tmp` orphans from crashed writes | Atomic tmp+move — the real file is never torn | Next write overwrites the orphan |
