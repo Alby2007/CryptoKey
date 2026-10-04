@@ -12,8 +12,10 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _lockOnRemoval;
     private readonly ToggleSwitch _balloonTips;
     private readonly ToggleSwitch _animations;
+    private readonly ToggleSwitch _startup;
     private readonly Slider _poll;
     private readonly Label _pollValue;
+    private bool _suppressStartupEvent;
 
     public SettingsPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -41,23 +43,24 @@ internal sealed class SettingsPage : UserControl
             Title = "Behavior",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 186,
+            Height = 216,
             Margin = new Padding(0, 0, 0, 10),
         };
         var beh = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 4; i++)
-            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 25f));
+        for (int i = 0; i < 5; i++)
+            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 20f));
 
         _lockOnRemoval = Toggle("Auto-lock when the key is removed", _config.Guard.LockOnRemoval);
         _balloonTips = Toggle("Balloon notifications on lock/unlock", _config.Guard.BalloonTips);
         _animations = Toggle("Interface animations", _config.Guard.Animations);
+        _startup = Toggle("Start with Windows", StartupManager.IsEnabled);
 
         var pollRow = new TableLayoutPanel
         {
@@ -104,6 +107,7 @@ internal sealed class SettingsPage : UserControl
         beh.Controls.Add(_lockOnRemoval);
         beh.Controls.Add(_balloonTips);
         beh.Controls.Add(_animations);
+        beh.Controls.Add(_startup);
         beh.Controls.Add(pollRow);
         behCard.Controls.Add(beh);
 
@@ -168,6 +172,24 @@ internal sealed class SettingsPage : UserControl
             Animator.Enabled = _animations.Checked;
             _service.ApplyMotion(_animations.Checked);
             Save();
+        };
+        _startup.CheckedChanged += (_, _) =>
+        {
+            if (_suppressStartupEvent)
+                return;
+            try
+            {
+                StartupManager.SetEnabled(_startup.Checked);
+                _notify(_startup.Checked
+                    ? "CryptoKey will start at login" : "Removed from login startup", false);
+            }
+            catch (Exception ex)
+            {
+                _notify($"Startup change failed: {ex.Message}", true);
+                _suppressStartupEvent = true;
+                _startup.Checked = !_startup.Checked;
+                _suppressStartupEvent = false;
+            }
         };
         _poll.ValueChanged += (_, _) =>
         {

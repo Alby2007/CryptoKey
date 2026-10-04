@@ -38,6 +38,11 @@ Double-clicking `cryptokey.exe` launches the dashboard (the console hides
 itself when there's no shell attached). Closing the window hides to the
 tray — the guard keeps running.
 
+The Settings tab has a **Start with Windows** toggle that registers
+`cryptokey.exe guard` (tray-only, no window) in your per-user Run key —
+enable it from the exe you actually keep, since it stores the running
+exe's path.
+
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,
 **Settings…** (key info, passphrase change, poll interval, balloon tips),
 **Quit** — enabled only while *unlocked*. While locked the only ways out are
