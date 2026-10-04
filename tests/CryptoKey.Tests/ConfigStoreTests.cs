@@ -2,39 +2,12 @@ using Xunit;
 namespace CryptoKey.Tests;
 
 /// <summary>
-/// ConfigStore reads %APPDATA% once (static ConfigDir) — this fixture
-/// redirects it to a temp dir before first access. Members of this
-/// collection are the only tests that touch ConfigDir, so the redirect
-/// can't race a parallel test that grabbed the real path first.
+/// ConfigDir is redirected to a per-run temp dir by TestInit's module
+/// initializer — these tests exercise the real store, just never the
+/// real profile.
 /// </summary>
-public sealed class AppDataRedirectFixture : IDisposable
-{
-    public string Dir { get; } = Path.Combine(Path.GetTempPath(),
-        "ckcfg-" + Guid.NewGuid().ToString("N"));
-
-    public AppDataRedirectFixture()
-    {
-        Environment.SetEnvironmentVariable("APPDATA", Dir);
-        // Fail loudly rather than write test data into the real profile:
-        // if ConfigDir ever stops honoring the env redirect this throws
-        // before any test can touch production config.json.
-        if (!ConfigStore.ConfigDir.StartsWith(Dir, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException(
-                $"ConfigDir redirect failed — got {ConfigStore.ConfigDir}");
-    }
-
-    public void Dispose() { }
-}
-
-[CollectionDefinition("appdata-redirect")]
-public sealed class AppDataCollection : ICollectionFixture<AppDataRedirectFixture> { }
-
-[Collection("appdata-redirect")]
 public class ConfigStoreTests
 {
-    private readonly AppDataRedirectFixture _fx;
-    public ConfigStoreTests(AppDataRedirectFixture fx) => _fx = fx;
-
     [Fact]
     public void Save_load_round_trip()
     {

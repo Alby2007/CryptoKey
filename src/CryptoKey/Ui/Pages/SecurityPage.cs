@@ -6,7 +6,7 @@ namespace CryptoKey;
 /// <summary>Failsafe-passphrase management, enrolled-key info, re-enroll.</summary>
 internal sealed class SecurityPage : UserControl
 {
-    private const int MinPassphraseLength = 8;
+    private const int MinPassphraseLength = KeyConfig.MinPassphraseLength;
 
     private readonly KeyConfig _config;
     private readonly GuardService _service;

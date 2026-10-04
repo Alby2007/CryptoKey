@@ -7,6 +7,9 @@ namespace CryptoKey;
 
 internal sealed class KeyConfig
 {
+    /// <summary>Failsafe-passphrase floor at enroll/change — verification accepts any length.</summary>
+    public const int MinPassphraseLength = 8;
+
     public int ConfigVersion { get; set; } = 1;
     public string DeviceSerial { get; set; } = "";
     public string SecretSalt { get; set; } = "";
@@ -70,13 +73,15 @@ internal static class ConfigStore
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    // APPDATA via env var, not GetFolderPath: identical on Windows (the
-    // variable is always set), but honors Environment.SetEnvironmentVariable
-    // — which is what the test suite uses to redirect the store into a
-    // temp dir. GetFolderPath is a KnownFolder lookup and ignores it.
+    // CRYPTOKEY_CONFIG_ROOT overrides the profile root — the test suite
+    // uses it to redirect the store into a temp dir. A dedicated variable
+    // rather than APPDATA itself: nothing else sets it, and a set-but-
+    // empty value falls through instead of collapsing ConfigDir to a
+    // relative path under the launcher's CWD.
     public static string ConfigDir { get; } = Path.Combine(
-        Environment.GetEnvironmentVariable("APPDATA")
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        Environment.GetEnvironmentVariable("CRYPTOKEY_CONFIG_ROOT") is { Length: > 0 } root
+            ? root
+            : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "CryptoKey");
 
     public static string ConfigPath => Path.Combine(ConfigDir, "config.json");

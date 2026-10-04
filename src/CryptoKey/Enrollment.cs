@@ -6,7 +6,6 @@ namespace CryptoKey;
 internal static class Enrollment
 {
     private const int SecretBytes = 64;
-    private const int MinPassphraseLength = 8;
 
     public static int Run()
     {
@@ -74,9 +73,9 @@ internal static class Enrollment
             Console.WriteLine("Passphrases do not match.");
             return 1;
         }
-        if (passphrase.Length < MinPassphraseLength)
+        if (passphrase.Length < KeyConfig.MinPassphraseLength)
         {
-            Console.WriteLine($"Passphrase too short (min {MinPassphraseLength} characters).");
+            Console.WriteLine($"Passphrase too short (min {KeyConfig.MinPassphraseLength} characters).");
             return 1;
         }
 
