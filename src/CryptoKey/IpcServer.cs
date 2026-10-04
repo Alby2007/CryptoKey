@@ -27,7 +27,34 @@ internal sealed class IpcServer : IDisposable
         _handler = handler;
     }
 
-    public void Start() => _loop = AcceptLoop();
+    /// <summary>Whether the pipe carries the medium-integrity label (false = DACL-only).</summary>
+    public bool IntegrityLabeled { get; private set; }
+
+    public void Start(Action<string>? log = null)
+    {
+        // Probe the security model once so the fallback is in the log — an
+        // elevated guard that silently ends up DACL-only would strand the CLI.
+        try
+        {
+            using var probe = CreatePipe(out bool labeled);
+            IntegrityLabeled = labeled;
+            if (log != null)
+            {
+                bool elevated = new WindowsPrincipal(WindowsIdentity.GetCurrent())
+                    .IsInRole(WindowsBuiltInRole.Administrator);
+                log(labeled
+                    ? "IPC pipe up (integrity label applied — CLI works elevated)."
+                    : elevated
+                        ? "IPC pipe up WITHOUT integrity label — elevated guard may be unreachable from the CLI."
+                        : "IPC pipe up (per-user ACL — normal at medium integrity).");
+            }
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"IPC security probe failed: {ex.Message}");
+        }
+        _loop = AcceptLoop();
+    }
 
     private async Task AcceptLoop()
     {
@@ -35,7 +62,7 @@ internal sealed class IpcServer : IDisposable
         {
             try
             {
-                using var pipe = CreatePipe();
+                using var pipe = CreatePipe(out _);
                 await pipe.WaitForConnectionAsync(_cts.Token);
 
                 using var reader = new StreamReader(pipe);
@@ -74,7 +101,7 @@ internal sealed class IpcServer : IDisposable
     // otherwise block it — while the DACL scopes access to the owning user.
     // The pipe lives in the global namespace, so a World DACL would let any
     // other session on the machine send pause/lock/quit.
-    private static NamedPipeServerStream CreatePipe()
+    private static NamedPipeServerStream CreatePipe(out bool integrityLabeled)
     {
         string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
 
@@ -87,12 +114,14 @@ internal sealed class IpcServer : IDisposable
         {
             var security = new PipeSecurity();
             security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
+            integrityLabeled = true;
             return Create(security);
         }
         catch (Exception)
         {
             var security = new PipeSecurity();
             security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})");
+            integrityLabeled = false;
             return Create(security);
         }
 

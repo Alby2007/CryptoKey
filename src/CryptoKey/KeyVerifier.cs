@@ -112,16 +112,19 @@ internal static class KeyVerifier
     /// <summary>
     /// Writes a new-generation secret to every letter that already has a
     /// keyfile — temp file, attributes, atomic move, then a read-back check.
-    /// Returns per-letter results ("A: ok" / "A: &lt;error&gt;").
+    /// If the keyfile was wiped from every letter, re-arms the first mounted
+    /// one so the drive can't stay stale-forever.
     /// </summary>
-    public static List<string> RotateKeyfiles(UsbDisk disk, byte[] secret)
+    public static List<(string Letter, string? Error)> RotateKeyfiles(UsbDisk disk, byte[] secret)
     {
-        var results = new List<string>();
-        foreach (string letter in disk.DriveLetters)
+        var targets = disk.DriveLetters.Where(l => File.Exists(KeyFilePath(l))).ToList();
+        if (targets.Count == 0)
+            targets = disk.DriveLetters.Take(1).ToList();
+
+        var results = new List<(string Letter, string? Error)>();
+        foreach (string letter in targets)
         {
             string path = KeyFilePath(letter);
-            if (!File.Exists(path))
-                continue;
             string tmp = path + ".tmp";
             try
             {
@@ -129,13 +132,13 @@ internal static class KeyVerifier
                 File.SetAttributes(tmp, FileAttributes.Hidden | FileAttributes.System);
                 File.Move(tmp, path, overwrite: true);
                 byte[] back = File.ReadAllBytes(path);
-                results.Add(back.AsSpan().SequenceEqual(secret)
-                    ? $"{letter} ok" : $"{letter} read-back mismatch");
+                results.Add((letter,
+                    back.AsSpan().SequenceEqual(secret) ? null : "read-back mismatch"));
             }
             catch (Exception ex)
             {
                 try { File.Delete(tmp); } catch { }
-                results.Add($"{letter} {ex.Message}");
+                results.Add((letter, ex.Message));
             }
         }
         return results;

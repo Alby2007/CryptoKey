@@ -169,7 +169,7 @@ internal static class Program
             Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
 
         service.Start();
-        ipc.Start();
+        ipc.Start(service.Log);
         if (openDashboard)
             shell.OpenWindow();
         Application.Run();

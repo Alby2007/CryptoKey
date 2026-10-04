@@ -289,11 +289,15 @@ internal sealed class GuardService : IDisposable
 
             // Burn the secret once per key session (edge), and whenever a
             // stale file shows up (heals interrupted rotations), throttled.
+            // Order matters: UnlockNow ran above, so hooks are released before
+            // this drive I/O — a slow USB write can't stall the hook pump.
             if ((edgeFlip || check.Match == SecretMatch.Previous)
                 && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5))
             {
                 _lastRotateAttemptUtc = DateTime.UtcNow;
-                TryRotate(disk);
+                // Pin prev when the drive IS the previous generation — a failed
+                // write must leave it still-verifiable, not two gens behind.
+                TryRotate(disk, keepPrev: check.Match == SecretMatch.Previous);
             }
         }
         else
@@ -322,14 +326,14 @@ internal sealed class GuardService : IDisposable
     /// then the drive — a crash anywhere leaves the drive on the previous
     /// generation, which still verifies as stale and heals on the next pass.
     /// </summary>
-    private void TryRotate(UsbDisk disk)
+    private void TryRotate(UsbDisk disk, bool keepPrev)
     {
         byte[] next = RandomNumberGenerator.GetBytes(64);
 
         string oldSecret = _config.SecretHash, oldPrev = _config.PrevSecretHash;
         int oldCount = _config.RotationCount;
         DateTime? oldRot = _config.LastRotationUtc;
-        ConfigStore.RotateSecret(_config, next);
+        ConfigStore.RotateSecret(_config, next, keepPrev);
         try
         {
             ConfigStore.Save(_config);
@@ -345,7 +349,7 @@ internal sealed class GuardService : IDisposable
             return;
         }
 
-        List<string> results;
+        List<(string Letter, string? Error)> results;
         try
         {
             results = KeyVerifier.RotateKeyfiles(disk, next);
@@ -356,13 +360,14 @@ internal sealed class GuardService : IDisposable
             return;
         }
         if (results.Count == 0)
-            Log($"Config rotated to generation {_config.RotationCount} but no keyfile " +
-                "found on the drive — the drive secret is stale until it reappears.");
-        else if (results.All(r => r.EndsWith("ok")))
+            Log($"Config rotated to generation {_config.RotationCount} but the drive " +
+                "has no mounted volume — the drive secret is stale until it reappears.");
+        else if (results.All(r => r.Error == null))
             Log($"Keyfile rotated to generation {_config.RotationCount}.");
         else
             Log($"Rotated to generation {_config.RotationCount} with issues: " +
-                string.Join("; ", results) + ".");
+                string.Join("; ", results.Select(r
+                    => r.Error == null ? $"{r.Letter} ok" : $"{r.Letter} {r.Error}")) + ".");
     }
 
     private void CheckPauseExpiry()
@@ -483,7 +488,8 @@ internal sealed class GuardService : IDisposable
     private static string LogPath => Path.Combine(ConfigStore.ConfigDir, "guard.log");
     private static string OldLogPath => Path.Combine(ConfigStore.ConfigDir, "guard.log.1");
 
-    private void Log(string message)
+    /// <summary>Append a line to the feed/console/guard.log — also used by IPC startup.</summary>
+    public void Log(string message)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         Console.WriteLine(line);

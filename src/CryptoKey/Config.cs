@@ -105,10 +105,17 @@ internal static class ConfigStore
         }
     }
 
-    /// <summary>Shifts the hash chain one generation forward.</summary>
-    public static void RotateSecret(KeyConfig config, byte[] newSecret)
+    /// <summary>
+    /// Shifts the hash chain one generation forward. When the rotation was
+    /// triggered by a previous-generation (stale) keyfile, <paramref name="keepPrev"/>
+    /// pins the chain: the drive still holds that generation, so shifting prev
+    /// past it would permanently disown the drive if this rotation's keyfile
+    /// write fails — pinned, a failed write just retries next check.
+    /// </summary>
+    public static void RotateSecret(KeyConfig config, byte[] newSecret, bool keepPrev = false)
     {
-        config.PrevSecretHash = config.SecretHash;
+        if (!keepPrev)
+            config.PrevSecretHash = config.SecretHash;
         byte[] salt = Convert.FromBase64String(config.SecretSalt);
         config.SecretHash = Convert.ToBase64String(HashSecret(newSecret, salt));
         config.RotationCount++;
