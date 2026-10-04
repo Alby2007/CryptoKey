@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace CryptoKey;
 
@@ -61,7 +62,29 @@ internal sealed class SecureLockSurface : ILockSurface
     public bool Engage()
     {
         lock (_engageSync)
-            return EngageCore();
+        {
+            try
+            {
+                return EngageCore();
+            }
+            catch (Exception ex)
+            {
+                // Contain everything — the caller falls back to the overlay.
+                // If the session somehow got switched first, try to pull it
+                // back; if THAT fails, leave the lock thread + watchdog alive
+                // rather than tear down onto a stranded desktop.
+                _engageError = ex.Message;
+                try
+                {
+                    if (!SwitchBack())
+                        return false;
+                    TearDownLockThread();
+                }
+                catch (Exception) { }
+                CloseInputHandle();
+                return false;
+            }
+        }
     }
 
     private bool EngageCore()
@@ -71,14 +94,36 @@ internal sealed class SecureLockSurface : ILockSurface
         // form would make this a silent no-op.
         if (_engaged)
             return true;
+        // A previous attempt can leave a live lock thread behind (exception
+        // after spawn where the switch-back also failed). If it's still
+        // running the lock is effectively engaged — don't double-spawn.
+        if (_lockThread?.IsAlive == true)
+            return true;
 
         // Capture the user's input desktop BEFORE anything can switch —
-        // without this there is no guaranteed way back.
-        _hInput = NativeMethods.OpenInputDesktop(0, false, NativeMethods.DESKTOP_SWITCHDESKTOP);
+        // without this there is no guaranteed way back. Kept across retries:
+        // a non-zero handle is the verified "home" from a previous engage
+        // that never made it back — re-capturing now could grab the lock
+        // desktop itself and lose the way home.
         if (_hInput == IntPtr.Zero)
         {
-            _engageError = "OpenInputDesktop failed";
-            return false;
+            _hInput = NativeMethods.OpenInputDesktop(0, false,
+                NativeMethods.DESKTOP_SWITCHDESKTOP | NativeMethods.DESKTOP_READOBJECTS);
+            if (_hInput == IntPtr.Zero)
+            {
+                _engageError = "OpenInputDesktop failed";
+                return false;
+            }
+            // The user is on the Winlogon SAS screen (Ctrl+Alt+Del) — yanking
+            // them out of it is wrong, and switching back to it later is
+            // equally wrong. Bail to the classic overlay for this lock.
+            string? deskName = GetDesktopName(_hInput);
+            if (deskName != null && deskName.Equals("Winlogon", StringComparison.OrdinalIgnoreCase))
+            {
+                _engageError = "input desktop is Winlogon (secure attention screen up)";
+                CloseInputHandle();
+                return false;
+            }
         }
 
         if (_hLock == IntPtr.Zero)
@@ -204,7 +249,11 @@ internal sealed class SecureLockSurface : ILockSurface
             _form = new LockForm(SystemInformation.VirtualScreen, primary: true);
             PushMirroredState(_form);
             _form.Show();
-            _ready.Set();
+            // Signal ready through the queue — it only fires once the pump
+            // is actually processing, which the LL hooks require. Setting
+            // it synchronously would let Engage switch the session a beat
+            // before input is swallowed.
+            _form.BeginInvoke(new Action(() => _ready.Set()));
             // Own pump for this thread; Application.Run(form) returns when
             // the form closes (teardown path).
             if (!_abandoned)
@@ -217,15 +266,16 @@ internal sealed class SecureLockSurface : ILockSurface
         }
         finally
         {
+            // The pump died while still "engaged" — the user is now staring
+            // at a blank private desktop with no lock form. Pull them back
+            // FIRST, while the locker/form still exist; _abandoned means the
+            // teardown path already handled the return.
+            if (!_abandoned)
+                ReleaseInput();
             try { _locker?.Dispose(); } catch (Exception) { }
             try { _form?.Dispose(); } catch (Exception) { }
             _form = null;
             _locker = null;
-            // The pump died while still "engaged" — the user is now staring
-            // at a blank private desktop with no lock form. Pull them back;
-            // _abandoned means the teardown path already handled the return.
-            if (!_abandoned)
-                ReleaseInput();
         }
     }
 
@@ -239,37 +289,61 @@ internal sealed class SecureLockSurface : ILockSurface
         f.SetCooldown(_cooldownUntil);
     }
 
-    /// <summary>Back to the user's desktop, then the lock thread dies.</summary>
-    public void Disengage()
+    /// <summary>
+    /// Back to the user's desktop, then the lock thread dies. False when the
+    /// switch-back failed — the session is STILL on the lock desktop then,
+    /// so nothing is torn down: the lock keeps working (form, hooks,
+    /// watchdog) and the next Disengage retries the switch.
+    /// </summary>
+    public bool Disengage()
     {
         lock (_engageSync)
         {
+            if (!SwitchBack())
+            {
+                _engageError = "SwitchDesktop back to the input desktop failed";
+                return false;
+            }
             _engaged = false;
-            SwitchBack();
             TearDownLockThread();
             CloseInputHandle();
+            return true;
         }
     }
 
     /// <summary>
     /// Fail-dead: restore the input desktop FIRST — even if the unhook below
     /// fails, containment ends. Then best-effort unhook (safe cross-thread;
-    /// if the lock thread already died its hooks died with it).
+    /// if the lock thread already died its hooks died with it). Clears
+    /// _engaged first — reaching here with the flag stale is what made a
+    /// dead lock pump report "still engaged" forever.
     /// </summary>
     public void ReleaseInput()
     {
-        SwitchBack();
+        _engaged = false;
+        // Bounded retry — the session is stranded until this switch lands.
+        // If it still fails, keep the watchdog alive (fires on process
+        // death) rather than kill the last rescue path.
+        bool back = SwitchBack();
+        for (int i = 0; i < 3 && !back; i++)
+        {
+            Thread.Sleep(200);
+            back = SwitchBack();
+        }
+        if (!back)
+            return;
         try { _locker?.Unlock(); }
         catch (Exception) { }
+        StopWatchdog();
     }
 
     /// <summary>Nothing else exists on the lock desktop — no clip to re-assert.</summary>
     public void ReassertClip() { }
 
-    private void SwitchBack()
+    /// <returns>false when the session could not be switched back.</returns>
+    private bool SwitchBack()
     {
-        if (_hInput != IntPtr.Zero)
-            NativeMethods.SwitchDesktop(_hInput); // idempotent
+        return _hInput == IntPtr.Zero || NativeMethods.SwitchDesktop(_hInput);
     }
 
     private void TearDownLockThread()
@@ -364,9 +438,30 @@ internal sealed class SecureLockSurface : ILockSurface
         });
     }
 
+    /// <summary>UOI_NAME for a desktop handle, or null if it can't be read.</summary>
+    private static string? GetDesktopName(IntPtr hDesktop)
+    {
+        NativeMethods.GetUserObjectInformation(hDesktop, NativeMethods.UOI_NAME,
+            IntPtr.Zero, 0, out int needed);
+        if (needed <= 0)
+            return null;
+        IntPtr buf = Marshal.AllocHGlobal(needed);
+        try
+        {
+            return NativeMethods.GetUserObjectInformation(hDesktop, NativeMethods.UOI_NAME,
+                buf, needed, out _)
+                ? Marshal.PtrToStringUni(buf) : null;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buf);
+        }
+    }
+
     public void Dispose()
     {
-        Disengage();
+        try { Disengage(); }
+        catch (Exception) { }
         if (_hLock != IntPtr.Zero)
         {
             NativeMethods.CloseDesktop(_hLock);

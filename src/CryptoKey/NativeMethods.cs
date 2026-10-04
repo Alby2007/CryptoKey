@@ -221,4 +221,11 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool CloseDesktop(IntPtr hDesktop);
+
+    internal const int UOI_NAME = 2;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetUserObjectInformation(IntPtr hObj, int nIndex,
+        IntPtr pvInfo, int nLength, out int lpnLengthNeeded);
 }

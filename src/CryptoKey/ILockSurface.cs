@@ -21,8 +21,12 @@ internal interface ILockSurface : IDisposable
     /// </summary>
     bool Engage();
 
-    /// <summary>Return the user's input (and desktop) and tear the surface down.</summary>
-    void Disengage();
+    /// <summary>
+    /// Return the user's input (and desktop) and tear the surface down.
+    /// False means input could not be returned — the surface stays engaged
+    /// and functional so the lock still works; retry on the next unlock.
+    /// </summary>
+    bool Disengage();
 
     /// <summary>
     /// Fail-dead path, callable from any thread: free input NOW. For the

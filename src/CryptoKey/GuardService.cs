@@ -664,15 +664,27 @@ internal sealed class GuardService : IDisposable
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
-        // Secure first; any engage failure falls back to the classic overlay —
-        // the lock must always land.
+        // Secure first; any engage failure — returned or thrown — falls back
+        // to the classic overlay. A throw propagating out of here would kill
+        // the guard via the poll callback while State is already Locked.
         EnsureSurfaceMode();
-        bool engaged = _surface.Engage();
+        bool engaged;
+        try { engaged = _surface.Engage(); }
+        catch (Exception ex)
+        {
+            Log($"Lock surface engage threw ({ex.Message}).");
+            engaged = false;
+        }
         if (!engaged && _surface is SecureLockSurface secure)
         {
             Log($"Secure desktop failed to engage ({secure.EngageError ?? "unknown"}).");
             SwitchToClassic();
-            engaged = _surface.Engage();
+            try { engaged = _surface.Engage(); }
+            catch (Exception ex)
+            {
+                Log($"Overlay engage also threw ({ex.Message}).");
+                engaged = false;
+            }
         }
         if (!engaged)
         {
@@ -690,12 +702,20 @@ internal sealed class GuardService : IDisposable
         if (State != GuardState.Locked)
             return;
         _lastVerifyFailure = null;
-        Log("Unlocked.");
         // Cooldown dies with the lock session — in-memory only per design.
         _cooldownUntil = null;
         _surface.SetCooldown(null);
         // Disengage returns input (and the input desktop) before teardown.
-        _surface.Disengage();
+        // If the session couldn't be switched back, the surface stays alive
+        // and functional — keep State locked so the passphrase path still
+        // works and the next unlock retries the switch.
+        if (!_surface.Disengage())
+        {
+            Log("Unlock deferred — could not switch back to the input desktop.");
+            _surface.SetStatus("Couldn't return to your desktop — try again.");
+            return;
+        }
+        Log("Unlocked.");
         SetState(GuardState.Unlocked);
     }
 

@@ -33,10 +33,12 @@ internal sealed class ClassicLockSurface : ILockSurface
         return hooked;
     }
 
-    public void Disengage()
+    /// <summary>Always succeeds — the overlay can't strand a session.</summary>
+    public bool Disengage()
     {
         _input.Unlock();
         _lock.Hide();
+        return true;
     }
 
     public void ReleaseInput() => _input.Unlock();
