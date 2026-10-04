@@ -26,6 +26,14 @@ internal static class NativeMethods
     internal const int VK_SHIFT = 0x10;
     internal const int VK_CONTROL = 0x11;
     internal const int VK_MENU = 0x12;
+    internal const int VK_CAPITAL = 0x14;
+    internal const int VK_NUMLOCK = 0x90;
+    internal const int VK_LSHIFT = 0xA0;
+    internal const int VK_RSHIFT = 0xA1;
+    internal const int VK_LCONTROL = 0xA2;
+    internal const int VK_RCONTROL = 0xA3;
+    internal const int VK_LMENU = 0xA4;
+    internal const int VK_RMENU = 0xA5;
     internal const int VK_F12 = 0x7B;
 
     internal delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -60,16 +68,26 @@ internal static class NativeMethods
     internal static extern short GetAsyncKeyState(int vKey);
 
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool GetKeyboardState(byte[] lpKeyState);
-
-    [DllImport("user32.dll")]
     internal static extern int ToUnicode(uint wVirtKey, uint wScanCode, byte[] lpKeyState,
         [Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pwszBuff, int cchBuff, uint wFlags);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern uint RegisterWindowMessage(string lpString);
+
+    internal const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+    internal const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute,
+        ref int pvAttribute, int cbAttribute);
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct RECT

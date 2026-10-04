@@ -10,6 +10,19 @@ internal static class Enrollment
 
     public static int Run()
     {
+        KeyConfig? existing = null;
+        try { existing = ConfigStore.Load(); } catch { }
+        if (existing != null)
+        {
+            Console.Write($"A key is already enrolled (serial '{existing.DeviceSerial}'). Overwrite? [y/N] ");
+            string? answer = Console.ReadLine()?.Trim();
+            if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Enrollment cancelled.");
+                return 1;
+            }
+        }
+
         List<UsbDisk> disks;
         try
         {
@@ -80,7 +93,17 @@ internal static class Enrollment
             return 1;
         }
 
-        ConfigStore.Save(ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase));
+        try
+        {
+            ConfigStore.Save(ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase));
+        }
+        catch (Exception ex)
+        {
+            // Don't leave a keyfile on the drive that verifies against nothing.
+            try { File.Delete(keyPath); } catch { }
+            Console.WriteLine($"Failed to save config to {ConfigStore.ConfigPath}: {ex.Message}");
+            return 1;
+        }
 
         Console.WriteLine($"Enrolled {disk.Model} on {letter}. Keyfile written to {keyPath}");
         Console.WriteLine($"Config saved to {ConfigStore.ConfigPath}");

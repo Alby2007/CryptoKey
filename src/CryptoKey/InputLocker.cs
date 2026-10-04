@@ -19,8 +19,12 @@ internal sealed class InputLocker : IDisposable
     /// <summary>Dev-mode emergency exit combo (Ctrl+Alt+Shift+F12).</summary>
     public event Action? PanicRequested;
 
+    private const int MaxPassphraseLength = 256;
+
     private readonly bool _devMode;
     private readonly StringBuilder _buffer = new();
+    private bool _capsOn;
+    private bool _numOn;
 
     private IntPtr _kbHook = IntPtr.Zero;
     private IntPtr _mouseHook = IntPtr.Zero;
@@ -31,20 +35,36 @@ internal sealed class InputLocker : IDisposable
 
     public InputLocker(bool devMode) => _devMode = devMode;
 
-    public bool Active => _kbHook != IntPtr.Zero;
+    public bool Active => _kbHook != IntPtr.Zero && _mouseHook != IntPtr.Zero;
 
-    public void Lock()
+    /// <summary>Install hooks and clip the cursor. False if either hook failed.</summary>
+    public bool Lock()
     {
         if (Active)
-            return;
+            return true;
         IntPtr hMod = NativeMethods.GetModuleHandle(null);
         _kbProc = KeyboardHook;
         _mouseProc = MouseHook;
         _kbHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _kbProc, hMod, 0);
         _mouseHook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _mouseProc, hMod, 0);
+        if (_kbHook == IntPtr.Zero || _mouseHook == IntPtr.Zero)
+        {
+            RemoveHooks();
+            return false;
+        }
         ClipCursor();
         _buffer.Clear();
+        _capsOn = ToggledOn(NativeMethods.VK_CAPITAL);
+        _numOn = ToggledOn(NativeMethods.VK_NUMLOCK);
         PassphraseLengthChanged?.Invoke(0);
+        return true;
+    }
+
+    /// <summary>Re-apply the cursor clip — other processes can clear it.</summary>
+    public void ReassertClip()
+    {
+        if (Active)
+            ClipCursor();
     }
 
     public void Unlock() => RemoveHooks();
@@ -105,11 +125,18 @@ internal sealed class InputLocker : IDisposable
                             _buffer.Length--;
                         PassphraseLengthChanged?.Invoke(_buffer.Length);
                         break;
+                    case NativeMethods.VK_CAPITAL:
+                        _capsOn = !_capsOn;
+                        break;
+                    case NativeMethods.VK_NUMLOCK:
+                        _numOn = !_numOn;
+                        break;
                     default:
-                        char? c = VkToChar(kbd.vkCode, kbd.scanCode);
-                        if (c != null)
+                        string? chars = VkToChars(kbd.vkCode, kbd.scanCode);
+                        if (chars != null && _buffer.Length < MaxPassphraseLength)
                         {
-                            _buffer.Append(c.Value);
+                            int room = MaxPassphraseLength - _buffer.Length;
+                            _buffer.Append(chars.Length <= room ? chars : chars[..room]);
                             PassphraseLengthChanged?.Invoke(_buffer.Length);
                         }
                         break;
@@ -126,15 +153,53 @@ internal sealed class InputLocker : IDisposable
     private static bool ModifierDown(int vk)
         => (NativeMethods.GetAsyncKeyState(vk) & 0x8000) != 0;
 
-    private static char? VkToChar(uint vk, uint scan)
+    // Modifier state is built from GetAsyncKeyState rather than
+    // GetKeyboardState, which only reflects this thread's message queue and
+    // goes stale when the lock form isn't foreground. Toggle keys (Caps/Num
+    // Lock) are tracked in the hook itself — every press passes through here,
+    // so our flags can't drift from what the user sees. Dead keys are left
+    // pending (ToUnicode returns <0) and compose with the next stroke — which
+    // is also why multi-char results are appended whole.
+    private string? VkToChars(uint vk, uint scan)
     {
         var state = new byte[256];
-        if (!NativeMethods.GetKeyboardState(state))
-            return null;
+        SetDown(state, NativeMethods.VK_SHIFT);
+        SetDown(state, NativeMethods.VK_CONTROL);
+        SetDown(state, NativeMethods.VK_MENU);
+        SetDown(state, NativeMethods.VK_LSHIFT);
+        SetDown(state, NativeMethods.VK_RSHIFT);
+        SetDown(state, NativeMethods.VK_LCONTROL);
+        SetDown(state, NativeMethods.VK_RCONTROL);
+        SetDown(state, NativeMethods.VK_LMENU);
+        SetDown(state, NativeMethods.VK_RMENU);
+        if (_capsOn)
+            state[NativeMethods.VK_CAPITAL] = 0x01;
+        if (_numOn)
+            state[NativeMethods.VK_NUMLOCK] = 0x01;
+
         var sb = new StringBuilder(8);
-        int result = NativeMethods.ToUnicode(vk, scan, state, sb, sb.Capacity, 0);
-        if (result == 1 && !char.IsControl(sb[0]))
-            return sb[0];
-        return null;
+        uint flags = ModifierDown(NativeMethods.VK_MENU) ? 1u : 0u;
+        int result = NativeMethods.ToUnicode(vk, scan, state, sb, sb.Capacity, flags);
+        if (result <= 0)
+            return null;
+
+        var chars = new StringBuilder(result);
+        for (int i = 0; i < result; i++)
+        {
+            if (!char.IsControl(sb[i]))
+                chars.Append(sb[i]);
+        }
+        return chars.Length == 0 ? null : chars.ToString();
     }
+
+    private static void SetDown(byte[] state, int vk)
+    {
+        if (ModifierDown(vk))
+            state[vk] = 0x80;
+    }
+
+    // Best-effort seed for toggle keys — a wrong guess self-corrects on the
+    // next press, since every press is tracked in the hook from then on.
+    private static bool ToggledOn(int vk)
+        => (NativeMethods.GetAsyncKeyState(vk) & 0x0001) != 0;
 }

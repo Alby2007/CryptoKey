@@ -9,43 +9,72 @@ internal static class KeyVerifier
 
     /// <summary>
     /// True when the enrolled device is present AND its keyfile secret
-    /// verifies against the stored hash.
+    /// verifies against the stored hash. Never throws — failures mean "not
+    /// verified", so callers can safely fail closed.
     /// </summary>
     public static bool Verify(KeyConfig config, out string detail)
     {
-        UsbDisk? disk = UsbMonitor.FindDisk(config.DeviceSerial);
+        UsbDisk? disk;
+        try
+        {
+            disk = UsbMonitor.FindDisk(config.DeviceSerial);
+        }
+        catch (Exception ex)
+        {
+            detail = $"device enumeration failed: {ex.Message}";
+            return false;
+        }
         if (disk == null)
         {
             detail = "enrolled device not present";
             return false;
         }
+        return Verify(config, disk, out detail);
+    }
 
-        string? letter = disk.DriveLetters.FirstOrDefault();
-        if (letter == null)
+    /// <summary>Verify a device the caller already located (skips re-enumeration).</summary>
+    public static bool Verify(KeyConfig config, UsbDisk disk, out string detail)
+    {
+        if (disk.DriveLetters.Count == 0)
         {
             detail = "device has no mounted volume";
             return false;
         }
 
-        string path = KeyFilePath(letter);
-        byte[] secret;
-        try
+        // Multi-partition drives: try every mounted letter, not just the first.
+        string lastError = "no keyfile found";
+        foreach (string letter in disk.DriveLetters)
         {
-            secret = File.ReadAllBytes(path);
-        }
-        catch (IOException)
-        {
-            detail = $"keyfile missing at {path}";
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            detail = $"keyfile unreadable at {path}";
-            return false;
-        }
+            string path = KeyFilePath(letter);
+            byte[] secret;
+            try
+            {
+                secret = File.ReadAllBytes(path);
+            }
+            catch (IOException)
+            {
+                lastError = $"keyfile missing at {path}";
+                continue;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                lastError = $"keyfile unreadable at {path}";
+                continue;
+            }
+            catch (Exception ex)
+            {
+                lastError = $"keyfile read error at {path}: {ex.Message}";
+                continue;
+            }
 
-        bool ok = ConfigStore.VerifySecret(config, secret);
-        detail = ok ? "verified" : "keyfile secret mismatch";
-        return ok;
+            if (ConfigStore.VerifySecret(config, secret))
+            {
+                detail = "verified";
+                return true;
+            }
+            lastError = "keyfile secret mismatch";
+        }
+        detail = lastError;
+        return false;
     }
 }

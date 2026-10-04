@@ -11,12 +11,19 @@ internal sealed record UsbDisk(string DeviceId, string SerialNumber, string Mode
 /// </summary>
 internal sealed class UsbMonitor : Form
 {
-    /// <summary>Raised on the UI thread whenever target-device presence flips.</summary>
-    public event EventHandler? PresenceChanged;
+    /// <summary>Raised on the UI thread when target presence flips; arg = now present.</summary>
+    public event Action<bool>? PresenceChanged;
+
+    /// <summary>Raised on the UI thread after every check; arg = the disk, or null.</summary>
+    public event Action<UsbDisk?>? PresenceChecked;
+
+    private const int MaxConsecutiveErrors = 3;
 
     private readonly System.Windows.Forms.Timer _pollTimer;
     private readonly string _targetSerial;
     private bool _lastPresent;
+    private int _consecutiveErrors;
+    private int _checkInFlight;
 
     public UsbMonitor(string targetSerial)
     {
@@ -37,7 +44,21 @@ internal sealed class UsbMonitor : Form
         _pollTimer.Start();
     }
 
-    public bool IsTargetPresent() => FindDisk(_targetSerial) != null;
+    /// <summary>Live-adjust the poll interval. Call on the UI thread.</summary>
+    public void SetPollInterval(int ms)
+        => _pollTimer.Interval = Math.Clamp(ms, 250, 60_000);
+
+    public bool IsTargetPresent()
+    {
+        try
+        {
+            return FindDisk(_targetSerial) != null;
+        }
+        catch (Exception)
+        {
+            return false; // can't prove the key is there — callers fail closed
+        }
+    }
 
     protected override void WndProc(ref Message m)
     {
@@ -50,14 +71,62 @@ internal sealed class UsbMonitor : Form
         base.WndProc(ref m);
     }
 
+    // WMI runs off the UI thread — enumeration can take hundreds of ms, and
+    // stalling the message loop delays the low-level keyboard hook, which is
+    // exactly how keystrokes leak past the lock during a device storm.
     private void CheckNow()
     {
-        bool present = IsTargetPresent();
+        if (Interlocked.Exchange(ref _checkInFlight, 1) != 0)
+            return; // a check is already running — coalesce
+        Task.Run(() =>
+        {
+            UsbDisk? disk = null;
+            Exception? error = null;
+            try
+            {
+                disk = FindDisk(_targetSerial);
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+            try
+            {
+                BeginInvoke(new Action(() => ApplyCheck(disk, error)));
+            }
+            catch (Exception)
+            {
+                // Window gone — shutting down.
+            }
+            Interlocked.Exchange(ref _checkInFlight, 0);
+        });
+    }
+
+    // Runs back on the UI thread with the enumeration result.
+    private void ApplyCheck(UsbDisk? disk, Exception? error)
+    {
+        if (error != null)
+        {
+            // WMI hiccups during device storms are normal — tolerate a few,
+            // then fail closed so a dead WMI service can't leave us unlocked.
+            _consecutiveErrors++;
+            Console.WriteLine($"[guard] USB enumeration error #{_consecutiveErrors}: {error.Message}");
+            if (_consecutiveErrors < MaxConsecutiveErrors)
+                return; // transient — keep last known state
+            disk = null;
+        }
+        else
+        {
+            _consecutiveErrors = 0;
+        }
+
+        bool present = disk != null;
         if (present != _lastPresent)
         {
             _lastPresent = present;
-            PresenceChanged?.Invoke(this, EventArgs.Empty);
+            PresenceChanged?.Invoke(present);
         }
+        PresenceChecked?.Invoke(disk);
     }
 
     public static UsbDisk? FindDisk(string serial)
@@ -68,8 +137,10 @@ internal sealed class UsbMonitor : Form
     {
         var disks = new List<UsbDisk>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT DeviceID, SerialNumber, Model FROM Win32_DiskDrive WHERE InterfaceType='USB'");
-        foreach (ManagementObject drive in searcher.Get())
+            "SELECT DeviceID, SerialNumber, Model FROM Win32_DiskDrive " +
+            "WHERE InterfaceType='USB' OR MediaType LIKE 'Removable%' OR MediaType LIKE 'External%'");
+        using var results = searcher.Get();
+        foreach (ManagementObject drive in results)
         {
             using (drive)
             {
@@ -92,32 +163,38 @@ internal sealed class UsbMonitor : Form
 
         using (var searcher = new ManagementObjectSearcher(
                    "SELECT Antecedent, Dependent FROM Win32_DiskDriveToDiskPartition"))
-        foreach (ManagementObject assoc in searcher.Get())
         {
-            using (assoc)
+            using var results = searcher.Get();
+            foreach (ManagementObject assoc in results)
             {
-                string? diskId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
-                if (string.Equals(diskId, deviceId, StringComparison.OrdinalIgnoreCase))
+                using (assoc)
                 {
-                    string? partId = ExtractDeviceId(assoc["Dependent"]?.ToString());
-                    if (partId != null)
-                        partitionIds.Add(partId);
+                    string? diskId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
+                    if (string.Equals(diskId, deviceId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string? partId = ExtractDeviceId(assoc["Dependent"]?.ToString());
+                        if (partId != null)
+                            partitionIds.Add(partId);
+                    }
                 }
             }
         }
 
         using (var searcher = new ManagementObjectSearcher(
                    "SELECT Antecedent, Dependent FROM Win32_LogicalDiskToPartition"))
-        foreach (ManagementObject assoc in searcher.Get())
         {
-            using (assoc)
+            using var results = searcher.Get();
+            foreach (ManagementObject assoc in results)
             {
-                string? partId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
-                if (partId != null && partitionIds.Contains(partId, StringComparer.OrdinalIgnoreCase))
+                using (assoc)
                 {
-                    string? letter = ExtractDeviceId(assoc["Dependent"]?.ToString());
-                    if (letter != null)
-                        letters.Add(letter);
+                    string? partId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
+                    if (partId != null && partitionIds.Contains(partId, StringComparer.OrdinalIgnoreCase))
+                    {
+                        string? letter = ExtractDeviceId(assoc["Dependent"]?.ToString());
+                        if (letter != null)
+                            letters.Add(letter);
+                    }
                 }
             }
         }

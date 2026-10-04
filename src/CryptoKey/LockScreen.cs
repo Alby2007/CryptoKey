@@ -9,20 +9,32 @@ internal sealed class LockScreen : IDisposable
     private const string DefaultStatus =
         "Insert your CryptoKey, or type the failsafe passphrase and press Enter.";
 
+    /// <summary>Raised after each topmost re-assert (lets the input locker re-clip).</summary>
+    public event Action? ReassertTick;
+
     private readonly List<LockForm> _forms = new();
     private readonly System.Windows.Forms.Timer _topmostTimer;
+    private bool _visible;
+    private string _status = DefaultStatus;
+    private int _passLen;
+    private int _failedAttempts;
 
     public LockScreen()
     {
-        foreach (Screen screen in Screen.AllScreens)
-            _forms.Add(new LockForm(screen));
+        BuildForms();
 
         _topmostTimer = new System.Windows.Forms.Timer { Interval = 250 };
-        _topmostTimer.Tick += (_, _) => ReassertTopmost();
+        _topmostTimer.Tick += (_, _) =>
+        {
+            EnsureCoverage();
+            ReassertTopmost();
+        };
     }
 
     public void Show()
     {
+        EnsureCoverage();
+        _visible = true;
         foreach (LockForm f in _forms)
             f.Show();
         ReassertTopmost();
@@ -31,6 +43,7 @@ internal sealed class LockScreen : IDisposable
 
     public void Hide()
     {
+        _visible = false;
         _topmostTimer.Stop();
         foreach (LockForm f in _forms)
             f.Hide();
@@ -38,14 +51,57 @@ internal sealed class LockScreen : IDisposable
 
     public void SetPassphraseLength(int len)
     {
+        _passLen = len;
         foreach (LockForm f in _forms)
             f.SetPassphraseLength(len);
     }
 
     public void SetStatus(string message)
     {
+        _status = message;
         foreach (LockForm f in _forms)
             f.SetStatus(message);
+    }
+
+    public void SetFailedAttempts(int count)
+    {
+        _failedAttempts = count;
+        foreach (LockForm f in _forms)
+            f.SetFailedAttempts(count);
+    }
+
+    private void BuildForms()
+    {
+        foreach (Screen screen in Screen.AllScreens)
+        {
+            var f = new LockForm(screen);
+            f.SetStatus(_status);
+            f.SetPassphraseLength(_passLen);
+            f.SetFailedAttempts(_failedAttempts);
+            _forms.Add(f);
+        }
+    }
+
+    // Displays can appear while locked (dock, monitor wake, display mode
+    // change). Keep one form per current screen so nothing goes uncovered.
+    private void EnsureCoverage()
+    {
+        Screen[] screens = Screen.AllScreens;
+        bool current = screens.Length == _forms.Count
+            && _forms.Zip(screens).All(pair => pair.First.ScreenBounds == pair.Second.Bounds);
+        if (current)
+            return;
+
+        var old = _forms.ToList();
+        _forms.Clear();
+        BuildForms();
+        if (_visible)
+        {
+            foreach (LockForm f in _forms)
+                f.Show();
+        }
+        foreach (LockForm f in old)
+            f.Dispose();
     }
 
     public void ResetStatus() => SetStatus(DefaultStatus);
@@ -64,6 +120,7 @@ internal sealed class LockScreen : IDisposable
         }
         if (foreground != null)
             NativeMethods.SetForegroundWindow(foreground.Handle);
+        ReassertTick?.Invoke();
     }
 
     public void Dispose()
@@ -79,40 +136,52 @@ internal sealed class LockScreen : IDisposable
         private readonly Label _title;
         private readonly Label _pass;
         private readonly Label _status;
+        private readonly Label _attempts;
+
+        /// <summary>The screen bounds this form was built to cover.</summary>
+        public Rectangle ScreenBounds { get; }
 
         public LockForm(Screen screen)
         {
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
-            BackColor = Color.Black;
+            BackColor = Theme.Bg;
             TopMost = true;
             ShowInTaskbar = false;
             Cursor = Cursors.No;
+            ScreenBounds = screen.Bounds;
 
             _title = new Label
             {
                 Text = "CRYPTOKEY — LOCKED",
-                ForeColor = Color.Red,
-                Font = new Font("Consolas", 36f, FontStyle.Bold),
-                BackColor = Color.Black,
+                ForeColor = Theme.AccentRed,
+                Font = Theme.UIFont(32f, FontStyle.Bold),
+                BackColor = Theme.Bg,
                 AutoSize = true,
             };
             _pass = new Label
             {
-                ForeColor = Color.White,
-                Font = new Font("Consolas", 24f, FontStyle.Regular),
-                BackColor = Color.Black,
+                ForeColor = Theme.Text,
+                Font = Theme.UIFont(20f, FontStyle.Regular),
+                BackColor = Theme.Bg,
                 AutoSize = true,
             };
             _status = new Label
             {
                 Text = DefaultStatus,
-                ForeColor = Color.Gray,
-                Font = new Font("Consolas", 12f, FontStyle.Regular),
-                BackColor = Color.Black,
+                ForeColor = Theme.TextDim,
+                Font = Theme.UIFont(11f, FontStyle.Regular),
+                BackColor = Theme.Bg,
                 AutoSize = true,
             };
-            Controls.AddRange(new Control[] { _title, _pass, _status });
+            _attempts = new Label
+            {
+                ForeColor = Theme.AccentAmber,
+                Font = Theme.UIFont(11f, FontStyle.Regular),
+                BackColor = Theme.Bg,
+                AutoSize = true,
+            };
+            Controls.AddRange(new Control[] { _title, _pass, _status, _attempts });
             Bounds = screen.Bounds;
         }
 
@@ -128,6 +197,12 @@ internal sealed class LockScreen : IDisposable
             CenterLabels();
         }
 
+        public void SetFailedAttempts(int count)
+        {
+            _attempts.Text = count > 0 ? $"Failed unlock attempts: {count}" : "";
+            CenterLabels();
+        }
+
         protected override void OnLayout(LayoutEventArgs e)
         {
             base.OnLayout(e);
@@ -136,17 +211,36 @@ internal sealed class LockScreen : IDisposable
 
         private void CenterLabels()
         {
-            _title.Left = (ClientSize.Width - _title.Width) / 2;
-            _title.Top = (ClientSize.Height / 2) - 120;
-            _pass.Left = (ClientSize.Width - _pass.Width) / 2;
-            _pass.Top = (ClientSize.Height / 2) - 30;
-            _status.Left = (ClientSize.Width - _status.Width) / 2;
-            _status.Top = (ClientSize.Height / 2) + 60;
+            _title.Left = Math.Max(0, (ClientSize.Width - _title.Width) / 2);
+            _title.Top = Math.Max(0, (ClientSize.Height / 2) - 120);
+            _pass.Left = Math.Max(0, (ClientSize.Width - _pass.Width) / 2);
+            _pass.Top = Math.Max(0, (ClientSize.Height / 2) - 30);
+            _status.Left = Math.Max(0, (ClientSize.Width - _status.Width) / 2);
+            _status.Top = Math.Max(0, (ClientSize.Height / 2) + 60);
+            _attempts.Left = Math.Max(0, (ClientSize.Width - _attempts.Width) / 2);
+            _attempts.Top = Math.Max(0, (ClientSize.Height / 2) + 92);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _title.Font.Dispose();
+                _pass.Font.Dispose();
+                _status.Font.Dispose();
+                _attempts.Font.Dispose();
+            }
+            base.Dispose(disposing);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            e.Cancel = true;
+            // Resist user close and Task Manager "End task" (WM_CLOSE), but
+            // never ApplicationExit or WindowsShutDown — canceling those
+            // silently aborts Application.Exit() (the panic combo) and can
+            // stall Windows logoff.
+            if (e.CloseReason is CloseReason.UserClosing or CloseReason.TaskManagerClosing)
+                e.Cancel = true;
             base.OnFormClosing(e);
         }
     }
