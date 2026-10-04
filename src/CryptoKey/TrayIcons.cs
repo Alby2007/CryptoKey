@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 
 namespace CryptoKey;
 
@@ -91,26 +92,19 @@ internal sealed class TrayIcons : IDisposable
             new RectangleF(0.5f, 0.5f, size - 1f, size - 1f), size * 0.22f))
             g.FillPath(badgeBrush, path);
 
-        // Padlock: shackle arc + legs, rounded body, keyhole.
-        float shackleW = size * 0.40f;
-        float shackleX = (size - shackleW) / 2f;
-        float shackleTop = size * 0.16f;
-        using var shacklePen = new Pen(Color.White, Math.Max(1f, size * 0.075f));
-        g.DrawArc(shacklePen, shackleX, shackleTop, shackleW, shackleW, 180, 180);
-        float legTop = shackleTop + shackleW / 2f;
-        float legBottom = size * 0.52f;
-        g.DrawLine(shacklePen, shackleX, legTop, shackleX, legBottom);
-        g.DrawLine(shacklePen, shackleX + shackleW, legTop, shackleX + shackleW, legBottom);
-
-        using (var bodyBrush = new SolidBrush(Color.White))
-        using (var body = Theme.RoundedRect(
-            new RectangleF(size * 0.26f, size * 0.47f, size * 0.48f, size * 0.36f),
-            size * 0.06f))
-            g.FillPath(bodyBrush, body);
-
-        float kh = size * 0.10f;
-        using (var holeBrush = new SolidBrush(badge))
-            g.FillEllipse(holeBrush, (size - kh) / 2f, size * 0.58f, kh, kh);
+        // Padlock: the Segoe Fluent lock glyph (professionally hinted, and
+        // identical to the in-app iconography) rendered white on the badge.
+        // Grayscale AA — ClearType color-fringes on transparent backgrounds.
+        using var font = new Font(Glyphs.Family, size * 0.66f, GraphicsUnit.Pixel);
+        using var center = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        };
+        g.TextRenderingHint = TextRenderingHint.AntiAlias;
+        using (var lockBrush = new SolidBrush(Color.White))
+            g.DrawString(Glyphs.Lock, font, lockBrush,
+                new RectangleF(0, 0, size, size), center);
         return bmp;
     }
 
