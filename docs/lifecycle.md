@@ -27,10 +27,12 @@ HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` right after `SetState(Locked)`
 — even if both surfaces fail — persisting priors to `lockpolicies.json`
 first (existing backup = priors already captured, never re-read).
 Restore fires on every exit from the locked state: `UnlockNow` after a
-successful `Disengage`, `ReleaseInput` (fail-dead), `Dispose`, and
-`Start`'s `RestoreIfPending` for the died-while-locked respawn —
+successful `Disengage`, `ReleaseInput` (fail-dead), `Dispose`, and a
+`Restore` pass at `Start` for the died-while-locked respawn —
 `LockWorkStation` is the real boundary there, so clearing is correct
-even mid-OS-lock.
+even mid-OS-lock. Restore is read-gated: a value that isn't present is
+skipped before any writable handle is opened, so read-only Policies
+keys (hardened images) get a clean no-op rather than a kept backup.
 
 ## Secure-desktop engage sequence
 

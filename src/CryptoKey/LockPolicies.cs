@@ -7,12 +7,21 @@ namespace CryptoKey;
 /// Lock-time policy garnish: while the guard is locked, three HKCU policy
 /// DWORDs remove the affordances a casual attacker would reach for —
 /// Task Manager (kill path), Sign out/Switch user (the last unsealed
-/// SAS-level escape), and Start-menu power buttons.
+/// SAS-level escape), and Start-menu power buttons. In overlay mode this
+/// is more than cosmetic: CAD → Task Manager → end-process was the
+/// classic lock's clean kill path, and these values close it on standard
+/// images. (CAD "Switch user" survives — HideFastUserSwitching is an
+/// HKLM-only policy, outside user-mode scope.)
 ///
 /// The restore contract is the whole feature: each value's prior state is
-/// persisted to lockpolicies.json before we touch it — null = was absent
-/// (deleted on restore), a number = restored verbatim. A GPO/admin-set
-/// value goes back to exactly what it was.
+/// persisted to lockpolicies.json before we touch it — kind + raw value,
+/// verbatim for any registry type — so a GPO/admin-set value goes back to
+/// exactly what it was, an absent value is deleted, and a Policies subkey
+/// that only exists because we created it is dropped once empty.
+///
+/// Restore is read-gated: values are checked with a read-only open first,
+/// so images that deny the user writes to HKCU\...\Policies (but still
+/// allow reads) get a clean no-op instead of a permanently-kept backup.
 ///
 /// Honest scope: removes the GUI affordance, not the capability — taskkill,
 /// Stop-Process, Process Explorer and the Ctrl+Alt+Del power button are
@@ -21,6 +30,15 @@ namespace CryptoKey;
 internal static class LockPolicies
 {
     private sealed record Policy(string SubKey, string ValueName);
+
+    /// <summary>
+    /// One captured prior. Kind is a <see cref="RegistryValueKind"/> name,
+    /// "Absent" (no value), or "Unreadable" (read threw — captured so a
+    /// later delete is a deliberate fail-open, not a silent assumption).
+    /// Value holds the raw prior as JSON for verbatim restore; a legacy
+    /// backup is plain int? and upconverts on read.
+    /// </summary>
+    private sealed record PriorEntry(string Kind, JsonElement? Value, bool SubKeyExisted);
 
     private static readonly Policy[] Policies =
     [
@@ -43,9 +61,9 @@ internal static class LockPolicies
         {
             if (!File.Exists(BackupPath))
             {
-                var priors = new Dictionary<string, int?>();
+                var priors = new Dictionary<string, PriorEntry>();
                 foreach (Policy p in Policies)
-                    priors[p.ValueName] = ReadDword(p);
+                    priors[p.ValueName] = CapturePrior(p);
                 // Same atomic tmp+move pattern as config.json.
                 string tmp = BackupPath + ".tmp";
                 File.WriteAllText(tmp, JsonSerializer.Serialize(priors));
@@ -79,43 +97,64 @@ internal static class LockPolicies
 
     /// <summary>
     /// Put every policy back to its captured prior — absent priors get
-    /// deleted, numbered priors restored verbatim — then drop the backup.
-    /// No backup on disk = nothing was applied = a no-op.
+    /// deleted, present priors restored verbatim in their original kind —
+    /// then drop the backup. No backup on disk = nothing was applied = a
+    /// no-op. Also the crash path: a respawned guard finds a stale backup
+    /// here and restores before anything else.
     /// </summary>
     public static void Restore(Action<string> log)
     {
         if (!File.Exists(BackupPath))
             return;
-        Dictionary<string, int?>? priors = null;
-        try
-        {
-            priors = JsonSerializer.Deserialize<Dictionary<string, int?>>(
-                File.ReadAllText(BackupPath));
-        }
-        catch (Exception ex)
-        {
-            // Corrupt backup: priors unknowable — fail open (remove our
-            // values) rather than leave the user restricted forever.
-            log($"Lock policy backup unreadable ({ex.Message}) — clearing values.");
-        }
+        Dictionary<string, PriorEntry>? priors = LoadPriors(log);
         int failed = 0;
-        foreach (Policy p in Policies)
+        foreach (IGrouping<string, Policy> group in Policies.GroupBy(p => p.SubKey))
         {
-            try
+            using RegistryKey? readKey = Registry.CurrentUser.OpenSubKey(group.Key);
+            if (readKey == null)
+                continue; // subkey gone — any priors inside died with it
+            foreach (Policy p in group)
             {
-                using RegistryKey? key = Registry.CurrentUser.OpenSubKey(p.SubKey, writable: true);
-                if (key == null)
+                // Read-gate: if the value isn't there, there is nothing to
+                // do — never touch a writable handle for it. On read-only
+                // Policies keys this keeps restore a clean no-op instead
+                // of a permanently-failing write attempt.
+                if (readKey.GetValue(p.ValueName) == null)
                     continue;
-                if (priors != null && priors.TryGetValue(p.ValueName, out int? prior) && prior.HasValue)
-                    key.SetValue(p.ValueName, prior.Value, RegistryValueKind.DWord);
-                else
-                    key.DeleteValue(p.ValueName, throwOnMissingValue: false);
+                try
+                {
+                    PriorEntry entry =
+                        priors != null && priors.TryGetValue(p.ValueName, out PriorEntry? e)
+                            ? e
+                            : new PriorEntry("Absent", null, SubKeyExisted: true);
+                    using RegistryKey? wkey =
+                        Registry.CurrentUser.OpenSubKey(group.Key, writable: true);
+                    if (wkey == null)
+                        continue; // subkey vanished between opens — value died with it
+                    if (entry.Kind == "Absent" || entry.Kind == "Unreadable"
+                        || !TryMaterialize(entry, out object? value, out RegistryValueKind kind))
+                    {
+                        // Prior unknown or unrepresentable — fail open:
+                        // clear our value rather than leave a restriction
+                        // we can't fully account for.
+                        wkey.DeleteValue(p.ValueName, throwOnMissingValue: false);
+                        if (entry.Kind == "Unreadable")
+                            log($"policy {p.ValueName} prior was unreadable — cleared our value.");
+                    }
+                    else
+                        wkey.SetValue(p.ValueName, value!, kind);
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    log($"policy {p.ValueName} restore failed ({ex.Message}).");
+                }
             }
-            catch (Exception ex)
-            {
-                failed++;
-                log($"policy {p.ValueName} restore failed ({ex.Message}).");
-            }
+            // If the subkey only exists because we created it, drop it
+            // once it's empty again — leave no trace.
+            if (readKey.ValueCount == 0 && readKey.SubKeyCount == 0 && priors != null
+                && group.All(p => priors.TryGetValue(p.ValueName, out PriorEntry? e) && !e.SubKeyExisted))
+                TryDeleteEmptySubKey(group.Key);
         }
         if (failed == 0)
         {
@@ -132,21 +171,125 @@ internal static class LockPolicies
     }
 
     /// <summary>
-    /// Crash path: a respawned/relaunched guard finds a stale backup and
-    /// restores — same no-op-when-absent contract as Restore.
+    /// Read a policy's prior: verbatim kind + raw value when present,
+    /// Absent when the value (or subkey) isn't there, Unreadable when the
+    /// read itself throws.
     /// </summary>
-    public static void RestoreIfPending(Action<string> log) => Restore(log);
-
-    private static int? ReadDword(Policy p)
+    private static PriorEntry CapturePrior(Policy p)
     {
         try
         {
             using RegistryKey? key = Registry.CurrentUser.OpenSubKey(p.SubKey);
-            return key?.GetValue(p.ValueName) as int?;
+            if (key == null)
+                return new PriorEntry("Absent", null, SubKeyExisted: false);
+            object? raw = key.GetValue(
+                p.ValueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            if (raw == null)
+                return new PriorEntry("Absent", null, SubKeyExisted: true);
+            return new PriorEntry(
+                key.GetValueKind(p.ValueName).ToString(),
+                JsonSerializer.SerializeToElement(raw),
+                SubKeyExisted: true);
         }
         catch (Exception)
         {
-            return null; // treat unreadable as absent — restore will delete ours
+            // Can't prove absent — restore deletes ours fail-open.
+            return new PriorEntry("Unreadable", null, SubKeyExisted: true);
         }
+    }
+
+    /// <summary>Parse the backup — current schema, then the legacy int? map.</summary>
+    private static Dictionary<string, PriorEntry>? LoadPriors(Action<string> log)
+    {
+        string json;
+        try { json = File.ReadAllText(BackupPath); }
+        catch (Exception ex)
+        {
+            log($"Lock policy backup unreadable ({ex.Message}) — clearing values.");
+            return null;
+        }
+        try
+        {
+            var v2 = JsonSerializer.Deserialize<Dictionary<string, PriorEntry>>(json);
+            if (v2 != null)
+                return v2;
+        }
+        catch (Exception) { }
+        try
+        {
+            var v1 = JsonSerializer.Deserialize<Dictionary<string, int?>>(json);
+            if (v1 != null)
+                return v1.ToDictionary(
+                    kv => kv.Key,
+                    kv => kv.Value.HasValue
+                        ? new PriorEntry("DWord",
+                            JsonSerializer.SerializeToElement(kv.Value.Value),
+                            SubKeyExisted: true)
+                        : new PriorEntry("Absent", null, SubKeyExisted: true));
+        }
+        catch (Exception) { }
+        // Corrupt backup: priors unknowable — fail open (remove our
+        // values) rather than leave the user restricted forever.
+        log("Lock policy backup unreadable — clearing values.");
+        return null;
+    }
+
+    /// <summary>Rebuild the raw registry value from its captured JSON + kind.</summary>
+    private static bool TryMaterialize(
+        PriorEntry entry, out object? value, out RegistryValueKind kind)
+    {
+        value = null;
+        kind = RegistryValueKind.Unknown;
+        if (entry.Value is not JsonElement je)
+            return false;
+        try
+        {
+            switch (entry.Kind)
+            {
+                case "DWord":
+                    value = je.GetInt32();
+                    kind = RegistryValueKind.DWord;
+                    return true;
+                case "QWord":
+                    value = je.GetInt64();
+                    kind = RegistryValueKind.QWord;
+                    return true;
+                case "String":
+                    value = je.GetString();
+                    kind = RegistryValueKind.String;
+                    return true;
+                case "ExpandString":
+                    value = je.GetString();
+                    kind = RegistryValueKind.ExpandString;
+                    return true;
+                case "MultiString":
+                    value = je.EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
+                    kind = RegistryValueKind.MultiString;
+                    return true;
+                case "Binary":
+                    value = je.GetBytesFromBase64();
+                    kind = RegistryValueKind.Binary;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Remove an empty subkey we created — cosmetic, best-effort.</summary>
+    private static void TryDeleteEmptySubKey(string subKey)
+    {
+        try
+        {
+            int cut = subKey.LastIndexOf('\\');
+            using RegistryKey? parent =
+                Registry.CurrentUser.OpenSubKey(subKey[..cut], writable: true);
+            parent?.DeleteSubKey(subKey[(cut + 1)..], throwOnMissingSubKey: false);
+        }
+        catch (Exception) { }
     }
 }

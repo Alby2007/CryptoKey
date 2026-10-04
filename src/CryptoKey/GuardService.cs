@@ -131,7 +131,7 @@ internal sealed class GuardService : IDisposable
         // A stale backup means the last guard died while locked — restore
         // the user's policies before anything else. Moot under the OS lock
         // screen anyway; re-applied on the next lock.
-        LockPolicies.RestoreIfPending(Log);
+        LockPolicies.Restore(Log);
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
         // Supervisor: bring the watchdog up now, then re-check every 5s —
         // a killed watchdog gets respawned; a disabled setting stands it down.
@@ -343,7 +343,7 @@ internal sealed class GuardService : IDisposable
         _surface.ReleaseInput();
         // Fail-dead frees the policies with the lock — restore is a no-op
         // when nothing was applied.
-        LockPolicies.RestoreIfPending(Log);
+        LockPolicies.Restore(Log);
     }
 
     // Removal locks instantly (when armed). Arrival deliberately does nothing
@@ -822,7 +822,7 @@ internal sealed class GuardService : IDisposable
         // takeover handoff). Ungraceful deaths never reach this — by design.
         _watchdogTimer?.Dispose();
         _supervisor.Stop();
-        LockPolicies.RestoreIfPending(Log);
+        LockPolicies.Restore(Log);
         _surface.Dispose();
         _monitor.Dispose();
     }

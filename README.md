@@ -143,12 +143,15 @@ dotnet run --project src/CryptoKey -- enroll
   user enrolling the same drive overwrites your envelope (single-slot file),
   and yours then fails to unwrap. One enrolled user per drive.
 - While locked, HKCU policies hide Task Manager, Sign out/Switch user, and
-  Start-menu power buttons — priors are backed up and restored on unlock.
-  Cosmetic layer: `taskkill`/Process Explorer still work, the Ctrl+Alt+Del
-  power button can't be removed from user mode, and locked-down images
+  Start-menu power buttons — in overlay mode this closes the CAD →
+  Task Manager → end-process kill path, the classic lock's main weakness.
+  Priors (any registry kind) are backed up and restored verbatim on
+  unlock. `taskkill`/Process Explorer still work, the Ctrl+Alt+Del power
+  button can't be removed from user mode, and locked-down images
   (or GPO) that deny writes to `HKCU\...\Policies` mean partial/no
-  coverage — run the guard elevated there. If the machine reboots while
-  locked the policies persist until the guard next starts and restores.
+  coverage — run the guard elevated there. If the guard dies while
+  locked (reboot, or a kill with the watchdog off) the policies persist
+  until the guard next starts and restores.
 - A running guard rewrites `config.json` on every rotation — kill the guard
   (`cryptokey quit`) before editing it by hand, or your edits are lost.
 - Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC

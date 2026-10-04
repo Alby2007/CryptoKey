@@ -99,7 +99,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `Local\CryptoKeyWatchdog` | mutex | One supervisor watchdog per session — spawned only when absent |
 | `Local\CryptoKeyWatchdogStop` | named event (manual-reset) | Every graceful guard exit sets it — clean deaths never respawn |
 | `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
-| `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked (`null` = was absent) — tmp+move atomic; deleted on restore; a stale file self-heals at next `Start` |
+| `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — tmp+move atomic; deleted on restore; a stale file self-heals at next `Start` |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Module inventory (`src/CryptoKey`)

@@ -71,7 +71,7 @@ lives only on the drive.
 | `Guard.StrictTamper` | Stale keyfiles never count as the key factor — default `false` |
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
-| `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Prior values backed up to `lockpolicies.json` and restored on unlock |
+| `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
 
 ## Keyfile — `<drive>:\.cryptokey`
 
