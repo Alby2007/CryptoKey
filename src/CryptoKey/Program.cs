@@ -57,32 +57,34 @@ internal static class Program
 
         HideConsoleIfOwned();
         ApplicationConfiguration.Initialize();
+        Application.SetColorMode(SystemColorMode.Dark);
+        Animator.Enabled = config.Guard.Animations;
 
         using var service = new GuardService(config, devMode);
-        using var tray = new TrayApp(service, config, devMode);
+        using var shell = new AppShell(service, config, devMode);
         using var ipc = new IpcServer(service.InvokeTarget,
             line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
-                ? OpenDashboard(tray)
+                ? OpenWindow(shell)
                 : service.DispatchCommand(line));
         Application.ThreadException += (_, e) =>
         {
-            Console.WriteLine($"[guard] Fatal UI error: {e.Exception.Message}");
+            Console.WriteLine($"[guard] Fatal UI error: {e.Exception}");
             try { service.ReleaseInput(); } catch { }
             Environment.Exit(2);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            Console.WriteLine($"[guard] Fatal background error: {((Exception)e.ExceptionObject).Message}");
+            Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
 
         service.Start();
         ipc.Start();
-        tray.OpenDashboard();
+        shell.OpenWindow();
         Application.Run();
         return 0;
     }
 
-    private static string OpenDashboard(TrayApp tray)
+    private static string OpenWindow(AppShell shell)
     {
-        tray.OpenDashboard();
+        shell.OpenWindow();
         return "ok opened";
     }
 
@@ -136,12 +138,14 @@ internal static class Program
             Console.WriteLine("DEV MODE: panic exit is Ctrl+Alt+Shift+F12.");
 
         ApplicationConfiguration.Initialize();
+        Application.SetColorMode(SystemColorMode.Dark);
+        Animator.Enabled = config.Guard.Animations;
 
         using var service = new GuardService(config, devMode);
-        using var tray = new TrayApp(service, config, devMode);
+        using var shell = new AppShell(service, config, devMode);
         using var ipc = new IpcServer(service.InvokeTarget,
             line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
-                ? OpenDashboard(tray)
+                ? OpenWindow(shell)
                 : service.DispatchCommand(line));
         // A UI-thread exception while locked can leave input swallowed behind
         // a dead overlay — an invisible soft-brick. Fail dead instead: free

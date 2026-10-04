@@ -19,6 +19,7 @@ internal sealed class GuardSettings
     public int PollIntervalMs { get; set; } = 1000;
     public bool LockOnRemoval { get; set; } = true;
     public bool BalloonTips { get; set; } = true;
+    public bool Animations { get; set; } = true;
 }
 
 internal static class ConfigStore

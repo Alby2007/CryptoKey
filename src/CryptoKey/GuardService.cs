@@ -43,12 +43,21 @@ internal sealed class GuardService : IDisposable
     /// <summary>Raised on the UI thread whenever the status snapshot changes.</summary>
     public event Action<StatusSnapshot>? StateChanged;
 
+    /// <summary>Raised on every log line (timestamped) — feeds the dashboard activity list.</summary>
+    public event Action<string>? ActivityLogged;
+
+    private readonly List<string> _activity = new();
+
+    /// <summary>Recent log lines, oldest first (for UI backfill).</summary>
+    public IReadOnlyList<string> RecentActivity => _activity;
+
     /// <summary>Message-pump owner used to marshal pipe commands onto the UI thread.</summary>
     public Control InvokeTarget => _monitor;
 
     public void Start()
     {
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
+        _lock.SetAnimations(_config.Guard.Animations);
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
             $"auto-lock {( _config.Guard.LockOnRemoval ? "on" : "off")}).");
         UsbDisk? disk = null;
@@ -153,6 +162,9 @@ internal sealed class GuardService : IDisposable
         _config.Guard.PollIntervalMs = ms;
         _monitor.SetPollInterval(ms);
     }
+
+    /// <summary>Live-apply the reduce-motion setting to the lock overlay.</summary>
+    public void ApplyMotion(bool enabled) => _lock.SetAnimations(enabled);
 
     /// <summary>Immediately drop the input hooks and cursor clip (fatal-error path).</summary>
     public void ReleaseInput() => _input.Unlock();
@@ -316,8 +328,15 @@ internal sealed class GuardService : IDisposable
         StateChanged?.Invoke(snap);
     }
 
-    private static void Log(string message)
-        => Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+    private void Log(string message)
+    {
+        string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+        Console.WriteLine(line);
+        _activity.Add(line);
+        if (_activity.Count > 200)
+            _activity.RemoveAt(0);
+        ActivityLogged?.Invoke(line);
+    }
 
     public void Dispose()
     {

@@ -2,8 +2,7 @@ namespace CryptoKey;
 
 /// <summary>
 /// System-tray front end for the guard: state-colored icon, dark context menu
-/// (Lock now / Pause / Resume / Settings / Quit), balloon tips on transitions.
-/// Quit is only enabled while unlocked — the honest anti-bypass rule.
+/// with glyphs, balloon tips on transitions. Quit only while unlocked.
 /// </summary>
 internal sealed class TrayApp : IDisposable
 {
@@ -11,8 +10,8 @@ internal sealed class TrayApp : IDisposable
 
     private readonly GuardService _service;
     private readonly KeyConfig _config;
-    private readonly bool _devMode;
-    private readonly TrayIcons _icons = new();
+    private readonly TrayIcons _icons;
+    private readonly Action<int> _openWindow;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _statusItem;
@@ -22,24 +21,27 @@ internal sealed class TrayApp : IDisposable
     private readonly ToolStripMenuItem _resumeItem;
     private readonly ToolStripMenuItem _quitItem;
     private readonly MessageWindow _msgWin;
-    private SettingsForm? _settings;
-    private DashboardForm? _dashboard;
     private GuardState? _iconState;
 
-    public TrayApp(GuardService service, KeyConfig config, bool devMode = false)
+    public TrayApp(GuardService service, KeyConfig config, TrayIcons icons,
+        Action<int> openWindow)
     {
         _service = service;
         _config = config;
-        _devMode = devMode;
+        _icons = icons;
+        _openWindow = openWindow;
 
         _statusItem = new ToolStripMenuItem("CryptoKey") { Enabled = false };
         _keyItem = new ToolStripMenuItem("") { Enabled = false };
-        var openItem = new ToolStripMenuItem("Open CryptoKey");
-        openItem.Click += (_, _) => OpenDashboard();
-        _lockItem = new ToolStripMenuItem("Lock now");
+        var openItem = new ToolStripMenuItem("Open CryptoKey")
+        { Image = Theme.GlyphBitmap(Glyphs.Home, Theme.Text) };
+        openItem.Click += (_, _) => _openWindow(0);
+        _lockItem = new ToolStripMenuItem("Lock now")
+        { Image = Theme.GlyphBitmap(Glyphs.Lock, Theme.AccentRed) };
         _lockItem.Click += (_, _) => _service.RequestLock();
 
-        _pauseItem = new ToolStripMenuItem("Pause auto-lock");
+        _pauseItem = new ToolStripMenuItem("Pause auto-lock")
+        { Image = Theme.GlyphBitmap(Glyphs.Pause, Theme.AccentAmber) };
         foreach (int mins in PauseChoices)
         {
             var item = new ToolStripMenuItem($"{mins} minutes");
@@ -48,13 +50,16 @@ internal sealed class TrayApp : IDisposable
             _pauseItem.DropDownItems.Add(item);
         }
 
-        _resumeItem = new ToolStripMenuItem("Resume");
+        _resumeItem = new ToolStripMenuItem("Resume")
+        { Image = Theme.GlyphBitmap(Glyphs.Play, Theme.AccentGreen) };
         _resumeItem.Click += (_, _) => _service.Resume();
 
-        var settingsItem = new ToolStripMenuItem("Settings…");
-        settingsItem.Click += (_, _) => ShowSettings();
+        var settingsItem = new ToolStripMenuItem("Settings…")
+        { Image = Theme.GlyphBitmap(Glyphs.Settings, Theme.TextDim) };
+        settingsItem.Click += (_, _) => _openWindow(2);
 
-        _quitItem = new ToolStripMenuItem("Quit");
+        _quitItem = new ToolStripMenuItem("Quit")
+        { Image = Theme.GlyphBitmap(Glyphs.Quit, Theme.TextDim) };
         _quitItem.Click += (_, _) => Application.Exit();
 
         _menu = new ContextMenuStrip { Renderer = new Theme.DarkMenuRenderer() };
@@ -73,7 +78,7 @@ internal sealed class TrayApp : IDisposable
             Icon = _icons.For(GuardState.Unlocked),
             Visible = true,
         };
-        _icon.MouseDoubleClick += (_, _) => OpenDashboard();
+        _icon.MouseDoubleClick += (_, _) => _openWindow(0);
 
         _msgWin = new MessageWindow();
         _msgWin.TaskbarCreated += OnTaskbarCreated;
@@ -133,33 +138,6 @@ internal sealed class TrayApp : IDisposable
         _quitItem.Enabled = s.State == GuardState.Unlocked;
     }
 
-    /// <summary>Show the main window, creating it on first use.</summary>
-    public void OpenDashboard()
-    {
-        if (_dashboard is { IsDisposed: false })
-        {
-            _dashboard.Show();
-            _dashboard.WindowState = FormWindowState.Normal;
-            _dashboard.Activate();
-            return;
-        }
-        _dashboard = new DashboardForm(_service, _config, _icons, _devMode);
-        _dashboard.FormClosed += (_, _) => _dashboard = null;
-        _dashboard.Show();
-    }
-
-    private void ShowSettings()
-    {
-        if (_settings is { IsDisposed: false })
-        {
-            _settings.Activate();
-            return;
-        }
-        _settings = new SettingsForm(_config, _service);
-        _settings.FormClosed += (_, _) => _settings = null;
-        _settings.Show();
-    }
-
     // Explorer restarts drop every tray icon; TaskbarCreated is the
     // "come back" broadcast — toggle visibility to re-register ours.
     private void OnTaskbarCreated()
@@ -174,9 +152,6 @@ internal sealed class TrayApp : IDisposable
         _icon.Visible = false;
         _icon.Dispose();
         _menu.Dispose();
-        _settings?.Dispose();
-        _dashboard?.Dispose();
-        _icons.Dispose();
     }
 
     private sealed class MessageWindow : NativeWindow

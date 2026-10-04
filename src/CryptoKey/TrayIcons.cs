@@ -3,27 +3,27 @@ using System.Drawing.Drawing2D;
 namespace CryptoKey;
 
 /// <summary>
-/// State-colored tray icons rendered at runtime: rounded-square badge with a
-/// white padlock glyph. One icon per GuardState, cached; underlying HICONs are
-/// destroyed on dispose.
+/// State-colored icons rendered at runtime: rounded-square badge with a white
+/// padlock glyph. Each state is a multi-resolution .ico (16–48 px PNG frames)
+/// so Windows picks a crisp size for tray, taskbar, and title bar.
 /// </summary>
 internal sealed class TrayIcons : IDisposable
 {
-    private const int Size = 32;
+    private static readonly int[] Sizes = { 16, 20, 24, 32, 48 };
 
-    private readonly Dictionary<GuardState, (Icon Icon, IntPtr Handle)> _cache = new();
+    private readonly Dictionary<GuardState, Icon> _cache = new();
 
     public Icon For(GuardState state)
     {
-        if (!_cache.TryGetValue(state, out var entry))
+        if (!_cache.TryGetValue(state, out Icon? icon))
         {
-            entry = Render(state);
-            _cache[state] = entry;
+            icon = BuildIcon(state);
+            _cache[state] = icon;
         }
-        return entry.Icon;
+        return icon;
     }
 
-    private static (Icon, IntPtr) Render(GuardState state)
+    private static Icon BuildIcon(GuardState state)
     {
         Color badge = state switch
         {
@@ -32,58 +32,79 @@ internal sealed class TrayIcons : IDisposable
             _ => Theme.AccentGreen,
         };
 
-        using var bmp = new Bitmap(Size, Size);
-        using (var g = Graphics.FromImage(bmp))
+        var frames = new List<byte[]>(Sizes.Length);
+        foreach (int size in Sizes)
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            using (var badgeBrush = new SolidBrush(badge))
-            using (var path = RoundedRect(0.5f, 0.5f, Size - 1f, Size - 1f, Size * 0.22f))
-                g.FillPath(badgeBrush, path);
-
-            // Padlock: shackle arc + legs, rounded body, keyhole.
-            float shackleW = Size * 0.40f;
-            float shackleX = (Size - shackleW) / 2f;
-            float shackleTop = Size * 0.16f;
-            using var shacklePen = new Pen(Color.White, Size * 0.075f);
-            g.DrawArc(shacklePen, shackleX, shackleTop, shackleW, shackleW, 180, 180);
-            float legTop = shackleTop + shackleW / 2f;
-            float legBottom = Size * 0.52f;
-            g.DrawLine(shacklePen, shackleX, legTop, shackleX, legBottom);
-            g.DrawLine(shacklePen, shackleX + shackleW, legTop, shackleX + shackleW, legBottom);
-
-            using (var bodyBrush = new SolidBrush(Color.White))
-            using (var body = RoundedRect(Size * 0.26f, Size * 0.47f, Size * 0.48f, Size * 0.36f, Size * 0.06f))
-                g.FillPath(bodyBrush, body);
-
-            float kh = Size * 0.10f;
-            using (var holeBrush = new SolidBrush(badge))
-                g.FillEllipse(holeBrush, (Size - kh) / 2f, Size * 0.58f, kh, kh);
+            using var bmp = RenderBadge(size, badge);
+            using var png = new MemoryStream();
+            bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+            frames.Add(png.ToArray());
         }
 
-        IntPtr hIcon = bmp.GetHicon();
-        return (Icon.FromHandle(hIcon), hIcon);
+        // Assemble a multi-frame ICO: ICONDIR + ICONDIRENTRY per frame + PNG data.
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((ushort)0);                  // reserved
+        w.Write((ushort)1);                  // type: icon
+        w.Write((ushort)frames.Count);
+        int offset = 6 + frames.Count * 16;
+        for (int i = 0; i < frames.Count; i++)
+        {
+            int s = Sizes[i];
+            w.Write((byte)(s >= 256 ? 0 : s)); // width
+            w.Write((byte)(s >= 256 ? 0 : s)); // height
+            w.Write((byte)0);                // palette
+            w.Write((byte)0);                // reserved
+            w.Write((ushort)1);              // planes
+            w.Write((ushort)32);             // bpp
+            w.Write(frames[i].Length);
+            w.Write(offset);
+            offset += frames[i].Length;
+        }
+        foreach (byte[] frame in frames)
+            w.Write(frame);
+        ms.Position = 0;
+        return new Icon(ms);
     }
 
-    private static GraphicsPath RoundedRect(float x, float y, float w, float h, float r)
+    private static Bitmap RenderBadge(int size, Color badge)
     {
-        var p = new GraphicsPath();
-        float d = r * 2f;
-        p.AddArc(x, y, d, d, 180, 90);
-        p.AddArc(x + w - d, y, d, d, 270, 90);
-        p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
-        p.AddArc(x, y + h - d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
+        var bmp = new Bitmap(size, size);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var badgeBrush = new SolidBrush(badge))
+        using (var path = Theme.RoundedRect(
+            new RectangleF(0.5f, 0.5f, size - 1f, size - 1f), size * 0.22f))
+            g.FillPath(badgeBrush, path);
+
+        // Padlock: shackle arc + legs, rounded body, keyhole.
+        float shackleW = size * 0.40f;
+        float shackleX = (size - shackleW) / 2f;
+        float shackleTop = size * 0.16f;
+        using var shacklePen = new Pen(Color.White, Math.Max(1f, size * 0.075f));
+        g.DrawArc(shacklePen, shackleX, shackleTop, shackleW, shackleW, 180, 180);
+        float legTop = shackleTop + shackleW / 2f;
+        float legBottom = size * 0.52f;
+        g.DrawLine(shacklePen, shackleX, legTop, shackleX, legBottom);
+        g.DrawLine(shacklePen, shackleX + shackleW, legTop, shackleX + shackleW, legBottom);
+
+        using (var bodyBrush = new SolidBrush(Color.White))
+        using (var body = Theme.RoundedRect(
+            new RectangleF(size * 0.26f, size * 0.47f, size * 0.48f, size * 0.36f),
+            size * 0.06f))
+            g.FillPath(bodyBrush, body);
+
+        float kh = size * 0.10f;
+        using (var holeBrush = new SolidBrush(badge))
+            g.FillEllipse(holeBrush, (size - kh) / 2f, size * 0.58f, kh, kh);
+        return bmp;
     }
 
     public void Dispose()
     {
-        foreach ((Icon icon, IntPtr handle) in _cache.Values)
-        {
+        foreach (Icon icon in _cache.Values)
             icon.Dispose();
-            NativeMethods.DestroyIcon(handle);
-        }
         _cache.Clear();
     }
 }
