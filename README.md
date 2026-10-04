@@ -41,7 +41,12 @@ tray — the guard keeps running.
 The Settings tab has a **Start with Windows** toggle that registers
 `cryptokey.exe guard` (tray-only, no window) in your per-user Run key —
 enable it from the exe you actually keep, since it stores the running
-exe's path.
+exe's path. The **Launch as administrator** sub-toggle registers a
+Scheduled Task with highest privileges instead (one UAC prompt when you
+enable it) so the lock covers elevated windows too; **Restart as admin**
+elevates the running instance in place. The Storage card can add/remove
+a Start Menu shortcut, and the dashboard activity feed persists to
+`%APPDATA%\CryptoKey\guard.log` (rotated at 256 KB).
 
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,
 **Settings…** (key info, passphrase change, poll interval, balloon tips),

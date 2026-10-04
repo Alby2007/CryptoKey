@@ -5,9 +5,16 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // Elevated helper: the parent app spawns this with runas when a
+        // startup-mode change needs admin rights (scheduled-task writes).
+        if (args.Length >= 2 && args[0].Equals("--set-startup", StringComparison.OrdinalIgnoreCase)
+            && Enum.TryParse<StartupMode>(args[1], true, out StartupMode sm))
+            return SetStartupMode(sm);
+
         // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
         if (args.Length == 0 || args[0].StartsWith("--"))
-            return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase));
+            return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase));
 
         switch (args[0].ToLowerInvariant())
         {
@@ -16,7 +23,8 @@ internal static class Program
             case "status":
                 return Status();
             case "guard":
-                return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase));
+                return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                    args.Contains("--takeover", StringComparer.OrdinalIgnoreCase));
             case "open":
                 return SendIpc("open");
             case "lock":
@@ -35,7 +43,7 @@ internal static class Program
         }
     }
 
-    private static int Gui(bool devMode)
+    private static int Gui(bool devMode, bool takeover)
     {
         if (!TryLoadConfig(out KeyConfig? config))
             return 1;
@@ -48,7 +56,7 @@ internal static class Program
                 return 1;
         }
 
-        using var singleInstance = new Mutex(true, @"Local\CryptoKeyGuard", out bool createdNew);
+        using Mutex singleInstance = AcquireGuardMutex(takeover, out bool createdNew);
         if (!createdNew)
         {
             // Guard already up — just raise its window.
@@ -117,7 +125,7 @@ internal static class Program
         return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
     }
 
-    private static int Guard(bool devMode)
+    private static int Guard(bool devMode, bool takeover)
     {
         if (!TryLoadConfig(out KeyConfig? config))
             return 1;
@@ -127,7 +135,7 @@ internal static class Program
             return 1;
         }
 
-        using var singleInstance = new Mutex(true, @"Local\CryptoKeyGuard", out bool createdNew);
+        using Mutex singleInstance = AcquireGuardMutex(takeover, out bool createdNew);
         if (!createdNew)
         {
             Console.WriteLine("Another guard instance is already running.");
@@ -163,6 +171,43 @@ internal static class Program
         ipc.Start();
         Application.Run();
         return 0;
+    }
+
+    private static int SetStartupMode(StartupMode mode)
+    {
+        try
+        {
+            StartupManager.SetMode(mode);
+            Console.WriteLine("ok");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(ex.Message);
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// Claims the single-guard mutex. With <paramref name="waitForRelease"/>,
+    /// retries for ~15s so a relaunch (e.g. elevated) can take over the moment
+    /// the old instance exits — no unguarded gap between the two.
+    /// </summary>
+    private static Mutex AcquireGuardMutex(bool waitForRelease, out bool createdNew)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        Mutex m;
+        do
+        {
+            m = new Mutex(true, @"Local\CryptoKeyGuard", out createdNew);
+            if (createdNew)
+                return m;
+            m.Dispose();
+            if (waitForRelease)
+                Thread.Sleep(250);
+        }
+        while (waitForRelease && DateTime.UtcNow < deadline);
+        return m;
     }
 
     private static bool TryLoadConfig(out KeyConfig? config)

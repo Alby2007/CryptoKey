@@ -56,6 +56,7 @@ internal sealed class GuardService : IDisposable
 
     public void Start()
     {
+        SeedActivityFromLog();
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
         _lock.SetAnimations(_config.Guard.Animations);
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
@@ -328,6 +329,9 @@ internal sealed class GuardService : IDisposable
         StateChanged?.Invoke(snap);
     }
 
+    private static string LogPath => Path.Combine(ConfigStore.ConfigDir, "guard.log");
+    private static string OldLogPath => Path.Combine(ConfigStore.ConfigDir, "guard.log.1");
+
     private void Log(string message)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
@@ -335,7 +339,31 @@ internal sealed class GuardService : IDisposable
         _activity.Add(line);
         if (_activity.Count > 200)
             _activity.RemoveAt(0);
+        try
+        {
+            Directory.CreateDirectory(ConfigStore.ConfigDir);
+            var fi = new FileInfo(LogPath);
+            if (fi.Exists && fi.Length > 256 * 1024)
+                File.Move(LogPath, OldLogPath, overwrite: true);
+            File.AppendAllText(LogPath, $"[{DateTime.Now:MM-dd HH:mm:ss}] {message}\r\n");
+        }
+        catch (Exception) { /* logging must never take down the guard */ }
         ActivityLogged?.Invoke(line);
+    }
+
+    /// <summary>Backfills the activity feed with the tail of the previous log.</summary>
+    private void SeedActivityFromLog()
+    {
+        try
+        {
+            if (!File.Exists(LogPath))
+                return;
+            string[] lines = File.ReadAllLines(LogPath);
+            foreach (string line in lines.TakeLast(60))
+                if (!string.IsNullOrWhiteSpace(line))
+                    _activity.Add(line);
+        }
+        catch (Exception) { }
     }
 
     public void Dispose()
