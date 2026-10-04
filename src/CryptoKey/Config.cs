@@ -56,6 +56,9 @@ internal sealed class GuardSettings
 
     /// <summary>"secure" (default) → private-desktop lock; "overlay" → classic.</summary>
     public string LockMode { get; set; } = "secure";
+
+    /// <summary>Persistent supervisor respawns the guard on ungraceful death.</summary>
+    public bool Watchdog { get; set; } = true;
 }
 
 internal static class ConfigStore

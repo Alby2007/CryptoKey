@@ -20,6 +20,7 @@ Hidden/infrastructure modes:
 ```console
 cryptokey --set-startup <Off|Normal|Elevated>   # elevated startup helper (UAC helper target)
 cryptokey --lock-watchdog <pid>                 # dead-man's switch spawned per secure engage
+cryptokey watchdog --parent <pid>               # persistent guard supervisor (spawned by the guard)
 cryptokey --release-desktop                     # SwitchDesktop → Default escape hatch
 ```
 
@@ -43,7 +44,7 @@ read timeout ~5 s.
 | `resume` | `ok resumed` / `err not paused` | |
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
-| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=…` | |
+| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 
 Security: DACL grants `GA` to the owning user's SID; a medium-integrity
@@ -69,6 +70,7 @@ lives only on the drive.
 | `Guard.UnlockPolicy` | `KeyOrPassphrase` (default) · `KeyAndPassphrase` · `KeyOnly` — enum-as-string |
 | `Guard.StrictTamper` | Stale keyfiles never count as the key factor — default `false` |
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
+| `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 
 ## Keyfile — `<drive>:\.cryptokey`
 
@@ -80,12 +82,13 @@ v1:  secret 64B  (legacy — verifies as pre-attestation, upgrades on rotation)
 attestation = HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)
 ```
 
-## Logs — `%APPDATA%\CryptoKey\guard.log`
+## Logs — `%APPDATA%\CryptoKey\guard.log` + `watchdog.log`
 
-Append-only, rotated to `guard.log.1` at ~256 KB, fail-safe (a logging
-error can never take the guard down). Persistent lines are timestamped
-`[MM-dd HH:mm:ss]`; the dashboard seeds the last 60 lines and renders live
-entries `[HH:mm:ss]`.
+Append-only, rotated to `.1` at ~256 KB, fail-safe (a logging error can
+never take the process down). Persistent lines are timestamped
+`[MM-dd HH:mm:ss]`; the dashboard seeds the last 60 `guard.log` lines and
+renders live entries `[HH:mm:ss]`. The supervisor writes its own
+`watchdog.log` — heartbeats, respawns, and stand-downs live there.
 
 ## Startup modes
 

@@ -12,6 +12,7 @@ internal sealed class DashboardPage : UserControl
     private readonly Badge _keyBadge;
     private readonly Badge _cloneBadge;
     private readonly Badge _devBadge;
+    private readonly Badge _wdBadge;
     private readonly Label _keyModel;
     private readonly Label _keySerial;
     private readonly Label _keyVolume;
@@ -94,8 +95,16 @@ internal sealed class DashboardPage : UserControl
             Text = "dev mode",
             BadgeColor = Theme.AccentAmber,
             Visible = devMode,
+            Margin = new Padding(0, 1, 6, 0),
         };
-        subRow.Controls.AddRange(new Control[] { _reasonLabel, _keyBadge, _cloneBadge, _devBadge });
+        _wdBadge = new Badge
+        {
+            Text = "watchdog",
+            BadgeColor = Theme.Accent,
+            Visible = false,
+        };
+        subRow.Controls.AddRange(new Control[]
+            { _reasonLabel, _keyBadge, _cloneBadge, _devBadge, _wdBadge });
         heroPanel.Controls.Add(_hero, 0, 0);
         heroPanel.Controls.Add(_stateLabel, 0, 1);
         heroPanel.Controls.Add(subRow, 0, 2);
@@ -356,9 +365,11 @@ internal sealed class DashboardPage : UserControl
             _keyVolume.Text = "insert the enrolled drive";
         }
         _cloneBadge.Visible = snap.TamperNote != null;
+        _wdBadge.Visible = snap.WatchdogAlive;
         _keyBadge.Size = _keyBadge.GetPreferredSize(Size.Empty);
         _cloneBadge.Size = _cloneBadge.GetPreferredSize(Size.Empty);
         _devBadge.Size = _devBadge.GetPreferredSize(Size.Empty);
+        _wdBadge.Size = _wdBadge.GetPreferredSize(Size.Empty);
 
         _lockBtn.Enabled = snap.State != GuardState.Locked;
         _resumeBtn.Enabled = snap.State == GuardState.Paused;

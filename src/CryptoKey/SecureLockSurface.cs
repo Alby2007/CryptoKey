@@ -172,7 +172,7 @@ internal sealed class SecureLockSurface : ILockSurface
 
         if (!NativeMethods.SwitchDesktop(_hLock))
         {
-            _engageError = "SwitchDesktop failed";
+            _engageError = $"SwitchDesktop failed (err {Marshal.GetLastWin32Error()})";
             TearDownLockThread();
             return false;
         }

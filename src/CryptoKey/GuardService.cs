@@ -15,6 +15,8 @@ internal sealed class GuardService : IDisposable
     private readonly bool _devMode;
     private readonly bool _forceClassic;
     private ILockSurface _surface;
+    private readonly Supervisor _supervisor;
+    private System.Threading.Timer? _watchdogTimer;
 
     private UsbDisk? _lastDisk;
     private string? _lastVerifyFailure;
@@ -36,6 +38,7 @@ internal sealed class GuardService : IDisposable
         _forceClassic = forceClassic;
         _monitor = new UsbMonitor(config.DeviceSerial);
         _surface = CreateSurface(config, devMode, forceClassic);
+        _supervisor = new Supervisor(msg => Log(msg));
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
@@ -66,6 +69,8 @@ internal sealed class GuardService : IDisposable
         // session is switched away can leave the user on an empty desktop.
         try { _surface.Disengage(); }
         catch (Exception) { }
+        // Graceful exit — stand the watchdog down so it doesn't respawn us.
+        _supervisor.Stop();
         Application.Exit();
     }
 
@@ -124,6 +129,11 @@ internal sealed class GuardService : IDisposable
     {
         SeedActivityFromLog();
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
+        // Supervisor: bring the watchdog up now, then re-check every 5s —
+        // a killed watchdog gets respawned; a disabled setting stands it down.
+        WatchdogTick();
+        _watchdogTimer = new System.Threading.Timer(
+            _ => WatchdogTick(), null, 5000, 5000);
         _surface.SetAnimations(_config.Guard.Animations);
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
             $"auto-lock {( _config.Guard.LockOnRemoval ? "on" : "off")}).");
@@ -150,6 +160,18 @@ internal sealed class GuardService : IDisposable
             MaybeAutoLock("key absent or unverified at startup");
         }
         EmitSnapshot();
+    }
+
+    private void WatchdogTick()
+    {
+        try
+        {
+            if (_config.Guard.Watchdog)
+                _supervisor.Ensure(Environment.ProcessId);
+            else
+                _supervisor.Stop(); // toggled off mid-run — stand it down
+        }
+        catch (Exception) { }
     }
 
     /// <summary>Manual lock — always locks, clears any pause.</summary>
@@ -244,14 +266,17 @@ internal sealed class GuardService : IDisposable
         if (State == GuardState.Locked)
             return false;
         Log("Quit requested — shutting down.");
-        // Defer the exit one pump turn so the IPC reply gets written first.
+        // Stand the watchdog down BEFORE the exit — quit is a clean death
+        // and must not respawn. Defer the exit one pump turn so the IPC
+        // reply gets written first.
+        _supervisor.Stop();
         _monitor.BeginInvoke(() => Application.Exit());
         return true;
     }
 
     public StatusSnapshot Snapshot()
         => new(State, _lastDisk != null, _lastDisk?.Model, _lastVerifyFailure,
-            _pausedUntil, _tamperNote, _keyVerifiedNow);
+            _pausedUntil, _tamperNote, _keyVerifiedNow, _supervisor.Alive);
 
     /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
     public string DispatchCommand(string line)
@@ -291,7 +316,8 @@ internal sealed class GuardService : IDisposable
                        $"pausedUntil={s.PausedUntil?.ToString("HH:mm:ss") ?? "-"} " +
                        $"tamper=\"{s.TamperNote ?? "-"}\" " +
                        $"keyVerified={_keyVerifiedNow} " +
-                       $"policy={_config.Guard.UnlockPolicy}";
+                       $"policy={_config.Guard.UnlockPolicy} " +
+                       $"watchdog={(s.WatchdogAlive ? "alive" : "down")}";
             default:
                 return $"err unknown command '{parts[0]}'";
         }
@@ -776,6 +802,11 @@ internal sealed class GuardService : IDisposable
 
     public void Dispose()
     {
+        // Every graceful exit funnels through Dispose — standing the
+        // watchdog down here catches paths beyond quit/panic (window close,
+        // takeover handoff). Ungraceful deaths never reach this — by design.
+        _watchdogTimer?.Dispose();
+        _supervisor.Stop();
         _surface.Dispose();
         _monitor.Dispose();
     }

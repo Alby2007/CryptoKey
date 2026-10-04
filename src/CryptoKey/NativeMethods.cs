@@ -180,6 +180,10 @@ internal static class NativeMethods
         public IntPtr dwExtraInfo;
     }
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool LockWorkStation();
+
     // ---- Desktops (secure lock surface) ----
 
     internal const uint DESKTOP_READOBJECTS = 0x0001;

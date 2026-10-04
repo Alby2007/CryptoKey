@@ -77,12 +77,18 @@ Flags:
 ```
 
 The secure lock runs the session on its own desktop — if CryptoKey is killed
-or crashes while locked, Windows does NOT return input on its own, so a
-tiny watchdog process (`cryptokey --lock-watchdog <pid>`) rides along with
-every secure lock: the moment the guard dies it switches input back to your
-desktop itself. As a second layer, `cryptokey --release-desktop` does the
-same by hand — e.g. from Task Manager's "Run new task" after Ctrl+Alt+Del,
-or the dev panic combo.
+or crashes while locked, Windows does NOT return input on its own, so two
+watchdogs cover it. A tiny per-engage process (`--lock-watchdog <pid>`)
+rides every secure lock: the moment the guard dies it switches input back
+to your desktop itself. And a persistent supervisor (`cryptokey watchdog`)
+heartbeats the guard over the control pipe: ~2 s after the guard dies it
+releases any stranded desktop, calls `LockWorkStation` if the guard was
+locked, and respawns `cryptokey guard` — while the guard respawns the
+watchdog within ~5 s if *it* dies. Clean exits (quit, panic, takeover) set
+a stand-down event so nothing respawns. As a manual layer,
+`cryptokey --release-desktop` does the desktop rescue by hand — e.g. from
+Task Manager's "Run new task" after Ctrl+Alt+Del, or the dev panic combo.
+Disable the supervisor in Settings → "Watchdog process".
 
 Double-clicking `cryptokey.exe` launches the dashboard (the console hides
 itself when there's no shell attached). Closing the window hides to the
@@ -119,7 +125,12 @@ dotnet run --project src/CryptoKey -- enroll
 - **Ctrl+Alt+Del cannot be blocked** from user mode — under the secure
   desktop the Ctrl+Alt+Del screen appears on the Default desktop, and Task
   Manager opened there can't see or reach the lock desktop. Killing the
-  process releases the desktop and returns input automatically.
+  guard is fail-closed though: the watchdog releases the desktop, locks the
+  workstation, and respawns it.
+- **Killing ONE process doesn't stick — killing BOTH does.** The guard and
+  watchdog respawn each other, but `taskkill /f /im cryptokey.exe` takes
+  the pair down in one call. That's the user-mode ceiling — a deterrent,
+  not a kernel boundary.
 - A desktop-switch failure could strand the session on an empty desktop —
   that's what `cryptokey --release-desktop` is for (keep the command in mind).
 - Elevated windows (e.g. admin Task Manager) resist the input hooks — and the

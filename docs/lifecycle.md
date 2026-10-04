@@ -87,6 +87,38 @@ Panic combo (`Ctrl+Alt+Shift+F12`, dev builds): `Disengage()` **then**
 desktop, so the order matters. It's checked in the hook *before* the
 cooldown gate, so it works during a passphrase freeze.
 
+## Mutual supervision
+
+```mermaid
+sequenceDiagram
+    participant GS as GuardService
+    participant SUP as Supervisor (guard-side)
+    participant WD as Watchdog process
+    participant IPC as cryptokey-ctl pipe
+
+    GS->>SUP: WatchdogTick() — at Start, then every 5 s
+    alt Guard.Watchdog on
+        SUP->>WD: mutex absent → spawn `watchdog --parent <pid>`
+    else toggled off
+        SUP->>WD: set CryptoKeyWatchdogStop → watchdog exits, stays down
+    end
+    loop every ~750 ms (3 misses ≈ 2 s dead)
+        WD->>IPC: status (500 ms timeout)
+        IPC-->>WD: ok state=… watchdog=… — last-seen locked flag
+    end
+    alt guard died while locked — fail closed
+        WD->>WD: SwitchDesktop(Default) → LockWorkStation → respawn guard
+    else guard died unlocked
+        WD->>WD: respawn guard (2 s backoff; 5 fails → LockWorkStation, then 30 s retry)
+    end
+    Note over GS,SUP: graceful exit (quit / panic / dispose / takeover)<br/>→ set stop event BEFORE dying → no respawn
+```
+
+`watchdog` exits immediately with no `config.json` — nothing to respawn
+into. It's deliberately dumb: no UI, no config parse, any pipe that
+answers is "the guard" — an orphaned watchdog adopts a restarted guard
+without a handshake.
+
 ## Secret ratchet sequence
 
 ```mermaid

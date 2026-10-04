@@ -15,10 +15,12 @@ for the rest.
 | Long-lived key cloning | Secret ratchet — a stale clone is flagged and burns out |
 | `config.json` tampering | Keyfile attestation MAC — tripwire, not gate |
 | Passphrase brute force | PBKDF2 + exponential input freeze enforced in the hook |
+| Single-process kill of the guard | Persistent watchdog — heartbeats the control pipe (~2 s dead-detection), fail-closed `LockWorkStation` + respawn if the guard died locked, respawn if unlocked. The guard respawns the watchdog the same way |
 
 | Does **not** defend against | Why |
 |---|---|
-| Same-user process killing the guard | Task Manager can always kill it — the watchdog just restores your desktop. Deterrent, not boundary |
+| Name-based mass kill (`taskkill /f /im cryptokey.exe`) | Both processes die in one call — the user-mode ceiling. The per-engage lock-watchdog still restores your desktop on a locked kill |
+| Wiping `config.json` + killing the pair | Nothing to respawn into — watchdog exits on missing config |
 | Ctrl+Alt+Del / On-Screen Keyboard | SAS and UIAccess can't be hooked from user mode (OSK bypasses the keyboard hook entirely) |
 | Firmware-level serial spoofing | WMI serials are what the drive reports; cheap drives report junk |
 | An attacker who can enroll their own drive | Enrolling requires interactive access to the app — an unlocked session is already lost |
@@ -118,7 +120,7 @@ Failure semantics:
 | What attacker sees | Empty desktop + the lock card — no taskbar, no windows | Your wallpaper behind a dark overlay |
 | Input containment | Structural + LL hooks on the lock thread | LL hooks swallow everything |
 | Reachable by Task Manager UI | No (lock UI lives on another desktop) | Yes (it's a window) |
-| Failure rescue | Watchdog process + `--release-desktop` + panic | Nothing to rescue — no switch happens |
+| Failure rescue | Lock-watchdog + supervisor + `--release-desktop` + panic | Supervisor only — no desktop to rescue |
 | Cost | Lock thread + watchdog process per engage | One-shot hooks + forms |
 
 Engage failures in secure mode **auto-fall-back to the overlay** — the lock

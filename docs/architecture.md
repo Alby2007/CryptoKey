@@ -13,7 +13,8 @@ flowchart TD
     B -->|"status / lock / pause / resume / quit"| CLI["CLI client<br/>one line over the pipe, exit"]
     B -->|"enroll"| ENR["Enroll CLI<br/>writes keyfile + config, pings guard"]
     B -->|"--set-startup"| SUH["Startup helper<br/>elevated schtasks/registry writes"]
-    B -->|"--lock-watchdog pid"| WD["Watchdog<br/>waits on parent, restores desktop"]
+    B -->|"--lock-watchdog pid"| WD["Lock watchdog<br/>waits on parent, restores desktop"]
+    B -->|"watchdog --parent pid"| PWD["Supervisor watchdog<br/>heartbeats the pipe,<br/>respawns the guard"]
     B -->|"--release-desktop"| RD["Escape hatch<br/>SwitchDesktop → Default"]
 ```
 
@@ -41,7 +42,11 @@ flowchart LR
         CS["ConfigStore<br/>atomic config.json I/O"]
         TRAY["TrayApp<br/>NotifyIcon"]
         UI["AppShell + pages<br/>dashboard"]
+        SUP["Supervisor<br/>mutex probe + spawn + stop"]
     end
+
+    SUP -->|"spawn if mutex absent (~5s)<br/>set stop-event on clean exit"| PWD["cryptokey watchdog<br/>persistent supervisor"]
+    PWD -->|"status heartbeat ~750ms<br/>respawn cryptokey guard"| IPC
 
     MON -- "presence / checked<br/>(marshaled to UI thread)" --> GS
     IPC -- "lock · pause · resume ·<br/>quit · status · reenrolled" --> GS
@@ -74,7 +79,8 @@ consume the same `_config` instance and the same event surface
 | **Lock thread** (secure mode, per engage) | `SetThreadDesktop` → `InputLocker` LL hooks → `LockForm` → own message pump | STA. Created fresh every engage; teardown closes the form and joins |
 | **Rotation worker** | `RotateKeyfiles` — pure file I/O on a pre-built envelope | Reads no mutable config; logs back via `BeginInvoke` |
 | **Passphrase worker** | PBKDF2 verify (~100k iterations) | Hook returns instantly; result marshaled back to UI |
-| **Watchdog process** | `Process.WaitForExit(parent)` → `SwitchDesktop(Default)` | Separate process, spawned before every secure switch, killed on clean disengage |
+| **Lock-watchdog process** | `Process.WaitForExit(parent)` → `SwitchDesktop(Default)` | Per-engage, spawned before every secure switch, killed on clean disengage — covers the kill-both window while locked |
+| **Supervisor watchdog process** | Pipe heartbeat (`status`) → release desktop → `LockWorkStation` → respawn `cryptokey guard` | Persistent, one per guard lifetime (`Local\CryptoKeyWatchdog` mutex); stands down on the `CryptoKeyWatchdogStop` event; killed watchdog is respawned by the guard's ~5 s liveness tick |
 
 The invariant the whole design defends: **the thread that installs the
 low-level hooks must pump** — anything that can stall a pump (WMI, USB
@@ -88,8 +94,11 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `config.json` | `%APPDATA%\CryptoKey\` | Atomic tmp+move writes; secret **hashes** only — the raw secret lives only on the drive |
 | `guard.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Append-only activity log, rotated at ~256 KB, fail-safe (can never take the guard down) |
 | `.cryptokey` | drive root, hidden+system | `"CKY2" ‖ DPAPI(secret ‖ attestation)` — bound to user+machine; tmp+move writes per letter |
-| `cryptokey-ctl` | named pipe | Per-user DACL + medium-integrity SACL (see security-model) |
+| `cryptokey-ctl` | named pipe | Per-user DACL + medium-integrity SACL (see security-model); doubles as the watchdog's heartbeat |
 | `Local\CryptoKeyGuard` | mutex | Single-instance + takeover handoff |
+| `Local\CryptoKeyWatchdog` | mutex | One supervisor watchdog per session — spawned only when absent |
+| `Local\CryptoKeyWatchdogStop` | named event (manual-reset) | Every graceful guard exit sets it — clean deaths never respawn |
+| `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Module inventory (`src/CryptoKey`)
@@ -108,5 +117,6 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `LockScreen.cs` / `Ui/LockForm.cs` | Overlay manager (per-monitor) / the lock card form itself |
 | `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, passphrase buffer, panic combo, hook-side cooldown |
 | `IpcServer.cs` / `IpcClient.cs` | Pipe ACLs + accept loop / one-shot CLI transport |
+| `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/`LockWorkStation` role + `Supervisor` — guard-side mutex probe, spawn, stop |
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |

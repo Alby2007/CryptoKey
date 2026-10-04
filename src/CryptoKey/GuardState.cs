@@ -14,4 +14,5 @@ internal sealed record StatusSnapshot(
     string? LastVerifyFailure,
     DateTime? PausedUntil,
     string? TamperNote,
-    bool KeyFactorArmed);
+    bool KeyFactorArmed,
+    bool WatchdogAlive);
