@@ -14,6 +14,10 @@ failsafe passphrase — to unlock.
   lock; key present → verify serial + keyfile hash → unlock. It lives in the
   system tray with a state-colored padlock (green = unlocked, red = locked,
   amber = paused), a dark context menu, and a settings window.
+- **Rolling keyfile** — every verified key session burns the secret and writes
+  the next generation (config keeps the previous hash so an interrupted
+  rotation heals). A replayed old secret still unlocks but logs a "possible
+  clone" tamper warning and re-poisons itself.
 - **Lock** = one borderless topmost dark overlay per monitor (topmost
   re-asserted every 250 ms), low-level keyboard + mouse hooks that swallow all
   input, and `ClipCursor`. The keyboard hook feeds the passphrase buffer before

@@ -82,13 +82,16 @@ internal static class Enrollment
 
         byte[] secret = RandomNumberGenerator.GetBytes(SecretBytes);
         string keyPath = KeyVerifier.KeyFilePath(letter);
+        string tmpPath = keyPath + ".tmp";
         try
         {
-            File.WriteAllBytes(keyPath, secret);
-            File.SetAttributes(keyPath, FileAttributes.Hidden | FileAttributes.System);
+            File.WriteAllBytes(tmpPath, secret);
+            File.SetAttributes(tmpPath, FileAttributes.Hidden | FileAttributes.System);
+            File.Move(tmpPath, keyPath, overwrite: true);
         }
         catch (Exception ex)
         {
+            try { File.Delete(tmpPath); } catch { }
             Console.WriteLine($"Failed to write keyfile to {keyPath}: {ex.Message}");
             return 1;
         }

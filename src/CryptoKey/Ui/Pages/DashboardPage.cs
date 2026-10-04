@@ -10,6 +10,7 @@ internal sealed class DashboardPage : UserControl
     private readonly Label _stateLabel;
     private readonly Label _reasonLabel;
     private readonly Badge _keyBadge;
+    private readonly Badge _cloneBadge;
     private readonly Badge _devBadge;
     private readonly Label _keyModel;
     private readonly Label _keySerial;
@@ -81,13 +82,20 @@ internal sealed class DashboardPage : UserControl
             Text = "key",
             Margin = new Padding(0, 1, 6, 0),
         };
+        _cloneBadge = new Badge
+        {
+            Text = "possible clone",
+            BadgeColor = Theme.AccentRed,
+            Visible = false,
+            Margin = new Padding(0, 1, 6, 0),
+        };
         _devBadge = new Badge
         {
             Text = "dev mode",
             BadgeColor = Theme.AccentAmber,
             Visible = devMode,
         };
-        subRow.Controls.AddRange(new Control[] { _reasonLabel, _keyBadge, _devBadge });
+        subRow.Controls.AddRange(new Control[] { _reasonLabel, _keyBadge, _cloneBadge, _devBadge });
         heroPanel.Controls.Add(_hero, 0, 0);
         heroPanel.Controls.Add(_stateLabel, 0, 1);
         heroPanel.Controls.Add(subRow, 0, 2);
@@ -332,7 +340,8 @@ internal sealed class DashboardPage : UserControl
                 ? Theme.AccentRed : Theme.AccentGreen;
             _keyModel.Text = snap.Model ?? "USB drive";
             _keySerial.Text = $"serial {_config.DeviceSerial}";
-            _keyVolume.Text = snap.LastVerifyFailure ?? "keyfile verified";
+            _keyVolume.Text = snap.LastVerifyFailure
+                ?? $"keyfile verified — generation {_config.RotationCount}";
         }
         else
         {
@@ -342,7 +351,9 @@ internal sealed class DashboardPage : UserControl
             _keySerial.Text = $"serial {_config.DeviceSerial}";
             _keyVolume.Text = "insert the enrolled drive";
         }
+        _cloneBadge.Visible = snap.TamperNote != null;
         _keyBadge.Size = _keyBadge.GetPreferredSize(Size.Empty);
+        _cloneBadge.Size = _cloneBadge.GetPreferredSize(Size.Empty);
         _devBadge.Size = _devBadge.GetPreferredSize(Size.Empty);
 
         _lockBtn.Enabled = snap.State != GuardState.Locked;

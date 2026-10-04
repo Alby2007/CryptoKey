@@ -1,5 +1,11 @@
 namespace CryptoKey;
 
+/// <summary>Result of checking a mounted device's keyfile against the config.</summary>
+internal sealed record KeyfileCheck(
+    SecretMatch Match,
+    string Detail,
+    IReadOnlyList<string> MatchedLetters);
+
 internal static class KeyVerifier
 {
     public const string KeyFileName = ".cryptokey";
@@ -9,8 +15,8 @@ internal static class KeyVerifier
 
     /// <summary>
     /// True when the enrolled device is present AND its keyfile secret
-    /// verifies against the stored hash. Never throws — failures mean "not
-    /// verified", so callers can safely fail closed.
+    /// verifies against the current or previous generation hash. Never
+    /// throws — failures mean "not verified", so callers fail closed.
     /// </summary>
     public static bool Verify(KeyConfig config, out string detail)
     {
@@ -35,13 +41,23 @@ internal static class KeyVerifier
     /// <summary>Verify a device the caller already located (skips re-enumeration).</summary>
     public static bool Verify(KeyConfig config, UsbDisk disk, out string detail)
     {
-        if (disk.DriveLetters.Count == 0)
-        {
-            detail = "device has no mounted volume";
-            return false;
-        }
+        KeyfileCheck check = Check(config, disk);
+        detail = check.Detail;
+        return check.Match != SecretMatch.None;
+    }
 
-        // Multi-partition drives: try every mounted letter, not just the first.
+    /// <summary>
+    /// Tri-state keyfile check across every mounted letter. A Current match on
+    /// any letter wins over Previous matches elsewhere — a stale file on one
+    /// partition can't shadow the current one on another.
+    /// </summary>
+    public static KeyfileCheck Check(KeyConfig config, UsbDisk disk)
+    {
+        if (disk.DriveLetters.Count == 0)
+            return new KeyfileCheck(SecretMatch.None, "device has no mounted volume", Array.Empty<string>());
+
+        var matched = new List<string>();
+        bool foundCurrent = false, foundPrevious = false;
         string lastError = "no keyfile found";
         foreach (string letter in disk.DriveLetters)
         {
@@ -67,14 +83,61 @@ internal static class KeyVerifier
                 continue;
             }
 
-            if (ConfigStore.VerifySecret(config, secret))
+            switch (ConfigStore.MatchSecret(config, secret))
             {
-                detail = "verified";
-                return true;
+                case SecretMatch.Current:
+                    foundCurrent = true;
+                    matched.Add(letter);
+                    break;
+                case SecretMatch.Previous:
+                    foundPrevious = true;
+                    matched.Add(letter);
+                    break;
+                default:
+                    lastError = "keyfile secret mismatch";
+                    break;
             }
-            lastError = "keyfile secret mismatch";
         }
-        detail = lastError;
-        return false;
+
+        if (foundCurrent)
+            return new KeyfileCheck(SecretMatch.Current,
+                $"verified — generation {config.RotationCount}", matched);
+        if (foundPrevious)
+            return new KeyfileCheck(SecretMatch.Previous,
+                $"stale — previous-generation secret (gen {Math.Max(0, config.RotationCount - 1)})",
+                matched);
+        return new KeyfileCheck(SecretMatch.None, lastError, matched);
+    }
+
+    /// <summary>
+    /// Writes a new-generation secret to every letter that already has a
+    /// keyfile — temp file, attributes, atomic move, then a read-back check.
+    /// Returns per-letter results ("A: ok" / "A: &lt;error&gt;").
+    /// </summary>
+    public static List<string> RotateKeyfiles(UsbDisk disk, byte[] secret)
+    {
+        var results = new List<string>();
+        foreach (string letter in disk.DriveLetters)
+        {
+            string path = KeyFilePath(letter);
+            if (!File.Exists(path))
+                continue;
+            string tmp = path + ".tmp";
+            try
+            {
+                File.WriteAllBytes(tmp, secret);
+                File.SetAttributes(tmp, FileAttributes.Hidden | FileAttributes.System);
+                File.Move(tmp, path, overwrite: true);
+                byte[] back = File.ReadAllBytes(path);
+                results.Add(back.AsSpan().SequenceEqual(secret)
+                    ? $"{letter} ok" : $"{letter} read-back mismatch");
+            }
+            catch (Exception ex)
+            {
+                try { File.Delete(tmp); } catch { }
+                results.Add($"{letter} {ex.Message}");
+            }
+        }
+        return results;
     }
 }

@@ -77,13 +77,31 @@ internal sealed class IpcServer : IDisposable
     private static NamedPipeServerStream CreatePipe()
     {
         string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
-        var security = new PipeSecurity();
-        security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
-        return NamedPipeServerStreamAcl.Create(
-            PipeName, PipeDirection.InOut,
-            NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
-            0, 0, security, HandleInheritability.None);
+
+        // Applying a SACL needs SE_SECURITY_PRIVILEGE — non-elevated guards
+        // can't set the integrity label, and don't need it: a medium-IL pipe
+        // is reachable by medium clients by default. Elevated guards must
+        // have it or the normal CLI can't write, so try SACL first and fall
+        // back to DACL-only.
+        try
+        {
+            var security = new PipeSecurity();
+            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
+            return Create(security);
+        }
+        catch (Exception)
+        {
+            var security = new PipeSecurity();
+            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})");
+            return Create(security);
+        }
+
+        static NamedPipeServerStream Create(PipeSecurity security)
+            => NamedPipeServerStreamAcl.Create(
+                PipeName, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                0, 0, security, HandleInheritability.None);
     }
 
     private string Dispatch(string line)

@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace CryptoKey;
 
 /// <summary>
@@ -18,6 +20,9 @@ internal sealed class GuardService : IDisposable
     private DateTime? _pausedUntil;
     private int _failedAttempts;
     private StatusSnapshot? _lastSnapshot;
+    private bool _verifiedEdge;
+    private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
+    private string? _tamperNote;
 
     public GuardService(KeyConfig config, bool devMode)
     {
@@ -72,10 +77,18 @@ internal sealed class GuardService : IDisposable
             Log($"USB enumeration failed at startup: {ex.Message}");
         }
         _lastDisk = disk;
-        if (disk != null && KeyVerifier.Verify(_config, disk, out string detail))
-            Log($"Key verified at startup ({detail}) — unlocked.");
+        if (disk != null)
+        {
+            KeyfileCheck chk = KeyVerifier.Check(_config, disk);
+            if (chk.Match != SecretMatch.None)
+                Log($"Key verified at startup ({chk.Detail}) — unlocked.");
+            else
+                MaybeAutoLock("key absent or unverified at startup");
+        }
         else
+        {
             MaybeAutoLock("key absent or unverified at startup");
+        }
         EmitSnapshot();
     }
 
@@ -140,11 +153,16 @@ internal sealed class GuardService : IDisposable
             _config.SecretHash = fresh.SecretHash;
             _config.PassphraseSalt = fresh.PassphraseSalt;
             _config.PassphraseHash = fresh.PassphraseHash;
+            _config.PrevSecretHash = fresh.PrevSecretHash;
+            _config.RotationCount = fresh.RotationCount;
+            _config.LastRotationUtc = fresh.LastRotationUtc;
             _config.Guard = fresh.Guard;
             _monitor.SetTargetSerial(fresh.DeviceSerial); // also triggers a re-check
             _monitor.SetPollInterval(fresh.Guard.PollIntervalMs);
             _failedAttempts = 0;
             _lastVerifyFailure = null;
+            _verifiedEdge = false;
+            _tamperNote = null;
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
             return "ok re-enrolled";
         }
@@ -167,7 +185,8 @@ internal sealed class GuardService : IDisposable
     }
 
     public StatusSnapshot Snapshot()
-        => new(State, _lastDisk != null, _lastDisk?.Model, _lastVerifyFailure, _pausedUntil);
+        => new(State, _lastDisk != null, _lastDisk?.Model, _lastVerifyFailure,
+            _pausedUntil, _tamperNote);
 
     /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
     public string DispatchCommand(string line)
@@ -204,7 +223,8 @@ internal sealed class GuardService : IDisposable
                        $"key={(s.KeyPresent ? "present" : "absent")} " +
                        $"model=\"{s.Model ?? "-"}\" " +
                        $"verifyFail=\"{s.LastVerifyFailure ?? "-"}\" " +
-                       $"pausedUntil={s.PausedUntil?.ToString("HH:mm:ss") ?? "-"}";
+                       $"pausedUntil={s.PausedUntil?.ToString("HH:mm:ss") ?? "-"} " +
+                       $"tamper=\"{s.TamperNote ?? "-"}\"";
             default:
                 return $"err unknown command '{parts[0]}'";
         }
@@ -238,33 +258,111 @@ internal sealed class GuardService : IDisposable
         CheckPauseExpiry();
         if (disk == null)
         {
+            _verifiedEdge = false;
+            _tamperNote = null;
             EmitSnapshot();
             return;
         }
 
-        if (KeyVerifier.Verify(_config, disk, out string detail))
+        KeyfileCheck check = KeyVerifier.Check(_config, disk);
+        if (check.Match != SecretMatch.None)
         {
             _lastVerifyFailure = null;
+            bool edgeFlip = !_verifiedEdge;
+            _verifiedEdge = true;
+
+            if (check.Match == SecretMatch.Previous)
+            {
+                // Accepted (also the interrupted-rotation case) but loud —
+                // a replayed old secret is what a clone looks like.
+                _tamperNote = "possible clone — stale keyfile replayed";
+                Log("Keyfile presented a previous-generation secret — " +
+                    "possible clone or interrupted rotation.");
+            }
+            else
+            {
+                _tamperNote = null;
+            }
+
             if (State == GuardState.Locked)
                 UnlockNow();
+
+            // Burn the secret once per key session (edge), and whenever a
+            // stale file shows up (heals interrupted rotations), throttled.
+            if ((edgeFlip || check.Match == SecretMatch.Previous)
+                && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5))
+            {
+                _lastRotateAttemptUtc = DateTime.UtcNow;
+                TryRotate(disk);
+            }
         }
         else
         {
-            bool changed = detail != _lastVerifyFailure;
-            _lastVerifyFailure = detail;
+            _verifiedEdge = false;
+            _tamperNote = null;
+            bool changed = check.Detail != _lastVerifyFailure;
+            _lastVerifyFailure = check.Detail;
             if (State != GuardState.Locked)
             {
                 if (changed)
-                    Log($"Key stopped verifying ({detail}).");
+                    Log($"Key stopped verifying ({check.Detail}).");
                 MaybeAutoLock("key unverified");
             }
             else if (changed)
             {
-                Log($"Key detected but verification failed: {detail}");
-                _lock.SetStatus($"CryptoKey detected — {detail}. Or type the passphrase.");
+                Log($"Key detected but verification failed: {check.Detail}");
+                _lock.SetStatus($"CryptoKey detected — {check.Detail}. Or type the passphrase.");
             }
         }
         EmitSnapshot();
+    }
+
+    /// <summary>
+    /// Single-use ratchet: burn the secret the drive presented. Config first,
+    /// then the drive — a crash anywhere leaves the drive on the previous
+    /// generation, which still verifies as stale and heals on the next pass.
+    /// </summary>
+    private void TryRotate(UsbDisk disk)
+    {
+        byte[] next = RandomNumberGenerator.GetBytes(64);
+
+        string oldSecret = _config.SecretHash, oldPrev = _config.PrevSecretHash;
+        int oldCount = _config.RotationCount;
+        DateTime? oldRot = _config.LastRotationUtc;
+        ConfigStore.RotateSecret(_config, next);
+        try
+        {
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex)
+        {
+            // Roll the mutation back — memory, file, and drive must agree.
+            _config.SecretHash = oldSecret;
+            _config.PrevSecretHash = oldPrev;
+            _config.RotationCount = oldCount;
+            _config.LastRotationUtc = oldRot;
+            Log($"Rotation aborted — config save failed ({ex.Message}).");
+            return;
+        }
+
+        List<string> results;
+        try
+        {
+            results = KeyVerifier.RotateKeyfiles(disk, next);
+        }
+        catch (Exception ex)
+        {
+            Log($"Rotation write failed ({ex.Message}) — drive is stale, heals on retry.");
+            return;
+        }
+        if (results.Count == 0)
+            Log($"Config rotated to generation {_config.RotationCount} but no keyfile " +
+                "found on the drive — the drive secret is stale until it reappears.");
+        else if (results.All(r => r.EndsWith("ok")))
+            Log($"Keyfile rotated to generation {_config.RotationCount}.");
+        else
+            Log($"Rotated to generation {_config.RotationCount} with issues: " +
+                string.Join("; ", results) + ".");
     }
 
     private void CheckPauseExpiry()

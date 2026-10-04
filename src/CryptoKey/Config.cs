@@ -9,9 +9,19 @@ internal sealed class KeyConfig
     public string DeviceSerial { get; set; } = "";
     public string SecretSalt { get; set; } = "";
     public string SecretHash { get; set; } = "";
+    public string PrevSecretHash { get; set; } = "";
+    public int RotationCount { get; set; } = 1;
+    public DateTime? LastRotationUtc { get; set; }
     public string PassphraseSalt { get; set; } = "";
     public string PassphraseHash { get; set; } = "";
     public GuardSettings Guard { get; set; } = new();
+}
+
+internal enum SecretMatch
+{
+    None,
+    Current,
+    Previous,
 }
 
 internal sealed class GuardSettings
@@ -46,7 +56,9 @@ internal static class ConfigStore
     public static void Save(KeyConfig config)
     {
         Directory.CreateDirectory(ConfigDir);
-        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, JsonOptions));
+        string tmp = ConfigPath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(config, JsonOptions));
+        File.Move(tmp, ConfigPath, overwrite: true);
     }
 
     public static KeyConfig CreateNew(string serial, byte[] secret, string passphrase)
@@ -58,23 +70,49 @@ internal static class ConfigStore
             DeviceSerial = serial,
             SecretSalt = Convert.ToBase64String(secretSalt),
             SecretHash = Convert.ToBase64String(HashSecret(secret, secretSalt)),
+            RotationCount = 1,
             PassphraseSalt = Convert.ToBase64String(passSalt),
             PassphraseHash = Convert.ToBase64String(HashPassphrase(passphrase, passSalt)),
         };
     }
 
     public static bool VerifySecret(KeyConfig config, byte[] secret)
+        => MatchSecret(config, secret) == SecretMatch.Current;
+
+    /// <summary>
+    /// Current hash wins; a match only against the previous generation is
+    /// <see cref="SecretMatch.Previous"/> — still accepted (interrupted
+    /// rotation) but reported so the caller can flag it as a possible clone.
+    /// </summary>
+    public static SecretMatch MatchSecret(KeyConfig config, byte[] secret)
     {
         try
         {
             byte[] salt = Convert.FromBase64String(config.SecretSalt);
-            byte[] expected = Convert.FromBase64String(config.SecretHash);
-            return CryptographicOperations.FixedTimeEquals(HashSecret(secret, salt), expected);
+            byte[] hash = HashSecret(secret, salt);
+            if (CryptographicOperations.FixedTimeEquals(hash,
+                    Convert.FromBase64String(config.SecretHash)))
+                return SecretMatch.Current;
+            if (config.PrevSecretHash.Length > 0
+                && CryptographicOperations.FixedTimeEquals(hash,
+                    Convert.FromBase64String(config.PrevSecretHash)))
+                return SecretMatch.Previous;
+            return SecretMatch.None;
         }
         catch (Exception)
         {
-            return false; // corrupt or tampered config — never verify
+            return SecretMatch.None; // corrupt or tampered config — never verify
         }
+    }
+
+    /// <summary>Shifts the hash chain one generation forward.</summary>
+    public static void RotateSecret(KeyConfig config, byte[] newSecret)
+    {
+        config.PrevSecretHash = config.SecretHash;
+        byte[] salt = Convert.FromBase64String(config.SecretSalt);
+        config.SecretHash = Convert.ToBase64String(HashSecret(newSecret, salt));
+        config.RotationCount++;
+        config.LastRotationUtc = DateTime.UtcNow;
     }
 
     public static void ChangePassphrase(KeyConfig config, string newPassphrase)

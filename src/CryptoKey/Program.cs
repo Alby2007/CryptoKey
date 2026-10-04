@@ -264,7 +264,7 @@ internal static class Program
             string volumes = disk.DriveLetters.Count > 0 ? string.Join(", ", disk.DriveLetters) : "(no volume)";
             Console.WriteLine($"Key:           PRESENT — {disk.Model} on {volumes}");
             bool ok = KeyVerifier.Verify(config, disk, out string detail);
-            Console.WriteLine(ok ? "Keyfile:       verified" : $"Keyfile:       FAILED ({detail})");
+            Console.WriteLine(ok ? $"Keyfile:       {detail}" : $"Keyfile:       FAILED ({detail})");
             exitCode = ok ? 0 : 1;
         }
 

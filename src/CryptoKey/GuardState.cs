@@ -12,4 +12,5 @@ internal sealed record StatusSnapshot(
     bool KeyPresent,
     string? Model,
     string? LastVerifyFailure,
-    DateTime? PausedUntil);
+    DateTime? PausedUntil,
+    string? TamperNote);

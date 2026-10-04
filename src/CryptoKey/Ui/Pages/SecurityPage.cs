@@ -230,7 +230,7 @@ internal sealed class SecurityPage : UserControl
                         ? string.Join(", ", disk.DriveLetters)
                         : "no mounted volume";
                     bool ok = KeyVerifier.Verify(_config, disk, out string why);
-                    status = ok ? "PRESENT — keyfile verified" : $"PRESENT — {why}";
+                    status = $"PRESENT — {why}";
                     detail = $"{disk.Model} on {vols} — serial {_config.DeviceSerial}";
                 }
             }
