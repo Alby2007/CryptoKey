@@ -11,6 +11,7 @@ internal sealed class TrayApp : IDisposable
 
     private readonly GuardService _service;
     private readonly KeyConfig _config;
+    private readonly bool _devMode;
     private readonly TrayIcons _icons = new();
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
@@ -22,15 +23,19 @@ internal sealed class TrayApp : IDisposable
     private readonly ToolStripMenuItem _quitItem;
     private readonly MessageWindow _msgWin;
     private SettingsForm? _settings;
+    private DashboardForm? _dashboard;
     private GuardState? _iconState;
 
-    public TrayApp(GuardService service, KeyConfig config)
+    public TrayApp(GuardService service, KeyConfig config, bool devMode = false)
     {
         _service = service;
         _config = config;
+        _devMode = devMode;
 
         _statusItem = new ToolStripMenuItem("CryptoKey") { Enabled = false };
         _keyItem = new ToolStripMenuItem("") { Enabled = false };
+        var openItem = new ToolStripMenuItem("Open CryptoKey");
+        openItem.Click += (_, _) => OpenDashboard();
         _lockItem = new ToolStripMenuItem("Lock now");
         _lockItem.Click += (_, _) => _service.RequestLock();
 
@@ -55,7 +60,7 @@ internal sealed class TrayApp : IDisposable
         _menu = new ContextMenuStrip { Renderer = new Theme.DarkMenuRenderer() };
         _menu.Items.AddRange(new ToolStripItem[]
         {
-            _statusItem, _keyItem, new ToolStripSeparator(),
+            _statusItem, _keyItem, openItem, new ToolStripSeparator(),
             _lockItem, _pauseItem, _resumeItem, settingsItem,
             new ToolStripSeparator(), _quitItem,
         });
@@ -68,6 +73,7 @@ internal sealed class TrayApp : IDisposable
             Icon = _icons.For(GuardState.Unlocked),
             Visible = true,
         };
+        _icon.MouseDoubleClick += (_, _) => OpenDashboard();
 
         _msgWin = new MessageWindow();
         _msgWin.TaskbarCreated += OnTaskbarCreated;
@@ -127,6 +133,21 @@ internal sealed class TrayApp : IDisposable
         _quitItem.Enabled = s.State == GuardState.Unlocked;
     }
 
+    /// <summary>Show the main window, creating it on first use.</summary>
+    public void OpenDashboard()
+    {
+        if (_dashboard is { IsDisposed: false })
+        {
+            _dashboard.Show();
+            _dashboard.WindowState = FormWindowState.Normal;
+            _dashboard.Activate();
+            return;
+        }
+        _dashboard = new DashboardForm(_service, _config, _icons, _devMode);
+        _dashboard.FormClosed += (_, _) => _dashboard = null;
+        _dashboard.Show();
+    }
+
     private void ShowSettings()
     {
         if (_settings is { IsDisposed: false })
@@ -154,6 +175,7 @@ internal sealed class TrayApp : IDisposable
         _icon.Dispose();
         _menu.Dispose();
         _settings?.Dispose();
+        _dashboard?.Dispose();
         _icons.Dispose();
     }
 

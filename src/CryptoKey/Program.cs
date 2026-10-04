@@ -5,11 +5,9 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args.Length == 0)
-        {
-            Usage();
-            return 1;
-        }
+        // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
+        if (args.Length == 0 || args[0].StartsWith("--"))
+            return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase));
 
         switch (args[0].ToLowerInvariant())
         {
@@ -19,6 +17,8 @@ internal static class Program
                 return Status();
             case "guard":
                 return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase));
+            case "open":
+                return SendIpc("open");
             case "lock":
                 return SendIpc("lock");
             case "pause":
@@ -26,9 +26,80 @@ internal static class Program
                 return SendIpc($"pause {mins}");
             case "resume":
                 return SendIpc("resume");
+            case "help":
+                Usage();
+                return 0;
             default:
                 Usage();
                 return 1;
+        }
+    }
+
+    private static int Gui(bool devMode)
+    {
+        if (!TryLoadConfig(out KeyConfig? config))
+            return 1;
+        if (config == null)
+        {
+            Console.WriteLine("No enrolled key — starting enroll first.");
+            if (Enrollment.Run() != 0
+                || !TryLoadConfig(out config)
+                || config == null)
+                return 1;
+        }
+
+        using var singleInstance = new Mutex(true, @"Local\CryptoKeyGuard", out bool createdNew);
+        if (!createdNew)
+        {
+            // Guard already up — just raise its window.
+            return SendIpc("open");
+        }
+
+        HideConsoleIfOwned();
+        ApplicationConfiguration.Initialize();
+
+        using var service = new GuardService(config, devMode);
+        using var tray = new TrayApp(service, config, devMode);
+        using var ipc = new IpcServer(service.InvokeTarget,
+            line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
+                ? OpenDashboard(tray)
+                : service.DispatchCommand(line));
+        Application.ThreadException += (_, e) =>
+        {
+            Console.WriteLine($"[guard] Fatal UI error: {e.Exception.Message}");
+            try { service.ReleaseInput(); } catch { }
+            Environment.Exit(2);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Console.WriteLine($"[guard] Fatal background error: {((Exception)e.ExceptionObject).Message}");
+
+        service.Start();
+        ipc.Start();
+        tray.OpenDashboard();
+        Application.Run();
+        return 0;
+    }
+
+    private static string OpenDashboard(TrayApp tray)
+    {
+        tray.OpenDashboard();
+        return "ok opened";
+    }
+
+    // A double-clicked console app owns its console; hiding it makes the exe
+    // feel like a normal windowed app. A console shared with a shell stays.
+    private static void HideConsoleIfOwned()
+    {
+        try
+        {
+            var ids = new uint[2];
+            uint count = NativeMethods.GetConsoleProcessList(ids, (uint)ids.Length);
+            if (count <= 1)
+                NativeMethods.ShowWindow(NativeMethods.GetConsoleWindow(), NativeMethods.SW_HIDE);
+        }
+        catch (Exception)
+        {
+            // Not a console host (or enumeration failed) — nothing to hide.
         }
     }
 
@@ -67,8 +138,11 @@ internal static class Program
         ApplicationConfiguration.Initialize();
 
         using var service = new GuardService(config, devMode);
-        using var tray = new TrayApp(service, config);
-        using var ipc = new IpcServer(service.InvokeTarget, service.DispatchCommand);
+        using var tray = new TrayApp(service, config, devMode);
+        using var ipc = new IpcServer(service.InvokeTarget,
+            line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
+                ? OpenDashboard(tray)
+                : service.DispatchCommand(line));
         // A UI-thread exception while locked can leave input swallowed behind
         // a dead overlay — an invisible soft-brick. Fail dead instead: free
         // the input, then kill the process (hooks die with it anyway).
@@ -158,8 +232,10 @@ internal static class Program
         Console.WriteLine("CryptoKey — USB security key PC lock");
         Console.WriteLine();
         Console.WriteLine("Usage:");
+        Console.WriteLine("  cryptokey [--dev]       Launch the app (dashboard + tray + guard)");
         Console.WriteLine("  cryptokey enroll        Register a USB drive as your key");
-        Console.WriteLine("  cryptokey guard [--dev] Lock the PC while the key is absent (tray icon)");
+        Console.WriteLine("  cryptokey guard [--dev] Lock the PC while the key is absent (tray only)");
+        Console.WriteLine("  cryptokey open          Raise the dashboard of a running guard");
         Console.WriteLine("  cryptokey status        Show current enrollment, key presence, live state");
         Console.WriteLine("  cryptokey lock          Lock now (asks the running guard)");
         Console.WriteLine("  cryptokey pause [mins]  Pause auto-lock (default 5)");

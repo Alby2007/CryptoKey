@@ -24,13 +24,19 @@ failsafe passphrase — to unlock.
 ## Usage
 
 ```console
+cryptokey               # launch the app: dashboard window + tray + guard
 cryptokey enroll        # register a USB drive as your key
-cryptokey guard --dev   # tray app: lock the PC while the key is absent
+cryptokey guard --dev   # tray only: lock the PC while the key is absent
+cryptokey open          # raise the dashboard of a running guard
 cryptokey status        # enrollment + key presence + live guard state
 cryptokey lock          # ask the running guard to lock now
 cryptokey pause 10      # pause auto-lock for 10 minutes (default 5)
 cryptokey resume        # end a pause early
 ```
+
+Double-clicking `cryptokey.exe` launches the dashboard (the console hides
+itself when there's no shell attached). Closing the window hides to the
+tray — the guard keeps running.
 
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,
 **Settings…** (key info, passphrase change, poll interval, balloon tips),

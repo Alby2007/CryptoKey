@@ -79,6 +79,18 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DestroyIcon(IntPtr hIcon);
 
+    internal const int SW_HIDE = 0;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetConsoleWindow();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint GetConsoleProcessList(uint[] lpidProcessList, uint dwProcessCount);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern uint RegisterWindowMessage(string lpString);
 
