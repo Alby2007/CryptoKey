@@ -128,6 +128,10 @@ internal sealed class GuardService : IDisposable
     public void Start()
     {
         SeedActivityFromLog();
+        // A stale backup means the last guard died while locked — restore
+        // the user's policies before anything else. Moot under the OS lock
+        // screen anyway; re-applied on the next lock.
+        LockPolicies.RestoreIfPending(Log);
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
         // Supervisor: bring the watchdog up now, then re-check every 5s —
         // a killed watchdog gets respawned; a disabled setting stands it down.
@@ -334,7 +338,13 @@ internal sealed class GuardService : IDisposable
     public void ApplyMotion(bool enabled) => _surface.SetAnimations(enabled);
 
     /// <summary>Fail-dead: free input (and the input desktop) — fatal-error path.</summary>
-    public void ReleaseInput() => _surface.ReleaseInput();
+    public void ReleaseInput()
+    {
+        _surface.ReleaseInput();
+        // Fail-dead frees the policies with the lock — restore is a no-op
+        // when nothing was applied.
+        LockPolicies.RestoreIfPending(Log);
+    }
 
     // Removal locks instantly (when armed). Arrival deliberately does nothing
     // here — OnPresenceChecked re-verifies on every poll, which covers the lag
@@ -690,6 +700,10 @@ internal sealed class GuardService : IDisposable
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
+        // Policies apply even if both surfaces fail — the user is still
+        // locked (degraded, screen-only) and shouldn't get Task Manager back.
+        if (_config.Guard.LockPolicies)
+            LockPolicies.Apply(Log);
         // Secure first; any engage failure — returned or thrown — falls back
         // to the classic overlay. A throw propagating out of here would kill
         // the guard via the poll callback while State is already Locked.
@@ -741,6 +755,7 @@ internal sealed class GuardService : IDisposable
             _surface.SetStatus("Couldn't return to your desktop — try again.");
             return;
         }
+        LockPolicies.Restore(Log);
         Log("Unlocked.");
         SetState(GuardState.Unlocked);
     }
@@ -807,6 +822,7 @@ internal sealed class GuardService : IDisposable
         // takeover handoff). Ungraceful deaths never reach this — by design.
         _watchdogTimer?.Dispose();
         _supervisor.Stop();
+        LockPolicies.RestoreIfPending(Log);
         _surface.Dispose();
         _monitor.Dispose();
     }

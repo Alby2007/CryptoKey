@@ -16,9 +16,14 @@ for the rest.
 | `config.json` tampering | Keyfile attestation MAC — tripwire, not gate |
 | Passphrase brute force | PBKDF2 + exponential input freeze enforced in the hook |
 | Single-process kill of the guard | Persistent watchdog — heartbeats the control pipe (~2 s dead-detection), fail-closed `LockWorkStation` + respawn if the guard died locked, respawn if unlocked. The guard respawns the watchdog the same way |
+| Casual discovery of the kill path | Lock policies — while locked, HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` hide Task Manager, Sign out/Switch user, and Start-menu power buttons. Priors backed up to `lockpolicies.json`, restored on unlock |
 
 | Does **not** defend against | Why |
 |---|---|
+| `taskkill`/`Stop-Process`/Process Explorer | Lock policies hide the Task Manager GUI affordance only — the kill capability is untouched. Cosmetic layer, honestly scoped |
+| Ctrl+Alt+Del power button | No user-mode policy can remove it — `NoClose` covers Start only |
+| Hardened images that deny user writes to `HKCU\...\Policies` | Policies apply partially or not at all (logged `N/3`) — run the guard elevated for full coverage |
+| GPO-owned policy values | A domain refresh owns these keys — ours flicker off until the next lock; cosmetic failure for a cosmetic feature |
 | Name-based mass kill (`taskkill /f /im cryptokey.exe`) | Both processes die in one call — the user-mode ceiling. The per-engage lock-watchdog still restores your desktop on a locked kill |
 | Wiping `config.json` + killing the pair | Nothing to respawn into — watchdog exits on missing config |
 | Ctrl+Alt+Del / On-Screen Keyboard | SAS and UIAccess can't be hooked from user mode (OSK bypasses the keyboard hook entirely) |

@@ -59,6 +59,9 @@ internal sealed class GuardSettings
 
     /// <summary>Persistent supervisor respawns the guard on ungraceful death.</summary>
     public bool Watchdog { get; set; } = true;
+
+    /// <summary>Hide Task Manager/sign-out/power affordances while locked.</summary>
+    public bool LockPolicies { get; set; } = true;
 }
 
 internal static class ConfigStore

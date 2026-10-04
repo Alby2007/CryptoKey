@@ -22,6 +22,16 @@ tamper note, key-factor armed).
 the enrolled device since startup — a machine booted without the key
 doesn't instantly lock itself while WMI enumerates.
 
+Lock-time policies (`Guard.LockPolicies`, default on): `LockNow` applies
+HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` right after `SetState(Locked)`
+— even if both surfaces fail — persisting priors to `lockpolicies.json`
+first (existing backup = priors already captured, never re-read).
+Restore fires on every exit from the locked state: `UnlockNow` after a
+successful `Disengage`, `ReleaseInput` (fail-dead), `Dispose`, and
+`Start`'s `RestoreIfPending` for the died-while-locked respawn —
+`LockWorkStation` is the real boundary there, so clearing is correct
+even mid-OS-lock.
+
 ## Secure-desktop engage sequence
 
 ```mermaid

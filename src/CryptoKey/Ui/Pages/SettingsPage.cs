@@ -16,6 +16,7 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _startup;
     private readonly ToggleSwitch _startupAdmin;
     private readonly ToggleSwitch _watchdog;
+    private readonly ToggleSwitch _lockPolicies;
     private readonly ToggleSwitch _strictTamper;
     private readonly ToggleSwitch _privateDesktop;
     private readonly AppButton[] _policyBtns;
@@ -55,19 +56,19 @@ internal sealed class SettingsPage : UserControl
             Title = "Behavior",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 292,
+            Height = 332,
             Margin = new Padding(0, 0, 0, 10),
         };
         var beh = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 8,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 7; i++)
-            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 7f));
+        for (int i = 0; i < 8; i++)
+            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 8f));
 
         StartupMode startupMode = StartupManager.GetMode();
         _lockOnRemoval = Toggle("Auto-lock when the key is removed", _config.Guard.LockOnRemoval);
@@ -75,6 +76,8 @@ internal sealed class SettingsPage : UserControl
         _animations = Toggle("Interface animations", _config.Guard.Animations);
         _startup = Toggle("Start with Windows", startupMode != StartupMode.Off);
         _watchdog = Toggle("Watchdog process (auto-restart the guard)", _config.Guard.Watchdog);
+        _lockPolicies = Toggle("Restrict Task Manager, sign-out & power while locked",
+            _config.Guard.LockPolicies);
         _startupAdmin = Toggle("Launch as administrator (stronger lock)",
             startupMode == StartupMode.Elevated);
         _startupAdmin.Enabled = _startup.Checked;
@@ -152,6 +155,7 @@ internal sealed class SettingsPage : UserControl
         beh.Controls.Add(_animations);
         beh.Controls.Add(_startup);
         beh.Controls.Add(_watchdog);
+        beh.Controls.Add(_lockPolicies);
         beh.Controls.Add(adminRow);
         beh.Controls.Add(pollRow);
         behCard.Controls.Add(beh);
@@ -334,6 +338,7 @@ internal sealed class SettingsPage : UserControl
         _startup.CheckedChanged += (_, _) => ApplyStartupMode();
         _startupAdmin.CheckedChanged += (_, _) => ApplyStartupMode();
         _watchdog.CheckedChanged += (_, _) => Save();
+        _lockPolicies.CheckedChanged += (_, _) => Save();
         _pollSave.Tick += (_, _) => { _pollSave.Stop(); Save(); };
         _poll.ValueChanged += (_, _) =>
         {
@@ -528,6 +533,7 @@ internal sealed class SettingsPage : UserControl
         _config.Guard.StrictTamper = _strictTamper.Checked;
         _config.Guard.LockMode = _privateDesktop.Checked ? "secure" : "overlay";
         _config.Guard.Watchdog = _watchdog.Checked;
+        _config.Guard.LockPolicies = _lockPolicies.Checked;
         try
         {
             ConfigStore.Save(_config);

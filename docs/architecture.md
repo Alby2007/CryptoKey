@@ -99,6 +99,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `Local\CryptoKeyWatchdog` | mutex | One supervisor watchdog per session — spawned only when absent |
 | `Local\CryptoKeyWatchdogStop` | named event (manual-reset) | Every graceful guard exit sets it — clean deaths never respawn |
 | `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
+| `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked (`null` = was absent) — tmp+move atomic; deleted on restore; a stale file self-heals at next `Start` |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Module inventory (`src/CryptoKey`)
@@ -118,5 +119,6 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, passphrase buffer, panic combo, hook-side cooldown |
 | `IpcServer.cs` / `IpcClient.cs` | Pipe ACLs + accept loop / one-shot CLI transport |
 | `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/`LockWorkStation` role + `Supervisor` — guard-side mutex probe, spawn, stop |
+| `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |

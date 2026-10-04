@@ -142,6 +142,13 @@ dotnet run --project src/CryptoKey -- enroll
 - DPAPI binds the keyfile to the enrolling Windows user + machine — a second
   user enrolling the same drive overwrites your envelope (single-slot file),
   and yours then fails to unwrap. One enrolled user per drive.
+- While locked, HKCU policies hide Task Manager, Sign out/Switch user, and
+  Start-menu power buttons — priors are backed up and restored on unlock.
+  Cosmetic layer: `taskkill`/Process Explorer still work, the Ctrl+Alt+Del
+  power button can't be removed from user mode, and locked-down images
+  (or GPO) that deny writes to `HKCU\...\Policies` mean partial/no
+  coverage — run the guard elevated there. If the machine reboots while
+  locked the policies persist until the guard next starts and restores.
 - A running guard rewrites `config.json` on every rotation — kill the guard
   (`cryptokey quit`) before editing it by hand, or your edits are lost.
 - Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC
