@@ -20,6 +20,8 @@ internal sealed class SettingsPage : UserControl
     private readonly Label _pollValue;
     private readonly bool _elevated;
     private bool _suppressStartupEvent;
+    // Slider drags fire ValueChanged per tick — debounce the disk write.
+    private readonly System.Windows.Forms.Timer _pollSave = new() { Interval = 500 };
 
     public SettingsPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -232,11 +234,13 @@ internal sealed class SettingsPage : UserControl
         };
         _startup.CheckedChanged += (_, _) => ApplyStartupMode();
         _startupAdmin.CheckedChanged += (_, _) => ApplyStartupMode();
+        _pollSave.Tick += (_, _) => { _pollSave.Stop(); Save(); };
         _poll.ValueChanged += (_, _) =>
         {
             _pollValue.Text = $"{_poll.Value} ms";
             _service.ApplyPollInterval(_poll.Value);
-            Save();
+            _pollSave.Stop();
+            _pollSave.Start();
         };
     }
 
@@ -284,10 +288,15 @@ internal sealed class SettingsPage : UserControl
             _notify("Approve the UAC prompt to apply the startup change…", false);
             Task.Run(() =>
             {
-                p.WaitForExit(90000);
-                bool ok = p.ExitCode == 0;
-                try { BeginInvoke(() => FinishElevatedStartup(ok, mode)); }
-                catch (Exception) { }
+                using (p)
+                {
+                    // WaitForExit's bool first — ExitCode throws on a still-
+                    // running process (UAC left up >90s) and would strand the
+                    // toggles in the requested state.
+                    bool ok = p.WaitForExit(90000) && p.ExitCode == 0;
+                    try { BeginInvoke(() => FinishElevatedStartup(ok, mode)); }
+                    catch (Exception) { }
+                }
             });
         }
         catch (Exception ex)
@@ -344,11 +353,23 @@ internal sealed class SettingsPage : UserControl
     {
         try
         {
-            Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--takeover")
+            var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "--takeover")
             {
                 UseShellExecute = true,
                 Verb = "runas",
             });
+            if (p == null)
+                throw new InvalidOperationException("elevated instance did not start");
+            // Give the child a beat to die on its own startup errors before we
+            // release the mutex — a failed takeover would otherwise leave the
+            // machine silently unguarded.
+            if (p.WaitForExit(2500))
+            {
+                _notify($"Elevated launch failed (exit {p.ExitCode})", true);
+                p.Dispose();
+                return;
+            }
+            p.Dispose();
             Application.Exit();
         }
         catch (Exception ex)
@@ -378,5 +399,15 @@ internal sealed class SettingsPage : UserControl
         {
             _notify($"Save failed: {ex.Message}", true);
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _pollSave.Stop();
+            _pollSave.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

@@ -17,10 +17,13 @@ internal sealed class UsbMonitor : Form
     /// <summary>Raised on the UI thread after every check; arg = the disk, or null.</summary>
     public event Action<UsbDisk?>? PresenceChecked;
 
+    /// <summary>Raised on the UI thread when enumeration fails — for the activity log.</summary>
+    public event Action<string>? ErrorLogged;
+
     private const int MaxConsecutiveErrors = 3;
 
     private readonly System.Windows.Forms.Timer _pollTimer;
-    private readonly string _targetSerial;
+    private string _targetSerial; // settable — re-enroll retargets us live
     private bool _lastPresent;
     private int _consecutiveErrors;
     private int _checkInFlight;
@@ -46,7 +49,14 @@ internal sealed class UsbMonitor : Form
 
     /// <summary>Live-adjust the poll interval. Call on the UI thread.</summary>
     public void SetPollInterval(int ms)
-        => _pollTimer.Interval = Math.Clamp(ms, 250, 60_000);
+        => _pollTimer.Interval = Math.Clamp(ms, 250, 10_000); // match Settings slider
+
+    /// <summary>Watch a different serial after re-enroll. Call on the UI thread.</summary>
+    public void SetTargetSerial(string serial)
+    {
+        _targetSerial = serial;
+        CheckNow();
+    }
 
     public bool IsTargetPresent()
     {
@@ -110,7 +120,7 @@ internal sealed class UsbMonitor : Form
             // WMI hiccups during device storms are normal — tolerate a few,
             // then fail closed so a dead WMI service can't leave us unlocked.
             _consecutiveErrors++;
-            Console.WriteLine($"[guard] USB enumeration error #{_consecutiveErrors}: {error.Message}");
+            ErrorLogged?.Invoke($"USB enumeration error #{_consecutiveErrors}: {error.Message}");
             if (_consecutiveErrors < MaxConsecutiveErrors)
                 return; // transient — keep last known state
             disk = null;

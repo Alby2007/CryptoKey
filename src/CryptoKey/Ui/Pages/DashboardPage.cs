@@ -350,7 +350,7 @@ internal sealed class DashboardPage : UserControl
         _resumeBtn.Variant = snap.State == GuardState.Paused
             ? ButtonVariant.Primary : ButtonVariant.Secondary;
         _pause5.Enabled = _pause15.Enabled = _pause60.Enabled
-            = snap.State == GuardState.Unlocked;
+            = snap.State != GuardState.Locked; // a pause can be extended
     }
 
     protected override void Dispose(bool disposing)

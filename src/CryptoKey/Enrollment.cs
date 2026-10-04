@@ -95,7 +95,12 @@ internal static class Enrollment
 
         try
         {
-            ConfigStore.Save(ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase));
+            // Keep the user's guard preferences across a re-enroll — CreateNew
+            // would otherwise reset them to defaults.
+            KeyConfig fresh = ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase);
+            if (existing?.Guard != null)
+                fresh.Guard = existing.Guard;
+            ConfigStore.Save(fresh);
         }
         catch (Exception ex)
         {

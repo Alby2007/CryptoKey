@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.Principal;
 
 namespace CryptoKey;
 
@@ -10,6 +11,10 @@ namespace CryptoKey;
 internal sealed class IpcServer : IDisposable
 {
     public const string PipeName = "cryptokey-ctl";
+
+    // A connected client that never writes must not starve everyone behind
+    // it — connections are handled sequentially.
+    private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(5);
 
     private readonly Control _marshal;
     private readonly Func<string, string> _handler;
@@ -30,16 +35,24 @@ internal sealed class IpcServer : IDisposable
         {
             try
             {
-                using var pipe = new NamedPipeServerStream(
-                    PipeName, PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-
+                using var pipe = CreatePipe();
                 await pipe.WaitForConnectionAsync(_cts.Token);
 
                 using var reader = new StreamReader(pipe);
                 var writer = new StreamWriter(pipe) { AutoFlush = true };
-                string? line = await reader.ReadLineAsync(_cts.Token);
+                string? line;
+                using (var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token))
+                {
+                    readTimeout.CancelAfter(ReadTimeout);
+                    try
+                    {
+                        line = await reader.ReadLineAsync(readTimeout.Token);
+                    }
+                    catch (OperationCanceledException) when (!_cts.IsCancellationRequested)
+                    {
+                        continue; // client went silent — drop it, keep accepting
+                    }
+                }
                 string response = Dispatch(line ?? "");
                 await writer.WriteLineAsync(response.AsMemory(), _cts.Token);
             }
@@ -54,6 +67,23 @@ internal sealed class IpcServer : IDisposable
                 catch (OperationCanceledException) { break; }
             }
         }
+    }
+
+    // Two layers: the SACL's Medium integrity label lets the normal
+    // (medium-IL) CLI reach an *elevated* guard — MIC no-write-up would
+    // otherwise block it — while the DACL scopes access to the owning user.
+    // The pipe lives in the global namespace, so a World DACL would let any
+    // other session on the machine send pause/lock/quit.
+    private static NamedPipeServerStream CreatePipe()
+    {
+        string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
+        var security = new PipeSecurity();
+        security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
+        return NamedPipeServerStreamAcl.Create(
+            PipeName, PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+            0, 0, security, HandleInheritability.None);
     }
 
     private string Dispatch(string line)

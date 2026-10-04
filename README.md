@@ -18,8 +18,9 @@ failsafe passphrase — to unlock.
   re-asserted every 250 ms), low-level keyboard + mouse hooks that swallow all
   input, and `ClipCursor`. The keyboard hook feeds the passphrase buffer before
   swallowing, so the failsafe works while input is blocked.
-- **IPC** — `lock` / `pause` / `resume` / `status` reach the running guard over
-  `\\.\pipe\cryptokey-ctl` (one line in, one line out, current-user ACL).
+- **IPC** — `lock` / `pause` / `resume` / `status` / `quit` reach the running
+  guard over `\\.\pipe\cryptokey-ctl` (one line in, one line out; `quit` is
+  refused while locked).
 
 ## Usage
 
@@ -32,6 +33,7 @@ cryptokey status        # enrollment + key presence + live guard state
 cryptokey lock          # ask the running guard to lock now
 cryptokey pause 10      # pause auto-lock for 10 minutes (default 5)
 cryptokey resume        # end a pause early
+cryptokey quit          # stop the running guard (refused while locked)
 ```
 
 Double-clicking `cryptokey.exe` launches the dashboard (the console hides
@@ -74,4 +76,5 @@ dotnet run --project src/CryptoKey -- enroll
 - Some cheap drives report blank/duplicate serial numbers; enroll warns but
   allows it.
 - The serial + keyfile can theoretically be spoofed with firmware tools.
-- v1 never auto-starts at boot.
+- Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC
+  is unprotected after a fresh boot.

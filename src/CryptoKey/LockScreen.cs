@@ -7,8 +7,8 @@ namespace CryptoKey;
 /// glass lock card (padlock ring, clock, passphrase dots, shake-on-fail);
 /// secondary screens get minimal branding. A 250ms watchdog re-asserts
 /// topmost to fight focus stealers. Animation is opt-out via config and kept
-/// light (cached background, small invalidations) so painting can never
-/// starve the low-level input hooks running on the same thread.
+/// light (cached background; the tick repaints the full form but it's cheap)
+/// so painting can never starve the low-level input hooks on the same thread.
 /// </summary>
 internal sealed class LockScreen : IDisposable
 {

@@ -28,6 +28,7 @@ internal sealed class GuardService : IDisposable
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
+        _monitor.ErrorLogged += Log;
         _input.PassphraseSubmitted += OnPassphraseSubmitted;
         _input.PassphraseLengthChanged += len => _lock.SetPassphraseLength(len);
         _lock.ReassertTick += () => _input.ReassertClip();
@@ -95,9 +96,9 @@ internal sealed class GuardService : IDisposable
             error = "minutes must be 1-1440";
             return false;
         }
-        if (State != GuardState.Unlocked)
+        if (State == GuardState.Locked)
         {
-            error = $"can only pause while unlocked (state: {State.ToString().ToLowerInvariant()})";
+            error = "can't pause while locked — unlock first";
             return false;
         }
         _pausedUntil = DateTime.Now.AddMinutes(minutes);
@@ -117,6 +118,52 @@ internal sealed class GuardService : IDisposable
         Log("Resumed.");
         if (_lastDisk == null || _lastVerifyFailure != null)
             MaybeAutoLock("key absent or unverified after resume");
+    }
+
+    /// <summary>
+    /// Reload config.json after a re-enroll — the enroll process is separate,
+    /// so without this the guard keeps verifying against the OLD serial and
+    /// passphrase hash until restart.
+    /// </summary>
+    public string ReloadConfig()
+    {
+        try
+        {
+            KeyConfig? fresh = ConfigStore.Load();
+            if (fresh == null)
+                return "err no config on disk";
+            // Mutate in place, don't swap: dashboard/settings pages and the
+            // passphrase verifier all share _config — a swapped reference
+            // would leave them reading (and saving over) a stale copy.
+            _config.DeviceSerial = fresh.DeviceSerial;
+            _config.SecretSalt = fresh.SecretSalt;
+            _config.SecretHash = fresh.SecretHash;
+            _config.PassphraseSalt = fresh.PassphraseSalt;
+            _config.PassphraseHash = fresh.PassphraseHash;
+            _config.Guard = fresh.Guard;
+            _monitor.SetTargetSerial(fresh.DeviceSerial); // also triggers a re-check
+            _monitor.SetPollInterval(fresh.Guard.PollIntervalMs);
+            _failedAttempts = 0;
+            _lastVerifyFailure = null;
+            Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
+            return "ok re-enrolled";
+        }
+        catch (Exception ex)
+        {
+            Log($"Config reload failed: {ex.Message}");
+            return $"err reload failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>Shut the guard down — refused while locked (quitting = unlocking).</summary>
+    public bool RequestQuit()
+    {
+        if (State == GuardState.Locked)
+            return false;
+        Log("Quit requested — shutting down.");
+        // Defer the exit one pump turn so the IPC reply gets written first.
+        _monitor.BeginInvoke(() => Application.Exit());
+        return true;
     }
 
     public StatusSnapshot Snapshot()
@@ -145,6 +192,12 @@ internal sealed class GuardService : IDisposable
                     return "err not paused";
                 Resume();
                 return "ok resumed";
+            case "quit":
+                return RequestQuit()
+                    ? "ok quitting"
+                    : "err locked — insert the key or enter the passphrase first";
+            case "reenrolled":
+                return ReloadConfig();
             case "status":
                 StatusSnapshot s = Snapshot();
                 return $"ok state={s.State.ToString().ToLowerInvariant()} " +

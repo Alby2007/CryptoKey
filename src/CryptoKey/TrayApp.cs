@@ -133,9 +133,9 @@ internal sealed class TrayApp : IDisposable
             : $"Key: absent ({_config.DeviceSerial})";
 
         _lockItem.Enabled = s.State != GuardState.Locked;
-        _pauseItem.Enabled = s.State == GuardState.Unlocked;
+        _pauseItem.Enabled = s.State != GuardState.Locked; // can extend a pause
         _resumeItem.Enabled = s.State == GuardState.Paused;
-        _quitItem.Enabled = s.State == GuardState.Unlocked;
+        _quitItem.Enabled = s.State != GuardState.Locked;
     }
 
     // Explorer restarts drop every tray icon; TaskbarCreated is the

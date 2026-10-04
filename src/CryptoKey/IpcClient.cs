@@ -16,7 +16,17 @@ internal static class IpcClient
             using var reader = new StreamReader(pipe);
             using var writer = new StreamWriter(pipe) { AutoFlush = true };
             writer.WriteLine(command);
-            return reader.ReadLine();
+            // ReadLine has no built-in timeout — a guard wedged mid-dispatch
+            // would hang the CLI forever. Same budget as the connect.
+            using var cts = new CancellationTokenSource(timeoutMs);
+            try
+            {
+                return reader.ReadLineAsync(cts.Token).AsTask().GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
         }
         catch (TimeoutException)
         {

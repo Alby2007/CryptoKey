@@ -7,9 +7,17 @@ internal static class Program
     {
         // Elevated helper: the parent app spawns this with runas when a
         // startup-mode change needs admin rights (scheduled-task writes).
-        if (args.Length >= 2 && args[0].Equals("--set-startup", StringComparison.OrdinalIgnoreCase)
-            && Enum.TryParse<StartupMode>(args[1], true, out StartupMode sm))
-            return SetStartupMode(sm);
+        if (args.Length >= 1 && args[0].Equals("--set-startup", StringComparison.OrdinalIgnoreCase))
+        {
+            // IsDefined rejects numeric junk ("--set-startup 99") that TryParse
+            // would happily produce and SetMode would treat as Off.
+            if (args.Length >= 2
+                && Enum.TryParse<StartupMode>(args[1], true, out StartupMode sm)
+                && Enum.IsDefined(sm))
+                return SetStartupMode(sm);
+            Console.WriteLine("usage: cryptokey --set-startup off|normal|elevated");
+            return 1;
+        }
 
         // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
         if (args.Length == 0 || args[0].StartsWith("--"))
@@ -19,7 +27,12 @@ internal static class Program
         switch (args[0].ToLowerInvariant())
         {
             case "enroll":
-                return Enrollment.Run();
+                int erc = Enrollment.Run();
+                if (erc == 0)
+                    // A running guard holds the old config in memory — ping it
+                    // so it reloads and watches the new key's serial.
+                    _ = IpcClient.Send("reenrolled", 400);
+                return erc;
             case "status":
                 return Status();
             case "guard":
@@ -34,6 +47,8 @@ internal static class Program
                 return SendIpc($"pause {mins}");
             case "resume":
                 return SendIpc("resume");
+            case "quit":
+                return SendIpc("quit");
             case "help":
                 Usage();
                 return 0;
@@ -63,31 +78,7 @@ internal static class Program
             return SendIpc("open");
         }
 
-        HideConsoleIfOwned();
-        ApplicationConfiguration.Initialize();
-        Application.SetColorMode(SystemColorMode.Dark);
-        Animator.Enabled = config.Guard.Animations;
-
-        using var service = new GuardService(config, devMode);
-        using var shell = new AppShell(service, config, devMode);
-        using var ipc = new IpcServer(service.InvokeTarget,
-            line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
-                ? OpenWindow(shell)
-                : service.DispatchCommand(line));
-        Application.ThreadException += (_, e) =>
-        {
-            Console.WriteLine($"[guard] Fatal UI error: {e.Exception}");
-            try { service.ReleaseInput(); } catch { }
-            Environment.Exit(2);
-        };
-        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
-
-        service.Start();
-        ipc.Start();
-        shell.OpenWindow();
-        Application.Run();
-        return 0;
+        return RunApp(config, devMode, openDashboard: true);
     }
 
     private static string OpenWindow(AppShell shell)
@@ -145,6 +136,16 @@ internal static class Program
         if (devMode)
             Console.WriteLine("DEV MODE: panic exit is Ctrl+Alt+Shift+F12.");
 
+        return RunApp(config, devMode, openDashboard: false);
+    }
+
+    // Shared body for the desktop app and the tray-only daemon: the only
+    // difference is whether the dashboard opens on launch. Hiding the console
+    // matters most here — both autostart modes invoke `guard`, and without
+    // this a console window pops up at every login.
+    private static int RunApp(KeyConfig config, bool devMode, bool openDashboard)
+    {
+        HideConsoleIfOwned();
         ApplicationConfiguration.Initialize();
         Application.SetColorMode(SystemColorMode.Dark);
         Animator.Enabled = config.Guard.Animations;
@@ -160,37 +161,40 @@ internal static class Program
         // the input, then kill the process (hooks die with it anyway).
         Application.ThreadException += (_, e) =>
         {
-            Console.WriteLine($"[guard] Fatal UI error: {e.Exception.Message}");
+            Console.WriteLine($"[guard] Fatal UI error: {e.Exception}");
             try { service.ReleaseInput(); } catch { }
             Environment.Exit(2);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            Console.WriteLine($"[guard] Fatal background error: {((Exception)e.ExceptionObject).Message}");
+            Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
 
         service.Start();
         ipc.Start();
+        if (openDashboard)
+            shell.OpenWindow();
         Application.Run();
         return 0;
     }
 
     private static int SetStartupMode(StartupMode mode)
     {
+        // runas gives this console-app helper a console nobody reads — hide it.
+        HideConsoleIfOwned();
         try
         {
             StartupManager.SetMode(mode);
-            Console.WriteLine("ok");
             return 0;
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex.Message);
+            Console.WriteLine(ex.Message); // exit code is the real channel
             return 1;
         }
     }
 
     /// <summary>
     /// Claims the single-guard mutex. With <paramref name="waitForRelease"/>,
-    /// retries for ~15s so a relaunch (e.g. elevated) can take over the moment
+    /// retries for ~30s so a relaunch (e.g. elevated) can take over the moment
     /// the old instance exits — no unguarded gap between the two.
     /// </summary>
     private static Mutex AcquireGuardMutex(bool waitForRelease, out bool createdNew)
@@ -289,6 +293,7 @@ internal static class Program
         Console.WriteLine("  cryptokey lock          Lock now (asks the running guard)");
         Console.WriteLine("  cryptokey pause [mins]  Pause auto-lock (default 5)");
         Console.WriteLine("  cryptokey resume        End a pause early");
+        Console.WriteLine("  cryptokey quit          Stop the guard (refused while locked)");
         Console.WriteLine();
         Console.WriteLine("  --dev  enables emergency exit combo Ctrl+Alt+Shift+F12");
     }
