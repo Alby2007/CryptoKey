@@ -12,8 +12,9 @@ internal sealed class GuardService : IDisposable
 {
     private readonly KeyConfig _config;
     private readonly UsbMonitor _monitor;
-    private readonly InputLocker _input;
-    private readonly LockScreen _lock;
+    private readonly bool _devMode;
+    private readonly bool _forceClassic;
+    private ILockSurface _surface;
 
     private UsbDisk? _lastDisk;
     private string? _lastVerifyFailure;
@@ -26,25 +27,81 @@ internal sealed class GuardService : IDisposable
     private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
     private bool _staleKeyPresent;     // a previous-generation file is on the drive
     private DateTime? _cooldownUntil;  // passphrase-input freeze deadline
+    private AttestState _lastAttest;   // dedup for the legacy-format log line
 
-    public GuardService(KeyConfig config, bool devMode)
+    public GuardService(KeyConfig config, bool devMode, bool forceClassic)
     {
         _config = config;
+        _devMode = devMode;
+        _forceClassic = forceClassic;
         _monitor = new UsbMonitor(config.DeviceSerial);
-        _input = new InputLocker(devMode);
-        _lock = new LockScreen();
+        _surface = CreateSurface(config, devMode, forceClassic);
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
         _monitor.ErrorLogged += Log;
-        _input.PassphraseSubmitted += OnPassphraseSubmitted;
-        _input.PassphraseLengthChanged += len => _lock.SetPassphraseLength(len);
-        _lock.ReassertTick += () => _input.ReassertClip();
-        _input.PanicRequested += () =>
-        {
-            Log("Panic combo (Ctrl+Alt+Shift+F12) — exiting.");
-            Application.Exit();
-        };
+        WireSurface(_surface);
+    }
+
+    /// <summary>
+    /// "overlay" → classic per-monitor overlay; anything else (including the
+    /// "secure" default) → private-desktop lock. Secure mode auto-falls-back
+    /// to overlay on engage failure, so it stays the safe default.
+    /// </summary>
+    private static ILockSurface CreateSurface(KeyConfig config, bool devMode, bool forceClassic)
+        => !forceClassic && !config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase)
+            ? (ILockSurface)new SecureLockSurface(devMode)
+            : new ClassicLockSurface(devMode);
+
+    private void WireSurface(ILockSurface s)
+    {
+        s.PassphraseSubmitted += OnPassphraseSubmitted;
+        s.PanicRequested += OnPanic;
+    }
+
+    private void OnPanic()
+    {
+        Log("Panic combo (Ctrl+Alt+Shift+F12) — exiting.");
+        // Disengage BEFORE Exit — under the secure desktop, Exit while the
+        // session is switched away can leave the user on an empty desktop.
+        try { _surface.Disengage(); }
+        catch (Exception) { }
+        Application.Exit();
+    }
+
+    /// <summary>Mid-flight swap to the classic overlay (secure-engage failure).</summary>
+    private void SwitchToClassic()
+    {
+        ILockSurface old = _surface;
+        var s = new ClassicLockSurface(_devMode);
+        WireSurface(s);
+        s.SetAnimations(_config.Guard.Animations);
+        _surface = s;
+        try { old.Dispose(); }
+        catch (Exception) { }
+        Log("Falling back to overlay lock.");
+    }
+
+    /// <summary>
+    /// The configured lock mode can change while the guard runs (Settings
+    /// toggle writes config.json live) — rebuild the surface before engaging
+    /// so the change applies to the NEXT lock.
+    /// </summary>
+    private void EnsureSurfaceMode()
+    {
+        bool wantClassic = _forceClassic
+            || _config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase);
+        if (wantClassic == (_surface is ClassicLockSurface))
+            return;
+        ILockSurface old = _surface;
+        _surface = wantClassic
+            ? new ClassicLockSurface(_devMode)
+            : new SecureLockSurface(_devMode);
+        WireSurface(_surface);
+        _surface.SetAnimations(_config.Guard.Animations);
+        try { old.Dispose(); }
+        catch (Exception) { }
+        Log($"Lock mode → {(wantClassic ? "overlay" : "secure desktop")}.");
     }
 
     public GuardState State { get; private set; } = GuardState.Unlocked;
@@ -67,7 +124,7 @@ internal sealed class GuardService : IDisposable
     {
         SeedActivityFromLog();
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
-        _lock.SetAnimations(_config.Guard.Animations);
+        _surface.SetAnimations(_config.Guard.Animations);
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
             $"auto-lock {( _config.Guard.LockOnRemoval ? "on" : "off")}).");
         UsbDisk? disk = null;
@@ -169,8 +226,8 @@ internal sealed class GuardService : IDisposable
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
             _cooldownUntil = null;
-            _input.SetCooldownUntil(null);
-            _lock.SetCooldown(null);
+            _surface.SetCooldown(null);
+            _lastAttest = AttestState.Ok;
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
             return "ok re-enrolled";
         }
@@ -194,7 +251,7 @@ internal sealed class GuardService : IDisposable
 
     public StatusSnapshot Snapshot()
         => new(State, _lastDisk != null, _lastDisk?.Model, _lastVerifyFailure,
-            _pausedUntil, _tamperNote);
+            _pausedUntil, _tamperNote, _keyVerifiedNow);
 
     /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
     public string DispatchCommand(string line)
@@ -247,11 +304,11 @@ internal sealed class GuardService : IDisposable
         _monitor.SetPollInterval(ms);
     }
 
-    /// <summary>Live-apply the reduce-motion setting to the lock overlay.</summary>
-    public void ApplyMotion(bool enabled) => _lock.SetAnimations(enabled);
+    /// <summary>Live-apply the reduce-motion setting to the lock surface.</summary>
+    public void ApplyMotion(bool enabled) => _surface.SetAnimations(enabled);
 
-    /// <summary>Immediately drop the input hooks and cursor clip (fatal-error path).</summary>
-    public void ReleaseInput() => _input.Unlock();
+    /// <summary>Fail-dead: free input (and the input desktop) — fatal-error path.</summary>
+    public void ReleaseInput() => _surface.ReleaseInput();
 
     // Removal locks instantly (when armed). Arrival deliberately does nothing
     // here — OnPresenceChecked re-verifies on every poll, which covers the lag
@@ -272,6 +329,13 @@ internal sealed class GuardService : IDisposable
             _tamperNote = null;
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
+            // Under 2FA the screen may still say "Key verified — enter the
+            // passphrase" from when the factor was armed; keep it honest.
+            if (State == GuardState.Locked
+                && _config.Guard.UnlockPolicy == UnlockPolicy.KeyAndPassphrase)
+            {
+                _surface.SetStatus("Key removed — insert it, then enter the passphrase.");
+            }
             EmitSnapshot();
             return;
         }
@@ -290,14 +354,16 @@ internal sealed class GuardService : IDisposable
 
             // Tamper reporting — a replayed old secret is what a clone looks
             // like; attestation failures flag config.json tampering or a
-            // forged keyfile. Log only when the note changes so a stale file
-            // that can't be rotated away doesn't spam the feed every poll.
+            // forged keyfile. The badge is for real alerts only — a legacy
+            // (pre-v2) file is benign and self-upgrades on rotation, so it
+            // gets a dedup'd log line instead of a clone alarm.
             string? note = stale ? "possible clone — stale keyfile replayed"
                 : check.Attest == AttestState.Mismatch
                     ? "config attestation failed — config.json tampered"
-                : check.Attest == AttestState.Missing
-                    ? "pre-attestation keyfile (legacy format)"
                 : null;
+            if (check.Attest == AttestState.Missing && _lastAttest != AttestState.Missing)
+                Log("Keyfile is pre-attestation (legacy) — upgrades to v2 on this rotation.");
+            _lastAttest = check.Attest;
             if (note != _tamperNote)
             {
                 _tamperNote = note;
@@ -305,11 +371,8 @@ internal sealed class GuardService : IDisposable
                     Log(stale
                         ? "Keyfile presented a previous-generation secret — " +
                           "possible clone or interrupted rotation."
-                        : check.Attest == AttestState.Mismatch
-                            ? "Keyfile attestation mismatch — config.json " +
-                              "tampered or the keyfile was forged."
-                            : "Keyfile is pre-attestation (legacy) — " +
-                              "upgrades to v2 on this rotation.");
+                        : "Keyfile attestation mismatch — config.json " +
+                          "tampered or the keyfile was forged.");
             }
 
             if (State == GuardState.Locked)
@@ -323,14 +386,14 @@ internal sealed class GuardService : IDisposable
                 }
                 else
                 {
-                    _lock.SetStatus(policy switch
+                    _surface.SetStatus(policy switch
                     {
                         UnlockPolicy.KeyAndPassphrase when _keyVerifiedNow
                             => "Key verified — enter the passphrase.",
                         UnlockPolicy.KeyAndPassphrase
                             => "Stale keyfile — passphrase required.",
                         UnlockPolicy.KeyOnly
-                            => "Stale keyfile — re-enroll or restore the current keyfile.",
+                            => "Stale keyfile — attempting repair (re-enroll if it persists).",
                         _ => "Stale keyfile — type the passphrase.",
                     });
                 }
@@ -338,15 +401,16 @@ internal sealed class GuardService : IDisposable
 
             // Burn the secret once per key session (edge), and whenever a
             // stale file shows up (heals interrupted rotations), throttled.
-            // Order matters: UnlockNow ran above, so hooks are released before
-            // this drive I/O — a slow USB write can't stall the hook pump.
+            // Under 2FA/strict policies the lock stays engaged here — the
+            // write goes to a worker so a stalled USB write can't hold the
+            // hook pump open.
             if ((edgeFlip || stale)
                 && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5))
             {
                 _lastRotateAttemptUtc = DateTime.UtcNow;
                 // Pin prev when the drive IS the previous generation — a failed
                 // write must leave it still-verifiable, not two gens behind.
-                TryRotate(disk, keepPrev: stale);
+                TryRotate(disk, keepPrev: stale, backgroundWrite: true);
             }
         }
         else
@@ -366,7 +430,7 @@ internal sealed class GuardService : IDisposable
             else if (changed)
             {
                 Log($"Key detected but verification failed: {check.Detail}");
-                _lock.SetStatus($"CryptoKey detected — {check.Detail}. Or type the passphrase.");
+                _surface.SetStatus($"CryptoKey detected — {check.Detail}. Or type the passphrase.");
             }
         }
         EmitSnapshot();
@@ -383,15 +447,21 @@ internal sealed class GuardService : IDisposable
         if (_lastDisk == null)
             return false;
         _lastRotateAttemptUtc = DateTime.UtcNow;
-        return TryRotate(_lastDisk, keepPrev: false);
+        // Only reachable unlocked (the UI is unreachable while locked), so a
+        // synchronous write is safe — and the caller needs the real result.
+        return TryRotate(_lastDisk, keepPrev: false, backgroundWrite: false);
     }
 
     /// <summary>
     /// Single-use ratchet: burn the secret the drive presented. Config first,
     /// then the drive — a crash anywhere leaves the drive on the previous
     /// generation, which still verifies as stale and heals on the next pass.
+    /// The state mutation, config save, and envelope wrap stay on the UI
+    /// thread (fast, keeps _config coherent); with backgroundWrite the drive
+    /// I/O moves to a worker so a stalled USB write can never delay the hook
+    /// pump while locked.
     /// </summary>
-    private bool TryRotate(UsbDisk disk, bool keepPrev)
+    private bool TryRotate(UsbDisk disk, bool keepPrev, bool backgroundWrite)
     {
         byte[] next = RandomNumberGenerator.GetBytes(64);
 
@@ -414,26 +484,62 @@ internal sealed class GuardService : IDisposable
             return false;
         }
 
-        List<(string Letter, string? Error)> results;
+        byte[] envelope;
         try
         {
-            results = KeyVerifier.RotateKeyfiles(disk, next, _config);
+            envelope = KeyVerifier.WrapKeyfile(next, _config);
+        }
+        catch (Exception ex)
+        {
+            Log($"Rotation failed — envelope error ({ex.Message}).");
+            return false;
+        }
+        int gen = _config.RotationCount;
+
+        if (backgroundWrite)
+        {
+            Task.Run(() =>
+            {
+                List<string> lines;
+                try
+                {
+                    lines = RotationLog(KeyVerifier.RotateKeyfiles(disk, envelope), gen);
+                }
+                catch (Exception ex)
+                {
+                    lines = new List<string>
+                        { $"Rotation write failed ({ex.Message}) — drive is stale, heals on retry." };
+                }
+                try { _monitor.BeginInvoke(new Action(() => lines.ForEach(Log))); }
+                catch (Exception) { /* monitor dead — feed already closed */ }
+            });
+            return true; // config committed — the drive write lands on a worker
+        }
+
+        try
+        {
+            var results = KeyVerifier.RotateKeyfiles(disk, envelope);
+            RotationLog(results, gen).ForEach(Log);
+            return results.Count > 0 && results.Any(r => r.Error == null);
         }
         catch (Exception ex)
         {
             Log($"Rotation write failed ({ex.Message}) — drive is stale, heals on retry.");
             return false;
         }
+    }
+
+    private static List<string> RotationLog(
+        List<(string Letter, string? Error)> results, int gen)
+    {
         if (results.Count == 0)
-            Log($"Config rotated to generation {_config.RotationCount} but the drive " +
-                "has no mounted volume — the drive secret is stale until it reappears.");
-        else if (results.All(r => r.Error == null))
-            Log($"Keyfile rotated to generation {_config.RotationCount}.");
-        else
-            Log($"Rotated to generation {_config.RotationCount} with issues: " +
-                string.Join("; ", results.Select(r
-                    => r.Error == null ? $"{r.Letter} ok" : $"{r.Letter} {r.Error}")) + ".");
-        return results.Count > 0 && results.Any(r => r.Error == null);
+            return new List<string> { $"Config rotated to generation {gen} but the drive " +
+                "has no mounted volume — the drive secret is stale until it reappears." };
+        if (results.All(r => r.Error == null))
+            return new List<string> { $"Keyfile rotated to generation {gen}." };
+        return new List<string> { $"Rotated to generation {gen} with issues: " +
+            string.Join("; ", results.Select(r
+                => r.Error == null ? $"{r.Letter} ok" : $"{r.Letter} {r.Error}")) + "." };
     }
 
     private void CheckPauseExpiry()
@@ -490,7 +596,7 @@ internal sealed class GuardService : IDisposable
         if (!ok)
         {
             _failedAttempts++;
-            _lock.SetFailedAttempts(_failedAttempts);
+            _surface.SetFailedAttempts(_failedAttempts);
             // Exponential cooldown: fails 1-2 free, then 15s/30s/60s/120s/…
             // capped at 300s. Enforced in the hook so mashing can't pile up.
             if (_failedAttempts >= 3)
@@ -498,14 +604,13 @@ internal sealed class GuardService : IDisposable
                 int secs = Math.Min(15 << Math.Min(_failedAttempts - 3, 5), 300);
                 var until = DateTime.Now.AddSeconds(secs);
                 _cooldownUntil = until;
-                _input.SetCooldownUntil(until);
-                _lock.SetCooldown(until);
-                _lock.SetStatus($"Too many attempts — input frozen for {secs}s.");
+                _surface.SetCooldown(until);
+                _surface.SetStatus($"Too many attempts — input frozen for {secs}s.");
                 Log($"Passphrase failed attempt #{_failedAttempts} — input frozen {secs}s.");
             }
             else
             {
-                _lock.SetStatus("Incorrect passphrase — try again.");
+                _surface.SetStatus("Incorrect passphrase — try again.");
             }
             return;
         }
@@ -513,13 +618,12 @@ internal sealed class GuardService : IDisposable
         // Correct passphrase — now the policy gate decides.
         _failedAttempts = 0;
         _cooldownUntil = null;
-        _input.SetCooldownUntil(null);
-        _lock.SetCooldown(null);
-        _lock.SetFailedAttempts(0);
+        _surface.SetCooldown(null);
+        _surface.SetFailedAttempts(0);
 
         if (policy == UnlockPolicy.KeyOnly)
         {
-            _lock.SetStatus("Passphrase is disabled — insert the key.");
+            _surface.SetStatus("Passphrase is disabled — insert the key.");
             return;
         }
         if (policy == UnlockPolicy.KeyAndPassphrase && !_keyVerifiedNow)
@@ -534,7 +638,7 @@ internal sealed class GuardService : IDisposable
             }
             else
             {
-                _lock.SetStatus("Passphrase correct — insert your key first.");
+                _surface.SetStatus("Passphrase correct — insert your key first.");
             }
             return;
         }
@@ -560,19 +664,25 @@ internal sealed class GuardService : IDisposable
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
-        // One retry: a failed attempt unrolls its own partial state first.
-        bool hooked = _input.Lock() || _input.Lock();
-        if (!hooked)
+        // Secure first; any engage failure falls back to the classic overlay —
+        // the lock must always land.
+        EnsureSurfaceMode();
+        bool engaged = _surface.Engage();
+        if (!engaged && _surface is SecureLockSurface secure)
+        {
+            Log($"Secure desktop failed to engage ({secure.EngageError ?? "unknown"}).");
+            SwitchToClassic();
+            engaged = _surface.Engage();
+        }
+        if (!engaged)
         {
             Log("WARNING: input hooks failed — INPUT IS NOT BLOCKED.");
-            _lock.SetStatus("WARNING: input hooks failed — screen only. Ctrl+Alt+Del to recover.");
+            _surface.SetStatus("WARNING: input hooks failed — screen only. Ctrl+Alt+Del to recover.");
         }
         else
         {
-            _lock.ResetStatus();
+            _surface.ResetStatus();
         }
-        _lock.SetFailedAttempts(0);
-        _lock.Show();
     }
 
     private void UnlockNow()
@@ -583,10 +693,9 @@ internal sealed class GuardService : IDisposable
         Log("Unlocked.");
         // Cooldown dies with the lock session — in-memory only per design.
         _cooldownUntil = null;
-        _input.SetCooldownUntil(null);
-        _lock.SetCooldown(null);
-        _input.Unlock();
-        _lock.Hide();
+        _surface.SetCooldown(null);
+        // Disengage returns input (and the input desktop) before teardown.
+        _surface.Disengage();
         SetState(GuardState.Unlocked);
     }
 
@@ -647,8 +756,7 @@ internal sealed class GuardService : IDisposable
 
     public void Dispose()
     {
-        _input.Dispose();
-        _lock.Dispose();
+        _surface.Dispose();
         _monitor.Dispose();
     }
 }

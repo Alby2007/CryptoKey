@@ -16,6 +16,7 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _startup;
     private readonly ToggleSwitch _startupAdmin;
     private readonly ToggleSwitch _strictTamper;
+    private readonly ToggleSwitch _privateDesktop;
     private readonly AppButton[] _policyBtns;
     private readonly Label _policyWarn;
     private UnlockPolicy _policy;
@@ -158,20 +159,21 @@ internal sealed class SettingsPage : UserControl
             Title = "Unlock policy",
             Glyph = Glyphs.Shield,
             Dock = DockStyle.Top,
-            Height = 150,
+            Height = 196,
             Margin = new Padding(0, 0, 0, 10),
         };
         var pol = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 38f));
-        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 34f));
-        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 28f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 30f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 22f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 22f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 26f));
 
         var segRow = new TableLayoutPanel
         {
@@ -217,21 +219,28 @@ internal sealed class SettingsPage : UserControl
             _config.Guard.StrictTamper);
         _strictTamper.CheckedChanged += (_, _) => Save();
 
+        _privateDesktop = Toggle("Lock on a private desktop (stronger)",
+            !_config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase));
+        _privateDesktop.CheckedChanged += (_, _) =>
+        {
+            UpdatePolicyWarning();
+            Save();
+        };
+
         _policyWarn = new Label
         {
-            Text = "Lost key under this policy is a real lockout — only the dev panic " +
-                   "combo or Task Manager can recover.",
             Font = Theme.UIFont(8.5f),
             ForeColor = Theme.AccentAmber,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             AutoSize = false,
-            Visible = _policy != UnlockPolicy.KeyOrPassphrase,
         };
+        UpdatePolicyWarning();
 
         pol.Controls.Add(segRow, 0, 0);
         pol.Controls.Add(_strictTamper, 0, 1);
-        pol.Controls.Add(_policyWarn, 0, 2);
+        pol.Controls.Add(_privateDesktop, 0, 2);
+        pol.Controls.Add(_policyWarn, 0, 3);
         policyCard.Controls.Add(pol);
 
         // ---- Storage ----
@@ -334,9 +343,27 @@ internal sealed class SettingsPage : UserControl
     private void SetPolicy(UnlockPolicy policy)
     {
         _policy = policy;
-        _policyWarn.Visible = policy != UnlockPolicy.KeyOrPassphrase;
+        UpdatePolicyWarning();
         RefreshPolicyButtons();
         Save();
+    }
+
+    /// <summary>
+    /// One amber line under the policy card that surfaces whichever warnings
+    /// currently apply: the lockout risk of stricter unlock policies, and the
+    /// escape hatch for the private-desktop lock.
+    /// </summary>
+    private void UpdatePolicyWarning()
+    {
+        var parts = new List<string>();
+        if (_policy != UnlockPolicy.KeyOrPassphrase)
+            parts.Add("Lost key under this policy is a real lockout — only the dev " +
+                      "panic combo or Task Manager can recover.");
+        if (_privateDesktop.Checked)
+            parts.Add("Private desktop: if the screen ever strands blank, " +
+                      "run cryptokey --release-desktop.");
+        _policyWarn.Text = string.Join("  ", parts);
+        _policyWarn.Visible = parts.Count > 0;
     }
 
     private void RefreshPolicyButtons()
@@ -495,6 +522,7 @@ internal sealed class SettingsPage : UserControl
         _config.Guard.PollIntervalMs = _poll.Value;
         _config.Guard.UnlockPolicy = _policy;
         _config.Guard.StrictTamper = _strictTamper.Checked;
+        _config.Guard.LockMode = _privateDesktop.Checked ? "secure" : "overlay";
         try
         {
             ConfigStore.Save(_config);

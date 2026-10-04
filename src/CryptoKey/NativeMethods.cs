@@ -179,4 +179,46 @@ internal static class NativeMethods
         public uint time;
         public IntPtr dwExtraInfo;
     }
+
+    // ---- Desktops (secure lock surface) ----
+
+    internal const uint DESKTOP_READOBJECTS = 0x0001;
+    internal const uint DESKTOP_CREATEWINDOW = 0x0002;
+    internal const uint DESKTOP_CREATEMENU = 0x0004;
+    internal const uint DESKTOP_HOOKCONTROL = 0x0008;
+    internal const uint DESKTOP_JOURNALRECORD = 0x0010;
+    internal const uint DESKTOP_JOURNALPLAYBACK = 0x0020;
+    internal const uint DESKTOP_ENUMERATE = 0x0040;
+    internal const uint DESKTOP_WRITEOBJECTS = 0x0080;
+    internal const uint DESKTOP_SWITCHDESKTOP = 0x0100;
+
+    /// <summary>All desktop-specific rights — what a lock desktop needs.</summary>
+    internal const uint DESKTOP_ALL = 0x01FF;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr CreateDesktop(string lpszDesktop, IntPtr lpszDevice,
+        IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, IntPtr lpsa);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern IntPtr OpenDesktop(string lpszDesktop, int dwFlags,
+        [MarshalAs(UnmanagedType.Bool)] bool fInherit, uint dwDesiredAccess);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr OpenInputDesktop(int dwFlags,
+        [MarshalAs(UnmanagedType.Bool)] bool fInherit, uint dwDesiredAccess);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern IntPtr GetThreadDesktop(int dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetThreadDesktop(IntPtr hDesktop);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SwitchDesktop(IntPtr hDesktop);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool CloseDesktop(IntPtr hDesktop);
 }

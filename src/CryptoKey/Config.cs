@@ -53,6 +53,9 @@ internal sealed class GuardSettings
 
     /// <summary>Stale (previous-generation) keyfiles never count as the key factor.</summary>
     public bool StrictTamper { get; set; }
+
+    /// <summary>"secure" (default) → private-desktop lock; "overlay" → classic.</summary>
+    public string LockMode { get; set; } = "secure";
 }
 
 internal static class ConfigStore

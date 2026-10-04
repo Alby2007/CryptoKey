@@ -33,9 +33,19 @@ failsafe passphrase — to unlock.
 - **Passphrase backoff** — fails 1-2 are free, then input freezes
   15s/30s/60s/120s/300s (enforced inside the keyboard hook, so mashing can't
   pile up attempts; countdown shown on the lock screen).
-- **Lock** = one borderless topmost dark overlay per monitor (topmost
-  re-asserted every 250 ms), low-level keyboard + mouse hooks that swallow all
-  input, and `ClipCursor`. The keyboard hook feeds the passphrase buffer before
+- **Lock** has two surfaces, chosen by Settings → *Lock on a private desktop*
+  (or `config.json → Guard.LockMode`):
+  - **secure** (default) — a private Windows desktop (`CreateDesktop`) the
+    session is switched onto via `SwitchDesktop`. Only the lock card exists
+    there: no taskbar, no windows, nothing to steal focus, and Task Manager
+    can't see the lock UI (it lives on a different desktop). The input hooks
+    still run on a dedicated lock thread to feed the passphrase buffer. If
+    engagement fails at any step, the guard falls back to the overlay below.
+  - **overlay** — the classic surface: one borderless topmost dark overlay
+    per monitor (topmost re-asserted every 250 ms) on your own desktop,
+    low-level keyboard + mouse hooks that swallow all input, and
+    `ClipCursor`.
+  In both modes the keyboard hook feeds the passphrase buffer before
   swallowing, so the failsafe works while input is blocked.
 - **IPC** — `lock` / `pause` / `resume` / `status` / `quit` reach the running
   guard over `\\.\pipe\cryptokey-ctl` (one line in, one line out; `quit` is
@@ -54,6 +64,22 @@ cryptokey pause 10      # pause auto-lock for 10 minutes (default 5)
 cryptokey resume        # end a pause early
 cryptokey quit          # stop the running guard (refused while locked)
 ```
+
+Flags:
+
+```console
+--classic               # force the overlay lock (skip the private desktop)
+--release-desktop       # escape hatch: switch input back to your desktop if
+                        # the session ever strands on the lock desktop
+```
+
+The secure lock runs the session on its own desktop — if CryptoKey is killed
+or crashes while locked, Windows does NOT return input on its own, so a
+tiny watchdog process (`cryptokey --lock-watchdog <pid>`) rides along with
+every secure lock: the moment the guard dies it switches input back to your
+desktop itself. As a second layer, `cryptokey --release-desktop` does the
+same by hand — e.g. from Task Manager's "Run new task" after Ctrl+Alt+Del,
+or the dev panic combo.
 
 Double-clicking `cryptokey.exe` launches the dashboard (the console hides
 itself when there's no shell attached). Closing the window hides to the
@@ -87,13 +113,22 @@ dotnet run --project src/CryptoKey -- enroll
 ## Warnings / known limits
 
 - **Self-lockout is real.** Test only in `--dev` mode until you trust it.
-- **Ctrl+Alt+Del cannot be blocked** from user mode — Task Manager can kill the
-  process. This is a deterrent, not a security boundary.
+- **Ctrl+Alt+Del cannot be blocked** from user mode — under the secure
+  desktop the Ctrl+Alt+Del screen appears on the Default desktop, and Task
+  Manager opened there can't see or reach the lock desktop. Killing the
+  process releases the desktop and returns input automatically.
+- A desktop-switch failure could strand the session on an empty desktop —
+  that's what `cryptokey --release-desktop` is for (keep the command in mind).
 - Elevated windows (e.g. admin Task Manager) resist the input hooks — and the
   **On-Screen Keyboard** (UIAccess privilege) bypasses the keyboard hook
   entirely, so an attacker who opens OSK first can type freely.
 - Some cheap drives report blank/duplicate serial numbers; enroll warns but
   allows it.
 - The serial + keyfile can theoretically be spoofed with firmware tools.
+- DPAPI binds the keyfile to the enrolling Windows user + machine — a second
+  user enrolling the same drive overwrites your envelope (single-slot file),
+  and yours then fails to unwrap. One enrolled user per drive.
+- A running guard rewrites `config.json` on every rotation — kill the guard
+  (`cryptokey quit`) before editing it by hand, or your edits are lost.
 - Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC
   is unprotected after a fresh boot.

@@ -315,9 +315,13 @@ internal sealed class DashboardPage : UserControl
             case GuardState.Locked:
                 _stateLabel.Text = "LOCKED";
                 _stateLabel.ForeColor = Theme.AccentRed;
-                _reasonLabel.Text = snap.LastVerifyFailure != null
-                    ? snap.LastVerifyFailure
-                    : "key absent";
+                // Armed-while-locked only happens under 2FA — the key factor
+                // is satisfied and the passphrase completes the unlock.
+                _reasonLabel.Text = snap.KeyFactorArmed
+                    ? "key verified — enter the passphrase"
+                    : snap.LastVerifyFailure != null
+                        ? snap.LastVerifyFailure
+                        : "key absent";
                 break;
             case GuardState.Paused:
                 _stateLabel.Text = "PAUSED";

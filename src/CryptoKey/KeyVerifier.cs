@@ -221,24 +221,15 @@ internal static class KeyVerifier
     };
 
     /// <summary>
-    /// Writes a new-generation secret to every letter that already has a
-    /// keyfile — v2 envelope, temp file, attributes, atomic move, then a
+    /// Writes a pre-wrapped v2 envelope to every letter that already has a
+    /// keyfile — temp file, attributes, atomic move, then a byte-for-byte
     /// read-back check. If the keyfile was wiped from every letter, re-arms
-    /// the first mounted one so the drive can't stay stale-forever.
+    /// the first mounted one so the drive can't stay stale-forever. Pure
+    /// file I/O — safe off the UI thread; nothing reads mutable config.
     /// </summary>
     public static List<(string Letter, string? Error)> RotateKeyfiles(
-        UsbDisk disk, byte[] secret, KeyConfig config)
+        UsbDisk disk, byte[] envelope)
     {
-        byte[] envelope;
-        try
-        {
-            envelope = WrapKeyfile(secret, config);
-        }
-        catch (Exception ex)
-        {
-            return new List<(string, string?)> { ("-", $"envelope failed: {ex.Message}") };
-        }
-
         var targets = disk.DriveLetters.Where(l => File.Exists(KeyFilePath(l))).ToList();
         if (targets.Count == 0)
             targets = disk.DriveLetters.Take(1).ToList();
@@ -254,10 +245,8 @@ internal static class KeyVerifier
                 File.SetAttributes(tmp, FileAttributes.Hidden | FileAttributes.System);
                 File.Move(tmp, path, overwrite: true);
                 byte[] back = File.ReadAllBytes(path);
-                bool ok = TryUnwrapKeyfile(back, config, out byte[]? s, out _, out _)
-                    && s != null
-                    && CryptographicOperations.FixedTimeEquals(s, secret);
-                results.Add((letter, ok ? null : "read-back mismatch"));
+                results.Add((letter,
+                    back.AsSpan().SequenceEqual(envelope) ? null : "read-back mismatch"));
             }
             catch (Exception ex)
             {

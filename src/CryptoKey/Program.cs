@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace CryptoKey;
 
 internal static class Program
@@ -19,10 +21,25 @@ internal static class Program
             return 1;
         }
 
+        // Manual escape hatch for a stranded secure-desktop lock: pulls input
+        // back to the user's desktop. Works even while the guard is running —
+        // independent of IPC, hooks, and the lock thread.
+        if (args.Length >= 1 && args[0].Equals("--release-desktop", StringComparison.OrdinalIgnoreCase))
+            return ReleaseDesktop();
+
+        // Dead-man's switch for the secure-desktop lock: spawned by
+        // SecureLockSurface before SwitchDesktop. A killed/crashed guard does
+        // NOT make Windows return the input desktop on its own — this tiny
+        // process waits for the parent to die, then pulls input back.
+        if (args.Length >= 2 && args[0].Equals("--lock-watchdog", StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(args[1], out int parentPid))
+            return RunLockWatchdog(parentPid);
+
         // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
         if (args.Length == 0 || args[0].StartsWith("--"))
             return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
-                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase));
+                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
+                args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
 
         switch (args[0].ToLowerInvariant())
         {
@@ -37,7 +54,8 @@ internal static class Program
                 return Status();
             case "guard":
                 return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
-                    args.Contains("--takeover", StringComparer.OrdinalIgnoreCase));
+                    args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
+                    args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
             case "open":
                 return SendIpc("open");
             case "lock":
@@ -58,7 +76,7 @@ internal static class Program
         }
     }
 
-    private static int Gui(bool devMode, bool takeover)
+    private static int Gui(bool devMode, bool takeover, bool forceClassic)
     {
         if (!TryLoadConfig(out KeyConfig? config))
             return 1;
@@ -78,7 +96,73 @@ internal static class Program
             return SendIpc("open");
         }
 
-        return RunApp(config, devMode, openDashboard: true);
+        return RunApp(config, devMode, openDashboard: true, forceClassic);
+    }
+
+    /// <summary>
+    /// Independent recovery for the secure-desktop lock: switches input back
+    /// to the user's Default desktop. If the guard is still alive and locked,
+    /// it simply re-switches on its next engage — this command only repairs
+    /// the case where the process died (or wedged) while the session was on
+    /// the private desktop.
+    /// </summary>
+    private static int ReleaseDesktop()
+    {
+        IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
+            NativeMethods.DESKTOP_SWITCHDESKTOP);
+        if (h == IntPtr.Zero)
+        {
+            Console.WriteLine("Could not open the Default desktop.");
+            return 1;
+        }
+        try
+        {
+            if (!NativeMethods.SwitchDesktop(h))
+            {
+                Console.WriteLine("SwitchDesktop to Default failed.");
+                return 1;
+            }
+            Console.WriteLine("Input switched back to the Default desktop.");
+            return 0;
+        }
+        finally
+        {
+            NativeMethods.CloseDesktop(h);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the guard process to exit, then switches input back to the
+    /// Default desktop. Killed by <see cref="SecureLockSurface"/> on clean
+    /// disengage — reaching the switch means the guard died while the session
+    /// was (possibly) on the private desktop. Best-effort and silent: it runs
+    /// detached with no console and nobody to report to.
+    /// </summary>
+    private static int RunLockWatchdog(int parentPid)
+    {
+        HideConsoleIfOwned();
+        try
+        {
+            using var parent = Process.GetProcessById(parentPid);
+            parent.WaitForExit();
+        }
+        catch (Exception)
+        {
+            // Parent already gone (or pid was never valid) — that's the
+            // failure case we're here for, so still try to release.
+        }
+        try
+        {
+            IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
+                NativeMethods.DESKTOP_SWITCHDESKTOP);
+            if (h != IntPtr.Zero)
+            {
+                NativeMethods.SwitchDesktop(h);
+                NativeMethods.CloseDesktop(h);
+            }
+        }
+        catch (Exception) { }
+        return 0;
     }
 
     private static string OpenWindow(AppShell shell)
@@ -116,7 +200,7 @@ internal static class Program
         return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
     }
 
-    private static int Guard(bool devMode, bool takeover)
+    private static int Guard(bool devMode, bool takeover, bool forceClassic)
     {
         if (!TryLoadConfig(out KeyConfig? config))
             return 1;
@@ -136,21 +220,22 @@ internal static class Program
         if (devMode)
             Console.WriteLine("DEV MODE: panic exit is Ctrl+Alt+Shift+F12.");
 
-        return RunApp(config, devMode, openDashboard: false);
+        return RunApp(config, devMode, openDashboard: false, forceClassic);
     }
 
     // Shared body for the desktop app and the tray-only daemon: the only
     // difference is whether the dashboard opens on launch. Hiding the console
     // matters most here — both autostart modes invoke `guard`, and without
     // this a console window pops up at every login.
-    private static int RunApp(KeyConfig config, bool devMode, bool openDashboard)
+    private static int RunApp(KeyConfig config, bool devMode, bool openDashboard,
+        bool forceClassic)
     {
         HideConsoleIfOwned();
         ApplicationConfiguration.Initialize();
         Application.SetColorMode(SystemColorMode.Dark);
         Animator.Enabled = config.Guard.Animations;
 
-        using var service = new GuardService(config, devMode);
+        using var service = new GuardService(config, devMode, forceClassic);
         using var shell = new AppShell(service, config, devMode);
         using var ipc = new IpcServer(service.InvokeTarget,
             line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
@@ -243,6 +328,7 @@ internal static class Program
         Console.WriteLine($"Device serial: {config.DeviceSerial}");
         Console.WriteLine($"Unlock policy: {config.Guard.UnlockPolicy}" +
             (config.Guard.StrictTamper ? " (strict tamper)" : ""));
+        Console.WriteLine($"Lock mode:     {config.Guard.LockMode}");
 
         int exitCode;
         UsbDisk? disk;
@@ -297,6 +383,9 @@ internal static class Program
         Console.WriteLine("  cryptokey resume        End a pause early");
         Console.WriteLine("  cryptokey quit          Stop the guard (refused while locked)");
         Console.WriteLine();
-        Console.WriteLine("  --dev  enables emergency exit combo Ctrl+Alt+Shift+F12");
+        Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12");
+        Console.WriteLine("  --classic          force the overlay lock (skip the private desktop)");
+        Console.WriteLine("  --release-desktop  escape hatch: switch input back to the Default");
+        Console.WriteLine("                     desktop if the session ever strands on the lock desktop");
     }
 }
