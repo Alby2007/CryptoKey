@@ -133,4 +133,6 @@ interactive layer
 (`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
 agents are non-interactive.
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
+| `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |
+| `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |

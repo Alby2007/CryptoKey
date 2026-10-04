@@ -106,7 +106,8 @@ exe's path. The **Launch as administrator** sub-toggle registers a
 Scheduled Task with highest privileges instead (one UAC prompt when you
 enable it) so the lock covers elevated windows too; **Restart as admin**
 elevates the running instance in place. The Storage card can add/remove
-a Start Menu shortcut, and the dashboard activity feed persists to
+Start Menu and Desktop shortcuts (enrollment creates both automatically),
+and the dashboard activity feed persists to
 `%APPDATA%\CryptoKey\guard.log` (rotated at 256 KB).
 
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,

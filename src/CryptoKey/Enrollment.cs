@@ -114,6 +114,20 @@ internal static class Enrollment
             return 1;
         }
 
+        // A fresh enroll is when the app becomes real — drop the shell
+        // shortcuts now (also repoints them if the exe moved). Best-effort:
+        // a shortcut failure must never fail enrollment.
+        try
+        {
+            ShortcutManager.SetEnabled(ShortcutTarget.StartMenu, true);
+            ShortcutManager.SetEnabled(ShortcutTarget.Desktop, true);
+            Console.WriteLine("Shortcuts created: Start Menu + Desktop.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Shortcut creation skipped: {ex.Message}");
+        }
+
         Console.WriteLine($"Enrolled {disk.Model} on {letter}. Keyfile written to {keyPath}");
         Console.WriteLine($"Config saved to {ConfigStore.ConfigPath}");
         return 0;

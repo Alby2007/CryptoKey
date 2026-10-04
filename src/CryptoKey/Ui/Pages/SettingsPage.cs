@@ -23,6 +23,7 @@ internal sealed class SettingsPage : UserControl
     private readonly Label _policyWarn;
     private UnlockPolicy _policy;
     private readonly AppButton _shortcutBtn;
+    private readonly AppButton _desktopShortcutBtn;
     private readonly Slider _poll;
     private readonly Label _pollValue;
     private readonly bool _elevated;
@@ -256,20 +257,20 @@ internal sealed class SettingsPage : UserControl
             Title = "Storage",
             Glyph = Glyphs.Folder,
             Dock = DockStyle.Top,
-            Height = 140,
+            Height = 176,
         };
         var store = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 2,
+            RowCount = 3,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
         store.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 72f));
         store.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28f));
-        store.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
-        store.RowStyles.Add(new RowStyle(SizeType.Percent, 50f));
+        for (int i = 0; i < 3; i++)
+            store.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33f));
         var pathLabel = new Label
         {
             Text = ConfigStore.ConfigPath,
@@ -310,15 +311,35 @@ internal sealed class SettingsPage : UserControl
         };
         _shortcutBtn = new AppButton
         {
-            Glyph = ShortcutManager.Exists ? Glyphs.Close : Glyphs.Check,
+            Glyph = ShortcutManager.Exists(ShortcutTarget.StartMenu) ? Glyphs.Close : Glyphs.Check,
             Variant = ButtonVariant.Ghost,
             Dock = DockStyle.Fill,
             Margin = new Padding(8, 0, 0, 0),
         };
-        _shortcutBtn.Text = ShortcutManager.Exists ? "Remove" : "Create";
-        _shortcutBtn.Click += (_, _) => ToggleShortcut();
+        _shortcutBtn.Text = ShortcutManager.Exists(ShortcutTarget.StartMenu) ? "Remove" : "Create";
+        _shortcutBtn.Click += (_, _) => ToggleShortcut(ShortcutTarget.StartMenu, _shortcutBtn);
+        var desktopShortcutLabel = new Label
+        {
+            Text = "Desktop shortcut",
+            Font = Theme.UIFont(9f),
+            ForeColor = Theme.TextDim,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+        };
+        _desktopShortcutBtn = new AppButton
+        {
+            Glyph = ShortcutManager.Exists(ShortcutTarget.Desktop) ? Glyphs.Close : Glyphs.Check,
+            Variant = ButtonVariant.Ghost,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(8, 0, 0, 0),
+        };
+        _desktopShortcutBtn.Text = ShortcutManager.Exists(ShortcutTarget.Desktop) ? "Remove" : "Create";
+        _desktopShortcutBtn.Click += (_, _) => ToggleShortcut(ShortcutTarget.Desktop, _desktopShortcutBtn);
         store.Controls.Add(shortcutLabel, 0, 1);
         store.Controls.Add(_shortcutBtn, 1, 1);
+        store.Controls.Add(desktopShortcutLabel, 0, 2);
+        store.Controls.Add(_desktopShortcutBtn, 1, 2);
         storeCard.Controls.Add(store);
 
         layout.Controls.Add(behCard, 0, 0);
@@ -471,15 +492,16 @@ internal sealed class SettingsPage : UserControl
         _suppressStartupEvent = false;
     }
 
-    private void ToggleShortcut()
+    private void ToggleShortcut(ShortcutTarget target, AppButton btn)
     {
+        string name = target == ShortcutTarget.Desktop ? "Desktop" : "Start Menu";
         try
         {
-            bool create = !ShortcutManager.Exists;
-            ShortcutManager.SetEnabled(create);
-            _shortcutBtn.Text = create ? "Remove" : "Create";
-            _shortcutBtn.Glyph = create ? Glyphs.Close : Glyphs.Check;
-            _notify(create ? "Start Menu shortcut created" : "Start Menu shortcut removed", false);
+            bool create = !ShortcutManager.Exists(target);
+            ShortcutManager.SetEnabled(target, create);
+            btn.Text = create ? "Remove" : "Create";
+            btn.Glyph = create ? Glyphs.Close : Glyphs.Check;
+            _notify(create ? $"{name} shortcut created" : $"{name} shortcut removed", false);
         }
         catch (Exception ex)
         {

@@ -5,7 +5,8 @@
 ```console
 cryptokey                        # dashboard app: guard + UI (add --dev, --takeover, --classic)
 cryptokey guard                  # tray daemon, console hidden (same flags)
-cryptokey enroll                 # enroll the inserted removable drive (failsafe passphrase, min 8 chars)
+cryptokey enroll                 # enroll the inserted removable drive (failsafe passphrase, min 8
+                                 # chars); also creates the Start Menu + Desktop shortcuts
 cryptokey open                   # raise the dashboard on the running guard
 cryptokey status                 # local verify + guard reachability
 cryptokey lock                   # IPC: lock now
@@ -22,6 +23,7 @@ cryptokey --set-startup <Off|Normal|Elevated>   # elevated startup helper (UAC h
 cryptokey --lock-watchdog <pid>                 # dead-man's switch spawned per secure engage
 cryptokey watchdog --parent <pid>               # persistent guard supervisor (spawned by the guard)
 cryptokey --release-desktop                     # SwitchDesktop → Default escape hatch
+cryptokey --export-icon <path>                  # dev/internal: regenerate app.ico
 ```
 
 Flags: `--dev` enables the panic exit combo `Ctrl+Alt+Shift+F12`;
@@ -123,3 +125,5 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Run value | `HKCU\...\Run\CryptoKey` |
 | Scheduled task | `CryptoKey` |
 | Start Menu shortcut | `CryptoKey.lnk` |
+| Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
+| App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |

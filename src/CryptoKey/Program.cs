@@ -35,6 +35,16 @@ internal static class Program
             && int.TryParse(args[1], out int parentPid))
             return RunLockWatchdog(parentPid);
 
+        // Dev/internal: writes the app icon (committed as app.ico) using the
+        // same renderer as the tray — badge in the system accent color.
+        if (args.Length >= 2 && args[0].Equals("--export-icon", StringComparison.OrdinalIgnoreCase))
+        {
+            File.WriteAllBytes(args[1],
+                TrayIcons.BuildIcoBytes(Theme.Accent, TrayIcons.ShellSizes));
+            Console.WriteLine($"Wrote {args[1]} ({TrayIcons.ShellSizes.Length} PNG frames).");
+            return 0;
+        }
+
         // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
         if (args.Length == 0 || args[0].StartsWith("--"))
             return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),

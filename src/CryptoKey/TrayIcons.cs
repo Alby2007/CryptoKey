@@ -11,6 +11,10 @@ internal sealed class TrayIcons : IDisposable
 {
     private static readonly int[] Sizes = { 16, 20, 24, 32, 48 };
 
+    // Shell icons scale past tray size (large-icon view, task switcher) —
+    // the app icon exports the full PNG range up to 256.
+    internal static readonly int[] ShellSizes = { 16, 20, 24, 32, 48, 64, 128, 256 };
+
     private readonly Dictionary<GuardState, Icon> _cache = new();
 
     public Icon For(GuardState state)
@@ -32,8 +36,19 @@ internal sealed class TrayIcons : IDisposable
             _ => Theme.AccentGreen,
         };
 
-        var frames = new List<byte[]>(Sizes.Length);
-        foreach (int size in Sizes)
+        byte[] ico = BuildIcoBytes(badge, Sizes);
+        return new Icon(new MemoryStream(ico));
+    }
+
+    /// <summary>
+    /// Assembles a multi-frame ICO: ICONDIR + ICONDIRENTRY per frame + PNG
+    /// data. Shared by the runtime tray cache and `--export-icon`, which
+    /// writes the same bytes to app.ico for the shell-facing icon.
+    /// </summary>
+    internal static byte[] BuildIcoBytes(Color badge, int[] sizes)
+    {
+        var frames = new List<byte[]>(sizes.Length);
+        foreach (int size in sizes)
         {
             using var bmp = RenderBadge(size, badge);
             using var png = new MemoryStream();
@@ -41,7 +56,6 @@ internal sealed class TrayIcons : IDisposable
             frames.Add(png.ToArray());
         }
 
-        // Assemble a multi-frame ICO: ICONDIR + ICONDIRENTRY per frame + PNG data.
         using var ms = new MemoryStream();
         using var w = new BinaryWriter(ms);
         w.Write((ushort)0);                  // reserved
@@ -50,7 +64,7 @@ internal sealed class TrayIcons : IDisposable
         int offset = 6 + frames.Count * 16;
         for (int i = 0; i < frames.Count; i++)
         {
-            int s = Sizes[i];
+            int s = sizes[i];
             w.Write((byte)(s >= 256 ? 0 : s)); // width
             w.Write((byte)(s >= 256 ? 0 : s)); // height
             w.Write((byte)0);                // palette
@@ -63,8 +77,7 @@ internal sealed class TrayIcons : IDisposable
         }
         foreach (byte[] frame in frames)
             w.Write(frame);
-        ms.Position = 0;
-        return new Icon(ms);
+        return ms.ToArray();
     }
 
     private static Bitmap RenderBadge(int size, Color badge)
