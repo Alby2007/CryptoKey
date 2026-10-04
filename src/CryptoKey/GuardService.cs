@@ -23,6 +23,9 @@ internal sealed class GuardService : IDisposable
     private bool _verifiedEdge;
     private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
     private string? _tamperNote;
+    private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
+    private bool _staleKeyPresent;     // a previous-generation file is on the drive
+    private DateTime? _cooldownUntil;  // passphrase-input freeze deadline
 
     public GuardService(KeyConfig config, bool devMode)
     {
@@ -163,6 +166,11 @@ internal sealed class GuardService : IDisposable
             _lastVerifyFailure = null;
             _verifiedEdge = false;
             _tamperNote = null;
+            _keyVerifiedNow = false;
+            _staleKeyPresent = false;
+            _cooldownUntil = null;
+            _input.SetCooldownUntil(null);
+            _lock.SetCooldown(null);
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
             return "ok re-enrolled";
         }
@@ -224,7 +232,9 @@ internal sealed class GuardService : IDisposable
                        $"model=\"{s.Model ?? "-"}\" " +
                        $"verifyFail=\"{s.LastVerifyFailure ?? "-"}\" " +
                        $"pausedUntil={s.PausedUntil?.ToString("HH:mm:ss") ?? "-"} " +
-                       $"tamper=\"{s.TamperNote ?? "-"}\"";
+                       $"tamper=\"{s.TamperNote ?? "-"}\" " +
+                       $"keyVerified={_keyVerifiedNow} " +
+                       $"policy={_config.Guard.UnlockPolicy}";
             default:
                 return $"err unknown command '{parts[0]}'";
         }
@@ -260,6 +270,8 @@ internal sealed class GuardService : IDisposable
         {
             _verifiedEdge = false;
             _tamperNote = null;
+            _keyVerifiedNow = false;
+            _staleKeyPresent = false;
             EmitSnapshot();
             return;
         }
@@ -267,43 +279,82 @@ internal sealed class GuardService : IDisposable
         KeyfileCheck check = KeyVerifier.Check(_config, disk);
         if (check.Match != SecretMatch.None)
         {
+            bool strict = _config.Guard.StrictTamper;
+            bool stale = check.Match == SecretMatch.Previous;
+            _staleKeyPresent = stale;
+            // Strict tamper: a stale secret never counts as the key factor.
+            _keyVerifiedNow = !stale || !strict;
             _lastVerifyFailure = null;
             bool edgeFlip = !_verifiedEdge;
             _verifiedEdge = true;
 
-            if (check.Match == SecretMatch.Previous)
+            // Tamper reporting — a replayed old secret is what a clone looks
+            // like; attestation failures flag config.json tampering or a
+            // forged keyfile. Log only when the note changes so a stale file
+            // that can't be rotated away doesn't spam the feed every poll.
+            string? note = stale ? "possible clone — stale keyfile replayed"
+                : check.Attest == AttestState.Mismatch
+                    ? "config attestation failed — config.json tampered"
+                : check.Attest == AttestState.Missing
+                    ? "pre-attestation keyfile (legacy format)"
+                : null;
+            if (note != _tamperNote)
             {
-                // Accepted (also the interrupted-rotation case) but loud —
-                // a replayed old secret is what a clone looks like.
-                _tamperNote = "possible clone — stale keyfile replayed";
-                Log("Keyfile presented a previous-generation secret — " +
-                    "possible clone or interrupted rotation.");
-            }
-            else
-            {
-                _tamperNote = null;
+                _tamperNote = note;
+                if (note != null)
+                    Log(stale
+                        ? "Keyfile presented a previous-generation secret — " +
+                          "possible clone or interrupted rotation."
+                        : check.Attest == AttestState.Mismatch
+                            ? "Keyfile attestation mismatch — config.json " +
+                              "tampered or the keyfile was forged."
+                            : "Keyfile is pre-attestation (legacy) — " +
+                              "upgrades to v2 on this rotation.");
             }
 
             if (State == GuardState.Locked)
-                UnlockNow();
+            {
+                UnlockPolicy policy = _config.Guard.UnlockPolicy;
+                bool autoUnlock = policy != UnlockPolicy.KeyAndPassphrase
+                    && (!stale || !strict);
+                if (autoUnlock)
+                {
+                    UnlockNow();
+                }
+                else
+                {
+                    _lock.SetStatus(policy switch
+                    {
+                        UnlockPolicy.KeyAndPassphrase when _keyVerifiedNow
+                            => "Key verified — enter the passphrase.",
+                        UnlockPolicy.KeyAndPassphrase
+                            => "Stale keyfile — passphrase required.",
+                        UnlockPolicy.KeyOnly
+                            => "Stale keyfile — re-enroll or restore the current keyfile.",
+                        _ => "Stale keyfile — type the passphrase.",
+                    });
+                }
+            }
 
             // Burn the secret once per key session (edge), and whenever a
             // stale file shows up (heals interrupted rotations), throttled.
             // Order matters: UnlockNow ran above, so hooks are released before
             // this drive I/O — a slow USB write can't stall the hook pump.
-            if ((edgeFlip || check.Match == SecretMatch.Previous)
+            if ((edgeFlip || stale)
                 && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5))
             {
                 _lastRotateAttemptUtc = DateTime.UtcNow;
                 // Pin prev when the drive IS the previous generation — a failed
                 // write must leave it still-verifiable, not two gens behind.
-                TryRotate(disk, keepPrev: check.Match == SecretMatch.Previous);
+                TryRotate(disk, keepPrev: stale);
             }
         }
         else
         {
             _verifiedEdge = false;
             _tamperNote = null;
+            _keyVerifiedNow = false;
+            _staleKeyPresent = false;
             bool changed = check.Detail != _lastVerifyFailure;
             _lastVerifyFailure = check.Detail;
             if (State != GuardState.Locked)
@@ -322,11 +373,25 @@ internal sealed class GuardService : IDisposable
     }
 
     /// <summary>
+    /// Forced rotation outside the edge/throttle gate — the passphrase-change
+    /// path uses it to re-attest (the MAC covers the passphrase hash, so a
+    /// change invalidates every existing keyfile). False when the key is
+    /// absent or no letter accepted the write.
+    /// </summary>
+    public bool RotateNow()
+    {
+        if (_lastDisk == null)
+            return false;
+        _lastRotateAttemptUtc = DateTime.UtcNow;
+        return TryRotate(_lastDisk, keepPrev: false);
+    }
+
+    /// <summary>
     /// Single-use ratchet: burn the secret the drive presented. Config first,
     /// then the drive — a crash anywhere leaves the drive on the previous
     /// generation, which still verifies as stale and heals on the next pass.
     /// </summary>
-    private void TryRotate(UsbDisk disk, bool keepPrev)
+    private bool TryRotate(UsbDisk disk, bool keepPrev)
     {
         byte[] next = RandomNumberGenerator.GetBytes(64);
 
@@ -346,18 +411,18 @@ internal sealed class GuardService : IDisposable
             _config.RotationCount = oldCount;
             _config.LastRotationUtc = oldRot;
             Log($"Rotation aborted — config save failed ({ex.Message}).");
-            return;
+            return false;
         }
 
         List<(string Letter, string? Error)> results;
         try
         {
-            results = KeyVerifier.RotateKeyfiles(disk, next);
+            results = KeyVerifier.RotateKeyfiles(disk, next, _config);
         }
         catch (Exception ex)
         {
             Log($"Rotation write failed ({ex.Message}) — drive is stale, heals on retry.");
-            return;
+            return false;
         }
         if (results.Count == 0)
             Log($"Config rotated to generation {_config.RotationCount} but the drive " +
@@ -368,6 +433,7 @@ internal sealed class GuardService : IDisposable
             Log($"Rotated to generation {_config.RotationCount} with issues: " +
                 string.Join("; ", results.Select(r
                     => r.Error == null ? $"{r.Letter} ok" : $"{r.Letter} {r.Error}")) + ".");
+        return results.Count > 0 && results.Any(r => r.Error == null);
     }
 
     private void CheckPauseExpiry()
@@ -389,6 +455,13 @@ internal sealed class GuardService : IDisposable
         // This runs inside the low-level keyboard hook — return instantly or
         // the hook times out and keystrokes leak through unswallowed. PBKDF2
         // runs off-thread and the result is marshaled back to the UI.
+
+        // Belt-and-braces: the hook drops input during cooldown, but an Enter
+        // queued just before the freeze could still land here.
+        if (_cooldownUntil is DateTime until && DateTime.Now < until)
+            return;
+
+        UnlockPolicy policy = _config.Guard.UnlockPolicy;
         Task.Run(() =>
         {
             bool ok;
@@ -403,26 +476,70 @@ internal sealed class GuardService : IDisposable
 
             try
             {
-                _monitor.BeginInvoke(new Action(() =>
-                {
-                    if (ok)
-                    {
-                        Log("Unlocked via failsafe passphrase — re-locks on next key removal.");
-                        UnlockNow();
-                    }
-                    else
-                    {
-                        _failedAttempts++;
-                        _lock.SetFailedAttempts(_failedAttempts);
-                        _lock.SetStatus("Incorrect passphrase — try again.");
-                    }
-                }));
+                _monitor.BeginInvoke(new Action(() => OnPassphraseResult(ok, policy)));
             }
             catch (Exception)
             {
                 // UI thread is gone — the process is exiting anyway.
             }
         });
+    }
+
+    private void OnPassphraseResult(bool ok, UnlockPolicy policy)
+    {
+        if (!ok)
+        {
+            _failedAttempts++;
+            _lock.SetFailedAttempts(_failedAttempts);
+            // Exponential cooldown: fails 1-2 free, then 15s/30s/60s/120s/…
+            // capped at 300s. Enforced in the hook so mashing can't pile up.
+            if (_failedAttempts >= 3)
+            {
+                int secs = Math.Min(15 << Math.Min(_failedAttempts - 3, 5), 300);
+                var until = DateTime.Now.AddSeconds(secs);
+                _cooldownUntil = until;
+                _input.SetCooldownUntil(until);
+                _lock.SetCooldown(until);
+                _lock.SetStatus($"Too many attempts — input frozen for {secs}s.");
+                Log($"Passphrase failed attempt #{_failedAttempts} — input frozen {secs}s.");
+            }
+            else
+            {
+                _lock.SetStatus("Incorrect passphrase — try again.");
+            }
+            return;
+        }
+
+        // Correct passphrase — now the policy gate decides.
+        _failedAttempts = 0;
+        _cooldownUntil = null;
+        _input.SetCooldownUntil(null);
+        _lock.SetCooldown(null);
+        _lock.SetFailedAttempts(0);
+
+        if (policy == UnlockPolicy.KeyOnly)
+        {
+            _lock.SetStatus("Passphrase is disabled — insert the key.");
+            return;
+        }
+        if (policy == UnlockPolicy.KeyAndPassphrase && !_keyVerifiedNow)
+        {
+            // Break-glass: under strict tamper a stale key never counts as
+            // the factor, but the passphrase remains an explicit failsafe —
+            // the unlock happens WITH the tamper alarm already raised.
+            if (_config.Guard.StrictTamper && _staleKeyPresent)
+            {
+                Log("Break-glass unlock — passphrase accepted over a stale keyfile.");
+                UnlockNow();
+            }
+            else
+            {
+                _lock.SetStatus("Passphrase correct — insert your key first.");
+            }
+            return;
+        }
+        Log("Unlocked via failsafe passphrase — re-locks on next key removal.");
+        UnlockNow();
     }
 
     private void MaybeAutoLock(string reason)
@@ -440,6 +557,7 @@ internal sealed class GuardService : IDisposable
             return;
         _pausedUntil = null;
         _failedAttempts = 0;
+        _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
         // One retry: a failed attempt unrolls its own partial state first.
@@ -463,6 +581,10 @@ internal sealed class GuardService : IDisposable
             return;
         _lastVerifyFailure = null;
         Log("Unlocked.");
+        // Cooldown dies with the lock session — in-memory only per design.
+        _cooldownUntil = null;
+        _input.SetCooldownUntil(null);
+        _lock.SetCooldown(null);
         _input.Unlock();
         _lock.Hide();
         SetState(GuardState.Unlocked);

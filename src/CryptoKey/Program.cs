@@ -241,6 +241,8 @@ internal static class Program
 
         Console.WriteLine($"Config:        {ConfigStore.ConfigPath}");
         Console.WriteLine($"Device serial: {config.DeviceSerial}");
+        Console.WriteLine($"Unlock policy: {config.Guard.UnlockPolicy}" +
+            (config.Guard.StrictTamper ? " (strict tamper)" : ""));
 
         int exitCode;
         UsbDisk? disk;

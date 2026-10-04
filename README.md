@@ -18,6 +18,21 @@ failsafe passphrase — to unlock.
   the next generation (config keeps the previous hash so an interrupted
   rotation heals). A replayed old secret still unlocks but logs a "possible
   clone" tamper warning and re-poisons itself.
+- **Keyfile v2 envelope** — `.cryptokey` is `"CKY2" || DPAPI(secret ||
+  attestation)`, bound to this user+machine via DPAPI (`CurrentUser`). Copies
+  of the file are dead weight off this machine. The embedded attestation is
+  `HMAC-SHA256(secret, serial || passphraseHash)` — if config.json's serial or
+  passphrase hash is tampered with, the drive itself calls it out (tamper
+  badge + log; the secret still verifies — tripwire, not gate). Legacy raw
+  keyfiles self-upgrade on next rotation.
+- **Unlock policy** (Settings → Unlock policy): `Key or passphrase` (default),
+  `Key + passphrase` (2FA — a verified key alone stays locked; passphrase with
+  no verified key is denied; **lost key = real lockout** — dev panic or Task
+  Manager only), `Key only` (passphrase disabled). Strict tamper mode makes
+  stale keyfiles never count as the key factor.
+- **Passphrase backoff** — fails 1-2 are free, then input freezes
+  15s/30s/60s/120s/300s (enforced inside the keyboard hook, so mashing can't
+  pile up attempts; countdown shown on the lock screen).
 - **Lock** = one borderless topmost dark overlay per monitor (topmost
   re-asserted every 250 ms), low-level keyboard + mouse hooks that swallow all
   input, and `ClipCursor`. The keyboard hook feeds the passphrase buffer before

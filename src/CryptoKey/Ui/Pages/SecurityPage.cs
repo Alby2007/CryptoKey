@@ -182,9 +182,24 @@ internal sealed class SecurityPage : UserControl
             return;
         }
 
+        // The attestation MAC covers the passphrase hash — re-attest now if
+        // the key is present, else the next insert self-heals via rotation.
+        bool reattested;
+        try
+        {
+            reattested = _service.RotateNow();
+        }
+        catch (Exception)
+        {
+            reattested = false;
+        }
         _result.ForeColor = Theme.AccentGreen;
-        _result.Text = "Passphrase updated.";
-        _notify("Passphrase updated", false);
+        _result.Text = reattested
+            ? "Passphrase updated — key re-attested."
+            : "Passphrase updated — key will re-attest on next insert.";
+        _notify(reattested
+            ? "Passphrase updated — key re-attested"
+            : "Passphrase updated — key re-attests on next insert", false);
         _current.ClearText();
         _newPass.ClearText();
         _confirm.ClearText();

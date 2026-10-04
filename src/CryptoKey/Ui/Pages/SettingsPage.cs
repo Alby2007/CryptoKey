@@ -15,6 +15,10 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _animations;
     private readonly ToggleSwitch _startup;
     private readonly ToggleSwitch _startupAdmin;
+    private readonly ToggleSwitch _strictTamper;
+    private readonly AppButton[] _policyBtns;
+    private readonly Label _policyWarn;
+    private UnlockPolicy _policy;
     private readonly AppButton _shortcutBtn;
     private readonly Slider _poll;
     private readonly Label _pollValue;
@@ -38,7 +42,7 @@ internal sealed class SettingsPage : UserControl
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             BackColor = Theme.Bg,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -148,6 +152,88 @@ internal sealed class SettingsPage : UserControl
         beh.Controls.Add(pollRow);
         behCard.Controls.Add(beh);
 
+        // ---- Unlock policy ----
+        var policyCard = new CardPanel
+        {
+            Title = "Unlock policy",
+            Glyph = Glyphs.Shield,
+            Dock = DockStyle.Top,
+            Height = 150,
+            Margin = new Padding(0, 0, 0, 10),
+        };
+        var pol = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Theme.Surface,
+            Padding = new Padding(0),
+        };
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 38f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 34f));
+        pol.RowStyles.Add(new RowStyle(SizeType.Percent, 28f));
+
+        var segRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        segRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 26f));
+        for (int i = 0; i < 3; i++)
+            segRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 74f / 3f));
+        var segLabel = new Label
+        {
+            Text = "Unlock requires",
+            Font = Theme.UIFont(9f),
+            ForeColor = Theme.Text,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+        };
+        segRow.Controls.Add(segLabel, 0, 0);
+
+        _policy = _config.Guard.UnlockPolicy;
+        _policyBtns = new AppButton[3];
+        string[] policyLabels = { "Key or passphrase", "Key + passphrase", "Key only" };
+        for (int i = 0; i < 3; i++)
+        {
+            int idx = i;
+            var b = new AppButton
+            {
+                Text = policyLabels[i],
+                Dock = DockStyle.Fill,
+                Margin = new Padding(3, 4, 3, 4),
+            };
+            b.Click += (_, _) => SetPolicy((UnlockPolicy)idx);
+            _policyBtns[i] = b;
+            segRow.Controls.Add(b, i + 1, 0);
+        }
+        RefreshPolicyButtons();
+
+        _strictTamper = Toggle("Strict tamper — stale keyfiles never unlock",
+            _config.Guard.StrictTamper);
+        _strictTamper.CheckedChanged += (_, _) => Save();
+
+        _policyWarn = new Label
+        {
+            Text = "Lost key under this policy is a real lockout — only the dev panic " +
+                   "combo or Task Manager can recover.",
+            Font = Theme.UIFont(8.5f),
+            ForeColor = Theme.AccentAmber,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+            Visible = _policy != UnlockPolicy.KeyOrPassphrase,
+        };
+
+        pol.Controls.Add(segRow, 0, 0);
+        pol.Controls.Add(_strictTamper, 0, 1);
+        pol.Controls.Add(_policyWarn, 0, 2);
+        policyCard.Controls.Add(pol);
+
         // ---- Storage ----
         var storeCard = new CardPanel
         {
@@ -220,7 +306,8 @@ internal sealed class SettingsPage : UserControl
         storeCard.Controls.Add(store);
 
         layout.Controls.Add(behCard, 0, 0);
-        layout.Controls.Add(storeCard, 0, 1);
+        layout.Controls.Add(policyCard, 0, 1);
+        layout.Controls.Add(storeCard, 0, 2);
         Controls.Add(layout);
 
         _lockOnRemoval.CheckedChanged += (_, _) => Save();
@@ -242,6 +329,21 @@ internal sealed class SettingsPage : UserControl
             _pollSave.Stop();
             _pollSave.Start();
         };
+    }
+
+    private void SetPolicy(UnlockPolicy policy)
+    {
+        _policy = policy;
+        _policyWarn.Visible = policy != UnlockPolicy.KeyOrPassphrase;
+        RefreshPolicyButtons();
+        Save();
+    }
+
+    private void RefreshPolicyButtons()
+    {
+        for (int i = 0; i < _policyBtns.Length; i++)
+            _policyBtns[i].Variant = i == (int)_policy
+                ? ButtonVariant.Primary : ButtonVariant.Ghost;
     }
 
     private void ApplyStartupMode()
@@ -391,6 +493,8 @@ internal sealed class SettingsPage : UserControl
         _config.Guard.LockOnRemoval = _lockOnRemoval.Checked;
         _config.Guard.BalloonTips = _balloonTips.Checked;
         _config.Guard.PollIntervalMs = _poll.Value;
+        _config.Guard.UnlockPolicy = _policy;
+        _config.Guard.StrictTamper = _strictTamper.Checked;
         try
         {
             ConfigStore.Save(_config);

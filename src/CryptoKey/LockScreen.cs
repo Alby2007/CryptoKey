@@ -25,6 +25,7 @@ internal sealed class LockScreen : IDisposable
     private string _status = DefaultStatus;
     private int _passLen;
     private int _failedAttempts;
+    private DateTime? _cooldownUntil;
 
     public LockScreen()
     {
@@ -84,6 +85,14 @@ internal sealed class LockScreen : IDisposable
             f.SetFailedAttempts(count);
     }
 
+    /// <summary>Passphrase-input freeze deadline — countdown paints live until expiry.</summary>
+    public void SetCooldown(DateTime? until)
+    {
+        _cooldownUntil = until;
+        foreach (LockForm f in _forms)
+            f.SetCooldown(until);
+    }
+
     private void BuildForms()
     {
         Screen[] screens = Screen.AllScreens;
@@ -94,6 +103,7 @@ internal sealed class LockScreen : IDisposable
             f.SetStatus(_status);
             f.SetPassphraseLength(_passLen);
             f.SetFailedAttempts(_failedAttempts);
+            f.SetCooldown(_cooldownUntil);
             _forms.Add(f);
         }
     }
@@ -174,6 +184,7 @@ internal sealed class LockScreen : IDisposable
         private string _status = DefaultStatus;
         private int _passLen;
         private int _attempts;
+        private DateTime? _cooldownUntil;
 
         public LockForm(Screen screen, bool primary)
         {
@@ -252,6 +263,12 @@ internal sealed class LockScreen : IDisposable
                 _shake = 0f;
                 _flash = 1f;
             }
+            Invalidate();
+        }
+
+        public void SetCooldown(DateTime? until)
+        {
+            _cooldownUntil = until;
             Invalidate();
         }
 
@@ -372,22 +389,33 @@ internal sealed class LockScreen : IDisposable
                 g.DrawString(_status, SubFont, brush,
                     new RectangleF(card.X + 24f, card.Y + 248f, card.Width - 48f, 20f), Center);
 
-            // Passphrase dots.
-            int dots = Math.Min(_passLen, 20);
-            float dotD = 9f, gap = 15f;
-            float totalW = dots * gap - (gap - dotD);
-            float dx = cx - totalW / 2f;
+            // Passphrase dots — replaced by the cooldown countdown while
+            // input is frozen (tick repaints, so it self-clears on expiry).
             float dy = card.Y + 296f;
-            using (var dotBrush = new SolidBrush(Theme.Accent))
+            if (_cooldownUntil is DateTime until && DateTime.Now < until)
             {
-                for (int i = 0; i < dots; i++)
-                    g.FillEllipse(dotBrush, dx + i * gap, dy, dotD, dotD);
-            }
-            if (_passLen == 0)
-            {
-                using var brush = new SolidBrush(Theme.WithAlpha(Theme.TextDim, 120));
-                g.DrawString("type your passphrase", SubFont, brush,
+                int secs = (int)Math.Ceiling((until - DateTime.Now).TotalSeconds);
+                using var brush = new SolidBrush(Theme.AccentAmber);
+                g.DrawString($"input frozen — try again in {secs}s", SubFont, brush,
                     new RectangleF(card.X, dy - 6f, card.Width, 20f), Center);
+            }
+            else
+            {
+                int dots = Math.Min(_passLen, 20);
+                float dotD = 9f, gap = 15f;
+                float totalW = dots * gap - (gap - dotD);
+                float dx = cx - totalW / 2f;
+                using (var dotBrush = new SolidBrush(Theme.Accent))
+                {
+                    for (int i = 0; i < dots; i++)
+                        g.FillEllipse(dotBrush, dx + i * gap, dy, dotD, dotD);
+                }
+                if (_passLen == 0)
+                {
+                    using var brush = new SolidBrush(Theme.WithAlpha(Theme.TextDim, 120));
+                    g.DrawString("type your passphrase", SubFont, brush,
+                        new RectangleF(card.X, dy - 6f, card.Width, 20f), Center);
+                }
             }
 
             // Failed-attempts pill.

@@ -25,6 +25,7 @@ internal sealed class InputLocker : IDisposable
     private readonly StringBuilder _buffer = new();
     private bool _capsOn;
     private bool _numOn;
+    private DateTime _cooldownUntil = DateTime.MinValue;
 
     private IntPtr _kbHook = IntPtr.Zero;
     private IntPtr _mouseHook = IntPtr.Zero;
@@ -54,6 +55,7 @@ internal sealed class InputLocker : IDisposable
         }
         ClipCursor();
         _buffer.Clear();
+        _cooldownUntil = DateTime.MinValue;
         _capsOn = ToggledOn(NativeMethods.VK_CAPITAL);
         _numOn = ToggledOn(NativeMethods.VK_NUMLOCK);
         PassphraseLengthChanged?.Invoke(0);
@@ -66,6 +68,14 @@ internal sealed class InputLocker : IDisposable
         if (Active)
             ClipCursor();
     }
+
+    /// <summary>
+    /// Freeze passphrase input until the given time — the hook keeps
+    /// swallowing keystrokes but never buffers or submits them, so mashing
+    /// during a cooldown can't stack the penalty. Null clears it.
+    /// </summary>
+    public void SetCooldownUntil(DateTime? until)
+        => _cooldownUntil = until ?? DateTime.MinValue;
 
     public void Unlock() => RemoveHooks();
 
@@ -111,6 +121,10 @@ internal sealed class InputLocker : IDisposable
                     PanicRequested?.Invoke();
                     return (IntPtr)1;
                 }
+
+                // Cooldown: keys die here — no buffer, no Enter, no counting.
+                if (DateTime.Now < _cooldownUntil)
+                    return (IntPtr)1;
 
                 switch (vk)
                 {

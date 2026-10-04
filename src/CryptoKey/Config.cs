@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CryptoKey;
 
@@ -24,12 +26,33 @@ internal enum SecretMatch
     Previous,
 }
 
+/// <summary>How a verified key and the failsafe passphrase combine to unlock.</summary>
+internal enum UnlockPolicy
+{
+    KeyOrPassphrase,
+    KeyAndPassphrase,
+    KeyOnly,
+}
+
+/// <summary>Whether the keyfile's embedded config attestation matched.</summary>
+internal enum AttestState
+{
+    Ok,
+    Missing,
+    Mismatch,
+}
+
 internal sealed class GuardSettings
 {
     public int PollIntervalMs { get; set; } = 1000;
     public bool LockOnRemoval { get; set; } = true;
     public bool BalloonTips { get; set; } = true;
     public bool Animations { get; set; } = true;
+    [JsonConverter(typeof(JsonStringEnumConverter<UnlockPolicy>))]
+    public UnlockPolicy UnlockPolicy { get; set; } = UnlockPolicy.KeyOrPassphrase;
+
+    /// <summary>Stale (previous-generation) keyfiles never count as the key factor.</summary>
+    public bool StrictTamper { get; set; }
 }
 
 internal static class ConfigStore
@@ -141,6 +164,25 @@ internal static class ConfigStore
         {
             return false; // corrupt or tampered config — never verify
         }
+    }
+
+    /// <summary>
+    /// Attestation MAC embedded in the v2 keyfile: the drive vouches that this
+    /// config (serial + passphrase hash) is the one the keyfile was written
+    /// for. A mismatch means config.json or the keyfile was tampered with —
+    /// the secret is required to forge the MAC, so an attacker who only
+    /// copies/edits files can't produce one.
+    /// </summary>
+    public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
+    {
+        byte[] tag = Encoding.UTF8.GetBytes("CKY-ATTEST");
+        byte[] serial = Encoding.UTF8.GetBytes(config.DeviceSerial);
+        byte[] pass = Encoding.UTF8.GetBytes(config.PassphraseHash);
+        byte[] data = new byte[tag.Length + serial.Length + pass.Length];
+        Buffer.BlockCopy(tag, 0, data, 0, tag.Length);
+        Buffer.BlockCopy(serial, 0, data, tag.Length, serial.Length);
+        Buffer.BlockCopy(pass, 0, data, tag.Length + serial.Length, pass.Length);
+        return HMACSHA256.HashData(secret, data);
     }
 
     // The on-disk secret is 64 random bytes — high entropy, so a single

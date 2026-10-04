@@ -80,12 +80,20 @@ internal static class Enrollment
             return 1;
         }
 
+        // Config first — the v2 keyfile's attestation MAC covers the serial
+        // and passphrase hash, so the envelope can't be written until the
+        // config fields exist. Keep guard preferences across a re-enroll.
         byte[] secret = RandomNumberGenerator.GetBytes(SecretBytes);
+        KeyConfig fresh = ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase);
+        if (existing?.Guard != null)
+            fresh.Guard = existing.Guard;
+
         string keyPath = KeyVerifier.KeyFilePath(letter);
         string tmpPath = keyPath + ".tmp";
         try
         {
-            File.WriteAllBytes(tmpPath, secret);
+            // v2 envelope: DPAPI-bound to this user/machine + attestation MAC.
+            File.WriteAllBytes(tmpPath, KeyVerifier.WrapKeyfile(secret, fresh));
             File.SetAttributes(tmpPath, FileAttributes.Hidden | FileAttributes.System);
             File.Move(tmpPath, keyPath, overwrite: true);
         }
@@ -98,11 +106,6 @@ internal static class Enrollment
 
         try
         {
-            // Keep the user's guard preferences across a re-enroll — CreateNew
-            // would otherwise reset them to defaults.
-            KeyConfig fresh = ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase);
-            if (existing?.Guard != null)
-                fresh.Guard = existing.Guard;
             ConfigStore.Save(fresh);
         }
         catch (Exception ex)
