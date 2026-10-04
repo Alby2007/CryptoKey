@@ -6,7 +6,7 @@ namespace CryptoKey;
 internal static class Enrollment
 {
     private const int SecretBytes = 64;
-    private const int MinPassphraseLength = 4;
+    private const int MinPassphraseLength = 8;
 
     public static int Run()
     {

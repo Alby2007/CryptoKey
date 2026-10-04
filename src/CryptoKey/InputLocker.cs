@@ -129,6 +129,10 @@ internal sealed class InputLocker : IDisposable
                 switch (vk)
                 {
                     case NativeMethods.VK_RETURN:
+                        // An empty Enter is noise, not a guess — don't burn
+                        // a backoff attempt on it.
+                        if (_buffer.Length == 0)
+                            break;
                         string attempt = _buffer.ToString();
                         _buffer.Clear();
                         PassphraseLengthChanged?.Invoke(0);

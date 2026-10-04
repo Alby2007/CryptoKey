@@ -6,7 +6,7 @@ namespace CryptoKey;
 /// <summary>Failsafe-passphrase management, enrolled-key info, re-enroll.</summary>
 internal sealed class SecurityPage : UserControl
 {
-    private const int MinPassphraseLength = 4;
+    private const int MinPassphraseLength = 8;
 
     private readonly KeyConfig _config;
     private readonly GuardService _service;
@@ -19,6 +19,7 @@ internal sealed class SecurityPage : UserControl
     private readonly Label _result;
     private readonly Label _keyStatus;
     private readonly Label _keyDetail;
+    private readonly AppButton _repair;
 
     public SecurityPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -72,7 +73,17 @@ internal sealed class SecurityPage : UserControl
             Size = new Size(140, 28),
         };
         reenroll.Click += (_, _) => ReEnroll();
-        keyCard.Controls.AddRange(new Control[] { _keyStatus, _keyDetail, reenroll });
+        _repair = new AppButton
+        {
+            Text = "Repair keyfile",
+            Glyph = Glyphs.Refresh,
+            Variant = ButtonVariant.Secondary,
+            Location = new Point(164, 84),
+            Size = new Size(140, 28),
+            Enabled = false,
+        };
+        _repair.Click += (_, _) => Repair();
+        keyCard.Controls.AddRange(new Control[] { _keyStatus, _keyDetail, reenroll, _repair });
 
         // ---- Passphrase ----
         var passCard = new CardPanel
@@ -231,6 +242,7 @@ internal sealed class SecurityPage : UserControl
         Task.Run(() =>
         {
             string status, detail;
+            bool needsRepair = false;
             try
             {
                 UsbDisk? disk = UsbMonitor.FindDisk(_config.DeviceSerial);
@@ -247,6 +259,7 @@ internal sealed class SecurityPage : UserControl
                     bool ok = KeyVerifier.Verify(_config, disk, out string why);
                     status = $"PRESENT — {why}";
                     detail = $"{disk.Model} on {vols} — serial {_config.DeviceSerial}";
+                    needsRepair = !ok;
                 }
             }
             catch (Exception ex)
@@ -262,10 +275,23 @@ internal sealed class SecurityPage : UserControl
                         ? Theme.AccentGreen : Theme.TextDim;
                     _keyStatus.Text = status;
                     _keyDetail.Text = detail;
+                    _repair.Enabled = needsRepair
+                        && _service.Snapshot().State != GuardState.Locked;
                 }));
             }
             catch (Exception) { }
         });
+    }
+
+    private void Repair()
+    {
+        _repair.Enabled = false;
+        bool ok;
+        try { ok = _service.RepairKeyfile(); }
+        catch (Exception) { ok = false; }
+        _notify(ok ? "Keyfile repaired — key re-armed"
+                   : "Repair failed — key absent or write error", !ok);
+        RefreshKeyInfo();
     }
 
     private void ReEnroll()

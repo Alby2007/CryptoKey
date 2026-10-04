@@ -91,8 +91,11 @@ Failure semantics:
 - **Crash after config save, before write** → drive holds `prev` → stale
   verify → heals on next pass (`keepPrev` pins the chain so a failed write
   can never orphan the drive two generations back).
-- **Keyfile deleted from every letter** → the first mounted letter is
-  re-armed on the next rotation.
+- **Keyfile deleted from every letter** → nothing verifies, so no rotation
+  edge ever fires — the drive stays dead until the explicit **Repair
+  keyfile** action (Security tab; unlocked + drive present). Auto-heal is
+  deliberately avoided: writing a fresh keyfile on a failed check would
+  arm any drive spoofing the serial.
 - **Previous-generation match** → unlocks (non-strict) but logs
   "possible clone", sets the tamper badge, and re-poisons itself.
 - Clone lifetime is bounded: every guard restart burns a generation.

@@ -20,7 +20,7 @@ the lock working.
 
 | Failure | What happens | Rescue |
 |---|---|---|
-| Keyfile wiped from the drive | Drive can't verify → stays stale | Next rotation re-arms the first mounted letter |
+| Keyfile wiped from the drive | Drive can't verify → `None` forever — no verify edge, so rotation never runs | Security tab → **Repair keyfile** (explicit, user-gated: unlocked session + drive present — the enrollment trust bar). Deliberately not automatic — auto-healing a failed check would hand a working keyfile to any serial-spoofing drive |
 | Rotation interrupted (crash mid-write) | Config is a generation ahead; drive holds `prev` | Stale verify → `keepPrev` rotation heals — a failed write can never orphan the drive two gens back |
 | Read-only / write-protected drive | Write fails every time | Drive stays `prev`-valid, flagged each poll, retry every 5 s — no lockout |
 | `.cryptokey` copied to another drive / user | Serial check rejects other drives; DPAPI unwrap fails for other users/machines | Re-enroll, or the passphrase under `KeyOrPassphrase` |

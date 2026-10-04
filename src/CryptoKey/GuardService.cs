@@ -489,6 +489,35 @@ internal sealed class GuardService : IDisposable
     }
 
     /// <summary>
+    /// Deliberate re-arm: rotate and rewrite the keyfile when the attached
+    /// enrolled drive is failing to verify (wiped/corrupt file). Explicitly
+    /// NOT an auto-heal — auto-writing on a failed check would hand a
+    /// working keyfile to any drive spoofing the serial. Gated on the
+    /// unlocked session, which is the same trust bar as enrollment.
+    /// </summary>
+    public bool RepairKeyfile()
+    {
+        if (State == GuardState.Locked)
+            return false;
+        if (_lastDisk == null)
+        {
+            Log("Keyfile repair: enrolled drive not attached.");
+            return false;
+        }
+        if (KeyVerifier.Check(_config, _lastDisk).Match == SecretMatch.Current)
+        {
+            Log("Keyfile repair: key already verifies — nothing to repair.");
+            return true;
+        }
+        Log("Repairing keyfile — writing a fresh envelope to the attached drive.");
+        _lastRotateAttemptUtc = DateTime.UtcNow;
+        bool ok = TryRotate(_lastDisk, keepPrev: false, backgroundWrite: false);
+        Log(ok ? "Keyfile repaired — drive re-armed."
+               : "Keyfile repair failed — see rotation errors above.");
+        return ok;
+    }
+
+    /// <summary>
     /// Single-use ratchet: burn the secret the drive presented. Config first,
     /// then the drive — a crash anywhere leaves the drive on the previous
     /// generation, which still verifies as stale and heals on the next pass.
@@ -635,9 +664,9 @@ internal sealed class GuardService : IDisposable
             _surface.SetFailedAttempts(_failedAttempts);
             // Exponential cooldown: fails 1-2 free, then 15s/30s/60s/120s/…
             // capped at 300s. Enforced in the hook so mashing can't pile up.
-            if (_failedAttempts >= 3)
+            int secs = Backoff.Seconds(_failedAttempts);
+            if (secs > 0)
             {
-                int secs = Math.Min(15 << Math.Min(_failedAttempts - 3, 5), 300);
                 var until = DateTime.Now.AddSeconds(secs);
                 _cooldownUntil = until;
                 _surface.SetCooldown(until);

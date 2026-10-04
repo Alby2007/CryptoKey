@@ -70,8 +70,14 @@ internal static class ConfigStore
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
+    // APPDATA via env var, not GetFolderPath: identical on Windows (the
+    // variable is always set), but honors Environment.SetEnvironmentVariable
+    // — which is what the test suite uses to redirect the store into a
+    // temp dir. GetFolderPath is a KnownFolder lookup and ignores it.
     public static string ConfigDir { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CryptoKey");
+        Environment.GetEnvironmentVariable("APPDATA")
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "CryptoKey");
 
     public static string ConfigPath => Path.Combine(ConfigDir, "config.json");
 

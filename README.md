@@ -116,8 +116,15 @@ the key, the passphrase, or Task Manager.
 
 ```console
 dotnet build
+dotnet test                    # xUnit suite — pure security invariants
 dotnet run --project src/CryptoKey -- enroll
 ```
+
+Enroll asks for a failsafe passphrase (min 8 chars — the Security tab's
+change-passphrase floor is the same; existing shorter passphrases keep
+working). If the drive's keyfile is ever wiped, the Security tab's
+**Repair keyfile** button re-arms it — deliberately user-gated rather
+than automatic.
 
 ## Warnings / known limits
 

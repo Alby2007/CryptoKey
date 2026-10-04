@@ -5,7 +5,7 @@
 ```console
 cryptokey                        # dashboard app: guard + UI (add --dev, --takeover, --classic)
 cryptokey guard                  # tray daemon, console hidden (same flags)
-cryptokey enroll                 # enroll the inserted removable drive
+cryptokey enroll                 # enroll the inserted removable drive (failsafe passphrase, min 8 chars)
 cryptokey open                   # raise the dashboard on the running guard
 cryptokey status                 # local verify + guard reachability
 cryptokey lock                   # IPC: lock now

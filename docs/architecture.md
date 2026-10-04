@@ -120,5 +120,13 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `IpcServer.cs` / `IpcClient.cs` | Pipe ACLs + accept loop / one-shot CLI transport |
 | `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/`LockWorkStation` role + `Supervisor` — guard-side mutex probe, spawn, stop |
 | `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
+| `Backoff.cs` | Passphrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
+
+`tests/CryptoKey.Tests` (xUnit) covers the pure security invariants —
+rotation chain (incl. `keepPrev` orphan-proofing), envelope/attestation,
+tri-state match, `RotateKeyfiles` semantics, backoff ladder, config-store
+round-trip via an APPDATA redirect fixture. The interactive layer
+(`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
+agents are non-interactive.
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |
