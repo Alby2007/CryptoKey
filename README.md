@@ -4,6 +4,9 @@ Turn any USB flash drive into a physical PC key. Pull it out and a fullscreen
 lock swallows your screen, keyboard, and mouse; plug it back in — or type the
 failsafe passphrase — to unlock.
 
+> **Internals:** architecture, security model, state machine, recovery
+> paths, and the CLI/config reference live in [`docs/`](docs/README.md).
+
 ## How it works
 
 - **Enroll** records the drive's hardware `SerialNumber` (via WMI, immune to
