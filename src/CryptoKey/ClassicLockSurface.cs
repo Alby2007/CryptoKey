@@ -11,6 +11,13 @@ internal sealed class ClassicLockSurface : ILockSurface
     public event Action<string>? PassphraseSubmitted;
     public event Action? PanicRequested;
 
+    /// <summary>Never fires — the overlay has no private desktop to flap.</summary>
+    public event Action<string>? SecurityEvent
+    {
+        add { }
+        remove { }
+    }
+
     private readonly InputLocker _input;
     private readonly LockScreen _lock;
 

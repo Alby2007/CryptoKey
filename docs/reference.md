@@ -23,6 +23,8 @@ cryptokey --set-startup <Off|Normal|Elevated>   # elevated startup helper (UAC h
 cryptokey --lock-watchdog <pid>                 # dead-man's switch spawned per secure engage
 cryptokey watchdog --parent <pid>               # persistent guard supervisor (spawned by the guard)
 cryptokey --release-desktop                     # SwitchDesktop → Default escape hatch
+                                                # (while locked, the flap monitor yanks you back —
+                                                # 3 tries in 10s escalates to LockWorkStation)
 cryptokey --export-icon <path>                  # dev/internal: regenerate app.ico
 ```
 

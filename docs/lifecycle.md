@@ -60,7 +60,7 @@ sequenceDiagram
     LT-->>SS: _ready via message queue (pump-proven, 5 s timeout)
     SS->>WD: spawn --lock-watchdog <pid> — before the switch
     SS->>WIN: SwitchDesktop(_hLock)
-    SS-->>GS: true → _engaged = true
+    SS-->>GS: true → _engaged = true → flap monitor thread starts
     GS-->>GS: any failure → log reason → SwitchToClassic → Engage overlay
 ```
 
@@ -72,6 +72,24 @@ Ordering invariants:
   switch is exactly what it covers.
 - `_engaged` is only set after `SwitchDesktop` succeeds — it's the
   authoritative flag; the form's lifetime races Joins.
+
+## Desktop-flap monitor
+
+While `_engaged`, a background thread (`CryptoKey.Flap`, ~300ms) polls
+`OpenInputDesktop` — the same `SwitchDesktop` `--release-desktop` uses is
+available to any same-session process, so an attacker could steal input
+from the lock desktop without killing anything or touching a hook. The
+tick takes `_engageSync`, so `Disengage`'s switch-back is never misread.
+
+| Input desktop | Class | Action |
+|---|---|---|
+| `CryptoKeyLock` | healthy | none |
+| `Winlogon` by name, or open fails (SAS ACL-deny tell) | legit — CAD/UAC | skip, not counted; input returns on its own |
+| anything else — `Default`, attacker desktops | hostile flap | `SwitchDesktop(_hLock)` + `SecurityEvent("desktop-flap")`; ≥3 in 10s → `"desktop-flap-storm"` + `LockWorkStation` |
+
+The storm drops the attacker at real Windows auth — their script can't
+answer OS credentials. The monitor dies when `_engaged` clears; the
+counter resets on teardown.
 
 ## Disengage / release paths
 

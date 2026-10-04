@@ -60,6 +60,22 @@ internal sealed class GuardService : IDisposable
     {
         s.PassphraseSubmitted += OnPassphraseSubmitted;
         s.PanicRequested += OnPanic;
+        s.SecurityEvent += OnSurfaceSecurityEvent;
+    }
+
+    /// <summary>
+    /// Surface-reported security events — every kind logs; a "-storm"
+    /// (repeated foreign-desktop switches while locked = scripted attack)
+    /// also alerts and snaps.
+    /// </summary>
+    private void OnSurfaceSecurityEvent(string kind)
+    {
+        Log($"Security event: {kind}.");
+        if (kind.EndsWith("-storm", StringComparison.Ordinal))
+        {
+            Snap("desktop-flap");
+            Alert("Desktop flap storm", "repeated foreign-desktop switches while locked — workstation locked at OS level");
+        }
     }
 
     private void OnPanic()

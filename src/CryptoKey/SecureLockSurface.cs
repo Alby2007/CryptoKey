@@ -21,6 +21,7 @@ internal sealed class SecureLockSurface : ILockSurface
 {
     public event Action<string>? PassphraseSubmitted;
     public event Action? PanicRequested;
+    public event Action<string>? SecurityEvent;
 
     private const string DesktopName = "CryptoKeyLock";
 
@@ -34,6 +35,8 @@ internal sealed class SecureLockSurface : ILockSurface
     private volatile bool _abandoned;
     private volatile bool _engaged; // authoritative "session is switched" flag
     private Process? _watchdog;     // dead-man's switch for the switched session
+    private Thread? _flapThread;
+    private readonly FlapCounter _flapCounter = new();
 
     // Created and owned on the lock thread — never touch directly except
     // through InvokeOnLock (or from the lock thread itself).
@@ -177,7 +180,65 @@ internal sealed class SecureLockSurface : ILockSurface
             return false;
         }
         _engaged = true;
+        StartFlapMonitor();
         return true;
+    }
+
+    /// <summary>
+    /// Desktop-flap monitor (~300ms): --release-desktop's mechanism is also
+    /// the attack — any same-session process can SwitchDesktop input away
+    /// from CryptoKeyLock without touching a hook or killing anything.
+    /// Foreign input desktops get yanked back inside a tick; a storm (≥3
+    /// in 10s) escalates to LockWorkStation — the attacker lands on real
+    /// Windows auth their script can't answer.
+    ///
+    /// The tick runs under _engageSync: Disengage holds it through
+    /// SwitchBack + _engaged=false, so a legit unlock is never misread as
+    /// a flap. ReleaseInput clears _engaged before its switch-back retries
+    /// — covered by the re-check right before any re-switch.
+    /// </summary>
+    private void StartFlapMonitor()
+    {
+        _flapCounter.Reset();
+        _flapThread = new Thread(FlapMonitorMain)
+        {
+            IsBackground = true,
+            Name = "CryptoKey.Flap",
+        };
+        _flapThread.Start();
+    }
+
+    private void FlapMonitorMain()
+    {
+        while (_engaged)
+        {
+            Thread.Sleep(300);
+            lock (_engageSync)
+            {
+                if (!_engaged)
+                    break;
+                IntPtr h = NativeMethods.OpenInputDesktop(0, false,
+                    NativeMethods.DESKTOP_READOBJECTS);
+                bool openFailed = h == IntPtr.Zero;
+                string? name = null;
+                if (!openFailed)
+                {
+                    name = GetDesktopName(h);
+                    NativeMethods.CloseDesktop(h);
+                }
+                if (!FlapPolicy.IsHostile(name, openFailed))
+                    continue;
+                if (!_engaged)
+                    break; // ReleaseInput switched back mid-open — don't fight it
+                NativeMethods.SwitchDesktop(_hLock);
+                SecurityEvent?.Invoke("desktop-flap");
+                if (_flapCounter.Record(DateTime.UtcNow))
+                {
+                    SecurityEvent?.Invoke("desktop-flap-storm");
+                    NativeMethods.LockWorkStation();
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -349,6 +410,8 @@ internal sealed class SecureLockSurface : ILockSurface
     private void TearDownLockThread()
     {
         _abandoned = true;
+        _flapCounter.Reset();
+        _flapThread = null; // exits on its own once _engaged clears
         StopWatchdog();
         LockForm? f = _form;
         if (f != null)

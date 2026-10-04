@@ -15,6 +15,14 @@ internal interface ILockSurface : IDisposable
     event Action? PanicRequested;
 
     /// <summary>
+    /// Security events the surface detects — "desktop-flap" per hostile
+    /// input-desktop switch, "desktop-flap-storm" when they come in a
+    /// burst. The classic surface never fires; the guard decides what to
+    /// do with each (log always, alert/snap on storm).
+    /// </summary>
+    event Action<string>? SecurityEvent;
+
+    /// <summary>
     /// Show the lock and contain input. False means the surface could not
     /// engage — the caller falls back (secure → classic). The lock must
     /// always land.
