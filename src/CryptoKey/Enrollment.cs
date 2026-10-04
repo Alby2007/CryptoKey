@@ -88,17 +88,16 @@ internal static class Enrollment
             fresh.Guard = existing.Guard;
 
         string keyPath = KeyVerifier.KeyFilePath(letter);
-        string tmpPath = keyPath + ".tmp";
         try
         {
             // v2 envelope: DPAPI-bound to this user/machine + attestation MAC.
-            File.WriteAllBytes(tmpPath, KeyVerifier.WrapKeyfile(secret, fresh));
-            File.SetAttributes(tmpPath, FileAttributes.Hidden | FileAttributes.System);
-            File.Move(tmpPath, keyPath, overwrite: true);
+            // AtomicFile flushes to media before the rename — no truncated
+            // keyfile if the drive is pulled mid-write.
+            AtomicFile.WriteAllBytes(keyPath, KeyVerifier.WrapKeyfile(secret, fresh));
+            File.SetAttributes(keyPath, FileAttributes.Hidden | FileAttributes.System);
         }
         catch (Exception ex)
         {
-            try { File.Delete(tmpPath); } catch { }
             Console.WriteLine($"Failed to write keyfile to {keyPath}: {ex.Message}");
             return 1;
         }

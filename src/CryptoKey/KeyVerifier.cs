@@ -238,19 +238,19 @@ internal static class KeyVerifier
         foreach (string letter in targets)
         {
             string path = KeyFilePath(letter);
-            string tmp = path + ".tmp";
             try
             {
-                File.WriteAllBytes(tmp, envelope);
-                File.SetAttributes(tmp, FileAttributes.Hidden | FileAttributes.System);
-                File.Move(tmp, path, overwrite: true);
+                // Flushed to media before the rename — USB is usually FAT32/
+                // exFAT (no journal), so a mid-write yank must never leave a
+                // truncated keyfile at the final name.
+                AtomicFile.WriteAllBytes(path, envelope);
+                File.SetAttributes(path, FileAttributes.Hidden | FileAttributes.System);
                 byte[] back = File.ReadAllBytes(path);
                 results.Add((letter,
                     back.AsSpan().SequenceEqual(envelope) ? null : "read-back mismatch"));
             }
             catch (Exception ex)
             {
-                try { File.Delete(tmp); } catch { }
                 results.Add((letter, ex.Message));
             }
         }

@@ -53,7 +53,10 @@ an elevated guard while excluding low-IL processes.
 
 ## `config.json` — `%APPDATA%\CryptoKey\config.json`
 
-Atomic writes (tmp+move). Secrets are **hashes only** — the raw secret
+Atomic writes: tmp → `FlushFileBuffers` → rename, so a torn write can never
+land at the final name (matters most on FAT32/exFAT drives with no journal).
+`config.json.bak` mirrors every save — a corrupt primary is quarantined to
+`.bad` and the backup loads instead. Secrets are **hashes only** — the raw secret
 lives only on the drive.
 
 | Field | Meaning |
@@ -62,7 +65,8 @@ lives only on the drive.
 | `SecretSalt` + `SecretHash` | `SHA-256(salt ‖ secret)` verifier — base64 |
 | `PrevSecretHash` | Previous ratchet generation (heal window) |
 | `RotationCount`, `LastRotationUtc` | Ratchet bookkeeping; `status`/dashboard show generation |
-| `PassphraseSalt` + `PassphraseHash` | PBKDF2-HMAC-SHA256 verifier, 100 000 iterations |
+| `PassphraseSalt` + `PassphraseHash` | PBKDF2-HMAC-SHA256 verifier — iteration count stored in `PassphraseIterations`: 600 000 written now, legacy 100 000 verifies until the next change |
+| `PassphraseIterations` | PBKDF2 rounds for the hash above — persisted so old hashes keep verifying and upgrades ride the next `ChangePassphrase` |
 | `Guard.PollIntervalMs` | USB poll cadence — default 1000, clamped 250–10 000 |
 | `Guard.LockOnRemoval` | Auto-lock when the key disappears — default `true` |
 | `Guard.BalloonTips` | Tray notifications — default `true` |
@@ -75,7 +79,7 @@ lives only on the drive.
 
 ## Keyfile — `<drive>:\.cryptokey`
 
-Hidden+system, written atomically per letter on rotation.
+Hidden+system, written flushed-tmp→rename per letter on rotation.
 
 ```text
 v2:  "CKY2" ‖ DPAPI-CurrentUser( secret 64B ‖ attestation 32B )

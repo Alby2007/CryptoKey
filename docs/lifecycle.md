@@ -143,7 +143,7 @@ sequenceDiagram
 
     P->>KV: Check(config, disk) → Match + AttestState
     Note over P: edge (first verify this session)<br/>or stale (Previous match)
-    P->>CFG: RotateSecret(secret', keepPrev = stale)<br/>cur→prev (unless keepPrev) · gen++ · atomic save
+    P->>CFG: RotateSecret(secret', keepPrev = stale)<br/>cur→prev (unless keepPrev) · gen++ · flushed save
     alt save failed
         P->>P: roll back in-memory fields — nothing desyncs
     end

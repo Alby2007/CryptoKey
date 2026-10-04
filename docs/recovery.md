@@ -13,8 +13,8 @@ the lock working.
 | Lock-thread pump dies unexpectedly | `finally` → `ReleaseInput` — clears `_engaged`, retries the switch-back (×4), unhooks, reaps watchdog | Same watchdog if the guard also dies |
 | `SwitchDesktop` *back* fails | Teardown aborts: form, hooks, and watchdog stay alive; `Disengage` returns `false`; `GuardService` **stays Locked** | Next unlock retries the switch; process exit still lets the watchdog fire |
 | Secure `Engage` fails at any step | Logged reason → automatic fallback to the classic overlay | The lock must always land |
-| Overlay hooks fail to install | Screen-only lock + visible `WARNING: input hooks failed` status | Ctrl+Alt+Del → Task Manager — the documented limitation |
-| Session stranded on the lock desktop anyway | — | `cryptokey --release-desktop` (e.g. Ctrl+Alt+Del → Task Manager → "Run new task"), or the dev panic combo |
+| Overlay hooks fail to install | Screen-only lock + visible `WARNING: input hooks failed` status | While locked the policies have already applied — Ctrl+Alt+Del → **Switch user** or the **power button** → reboot (Task Manager is disabled by design while locked) |
+| Session stranded on the lock desktop anyway | — | `cryptokey --release-desktop` from **another logged-in session** (CAD → Switch user) or Win+R after a reboot — Task Manager's "Run new task" is policy-blocked while locked — or the dev panic combo |
 
 ## Key / keyfile failures
 
@@ -32,7 +32,7 @@ the lock working.
 
 | Failure | What happens | Rescue |
 |---|---|---|
-| `config.json` corrupt / missing | `TryLoadConfig` fails — the app refuses to run | Re-enroll (config is regenerated) |
+| `config.json` corrupt | Quarantined to `config.json.bad`; `config.json.bak` (last-good mirror, written on every save) loads instead | Modal warning on boot (autostart hides the console — a silent fail-open would mean "no protection, no sign"); only if **both** are corrupt does the app refuse to run → re-enroll |
 | Hand-edited config overwritten | A running guard saves in-memory state on every rotation | `cryptokey quit` before hand-editing — documented |
 | Re-enroll while guard runs | `reenrolled` IPC → in-place `ReloadConfig` — serial, hashes, guard settings all refresh | Old passphrase dies immediately; if the new key isn't inserted the fail-closed check locks |
 | `.tmp` orphans from crashed writes | Atomic tmp+move — the real file is never torn | Next write overwrites the orphan |
@@ -42,7 +42,7 @@ the lock working.
 | Failure | What happens | Rescue |
 |---|---|---|
 | Forgotten passphrase | — | The key itself under `KeyOrPassphrase`/`KeyOnly`… otherwise a true lockout (the settings warning is honest about this) |
-| Lost key under `KeyOnly` / 2FA | No passphrase path by design | Re-enroll a new drive; panic combo in `--dev`; Ctrl+Alt+Del → kill → watchdog restores input |
+| Lost key under `KeyOnly` / 2FA | No passphrase path by design | Re-enroll a new drive; panic combo in `--dev`; CAD → Switch user and kill from that session → watchdog restores input |
 | Frozen input during backoff | Cooldown gate in the hook | Amber countdown; panic combo works through the freeze (checked first) |
 | Hook callback stalls | `LowLevelHooksTimeout` → input leaks | By design everything slow runs off the hook thread: WMI polling, PBKDF2, USB rotation writes |
 
@@ -62,6 +62,6 @@ the lock working.
 1. **Passphrase** — normal failsafe (unless `KeyOnly`, by design).
 2. **Panic combo** `Ctrl+Alt+Shift+F12` — `--dev` only; disengages first, then exits.
 3. **Watchdog** — automatic on guard death while secure-locked.
-4. **`cryptokey --release-desktop`** — manual desktop rescue, independent of IPC/hooks.
+4. **`cryptokey --release-desktop`** — manual desktop rescue, independent of IPC/hooks; also restores lock policies. Reachable while locked only from another logged-in session (Switch user) — after a reboot, Win+R works.
 5. **`--classic`** — skips the desktop machinery entirely on next launch.
-6. **Ctrl+Alt+Del → Task Manager → kill** — the last resort; the watchdog restores input automatically.
+6. **Ctrl+Alt+Del → Switch user or the power button** — the last resort while locked. Task Manager and Sign out are *policy-disabled by design* while locked (that's what closes the kill path), so don't plan on them. A reboot always clears a stranded private desktop — desktop objects die with the session — and persisted policies restore when the guard next starts.

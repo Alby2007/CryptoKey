@@ -78,7 +78,7 @@ consume the same `_config` instance and the same event surface
 | **WMI worker** (`UsbMonitor`) | `Win32_DiskDrive` enumeration | Polls off-pump so a slow WMI query can't stall hooks; results marshal to the UI thread |
 | **Lock thread** (secure mode, per engage) | `SetThreadDesktop` → `InputLocker` LL hooks → `LockForm` → own message pump | STA. Created fresh every engage; teardown closes the form and joins |
 | **Rotation worker** | `RotateKeyfiles` — pure file I/O on a pre-built envelope | Reads no mutable config; logs back via `BeginInvoke` |
-| **Passphrase worker** | PBKDF2 verify (~100k iterations) | Hook returns instantly; result marshaled back to UI |
+| **Passphrase worker** | PBKDF2 verify (600k iterations; count stored per-config) | Hook returns instantly; result marshaled back to UI |
 | **Lock-watchdog process** | `Process.WaitForExit(parent)` → `SwitchDesktop(Default)` | Per-engage, spawned before every secure switch, killed on clean disengage — covers the kill-both window while locked |
 | **Supervisor watchdog process** | Pipe heartbeat (`status`) → release desktop → `LockWorkStation` → respawn `cryptokey guard` | Persistent, one per guard lifetime (`Local\CryptoKeyWatchdog` mutex); stands down on the `CryptoKeyWatchdogStop` event; killed watchdog is respawned by the guard's ~5 s liveness tick |
 
@@ -91,15 +91,15 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 
 | Store | Location | Notes |
 |---|---|---|
-| `config.json` | `%APPDATA%\CryptoKey\` | Atomic tmp+move writes; secret **hashes** only — the raw secret lives only on the drive |
+| `config.json` (+ `.bak` mirror, `.bad` quarantine) | `%APPDATA%\CryptoKey\` | Flushed tmp→rename writes (`FlushFileBuffers` before the rename); `.bak` mirrors every save — corrupt primary self-heals. Secret **hashes** only — the raw secret lives only on the drive |
 | `guard.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Append-only activity log, rotated at ~256 KB, fail-safe (can never take the guard down) |
-| `.cryptokey` | drive root, hidden+system | `"CKY2" ‖ DPAPI(secret ‖ attestation)` — bound to user+machine; tmp+move writes per letter |
+| `.cryptokey` | drive root, hidden+system | `"CKY2" ‖ DPAPI(secret ‖ attestation)` — bound to user+machine; flushed tmp→rename writes per letter |
 | `cryptokey-ctl` | named pipe | Per-user DACL + medium-integrity SACL (see security-model); doubles as the watchdog's heartbeat |
 | `Local\CryptoKeyGuard` | mutex | Single-instance + takeover handoff |
 | `Local\CryptoKeyWatchdog` | mutex | One supervisor watchdog per session — spawned only when absent |
 | `Local\CryptoKeyWatchdogStop` | named event (manual-reset) | Every graceful guard exit sets it — clean deaths never respawn |
 | `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
-| `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — tmp+move atomic; deleted on restore; a stale file self-heals at next `Start` |
+| `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Module inventory (`src/CryptoKey`)
@@ -110,7 +110,8 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `GuardService.cs` | State machine, unlock policy, backoff, ratchet orchestration, IPC dispatch, config reload |
 | `UsbMonitor.cs` | WMI polling, presence events, error logging |
 | `KeyVerifier.cs` | v2 envelope wrap/unwrap, legacy keyfile compat, `RotateKeyfiles` |
-| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, atomic save, `RotateSecret` |
+| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror/fallback, `RotateSecret` |
+| `AtomicFile.cs` | Durability primitive: tmp → `FlushFileBuffers` → rename — used by config, backup, keyfile, policy writes |
 | `Enrollment.cs` | Drive selection, secret generation, keyfile + config write, `reenrolled` ping |
 | `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput` + setters |
 | `SecureLockSurface.cs` | Private desktop, STA lock thread, watchdog, switch-back discipline |
@@ -125,7 +126,10 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 `tests/CryptoKey.Tests` (xUnit) covers the pure security invariants —
 rotation chain (incl. `keepPrev` orphan-proofing), envelope/attestation,
 tri-state match, `RotateKeyfiles` semantics, backoff ladder, config-store
-round-trip via an APPDATA redirect fixture. The interactive layer
+round-trip — the store is redirected into a temp dir by a
+`CRYPTOKEY_CONFIG_ROOT` env var set in a module initializer (before any
+test code, so the static `ConfigDir` can't be captured too early). The
+interactive layer
 (`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
 agents are non-interactive.
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |

@@ -40,8 +40,10 @@ failsafe passphrase — to unlock.
   (or `config.json → Guard.LockMode`):
   - **secure** (default) — a private Windows desktop (`CreateDesktop`) the
     session is switched onto via `SwitchDesktop`. Only the lock card exists
-    there: no taskbar, no windows, nothing to steal focus, and Task Manager
-    can't see the lock UI (it lives on a different desktop). The input hooks
+    there: no taskbar, no windows, nothing to steal focus. Task Manager is
+    policy-disabled while locked *because* launching it from Ctrl+Alt+Del
+    would switch you back to the Default desktop — the SAS is the one path
+    the private desktop can't isolate, so the policies seal it. The input hooks
     still run on a dedicated lock thread to feed the passphrase buffer. If
     engagement fails at any step, the guard falls back to the overlay below.
   - **overlay** — the classic surface: one borderless topmost dark overlay
@@ -86,8 +88,11 @@ releases any stranded desktop, calls `LockWorkStation` if the guard was
 locked, and respawns `cryptokey guard` — while the guard respawns the
 watchdog within ~5 s if *it* dies. Clean exits (quit, panic, takeover) set
 a stand-down event so nothing respawns. As a manual layer,
-`cryptokey --release-desktop` does the desktop rescue by hand — e.g. from
-Task Manager's "Run new task" after Ctrl+Alt+Del, or the dev panic combo.
+`cryptokey --release-desktop` does the desktop rescue by hand (and restores
+lock policies) — run it from another logged-in session (Ctrl+Alt+Del →
+Switch user) or via Win+R after a reboot. Task Manager's "Run new task"
+is *not* a hatch while locked — lock policies disable it by design, since
+CAD → Task Manager is exactly the kill path they exist to close.
 Disable the supervisor in Settings → "Watchdog process".
 
 Double-clicking `cryptokey.exe` launches the dashboard (the console hides
@@ -106,8 +111,10 @@ a Start Menu shortcut, and the dashboard activity feed persists to
 
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,
 **Settings…** (key info, passphrase change, poll interval, balloon tips),
-**Quit** — enabled only while *unlocked*. While locked the only ways out are
-the key, the passphrase, or Task Manager.
+**Quit** — enabled only while *unlocked*. While locked the ways out are
+the key, the passphrase, or — as last resorts — Ctrl+Alt+Del → Switch user
+or the power button (Task Manager and Sign out are policy-disabled by
+design while locked).
 
 `--dev` enables the emergency exit combo **Ctrl+Alt+Shift+F12**.
 **Always use `--dev` during development and testing.**
@@ -139,7 +146,9 @@ than automatic.
   the pair down in one call. That's the user-mode ceiling — a deterrent,
   not a kernel boundary.
 - A desktop-switch failure could strand the session on an empty desktop —
-  that's what `cryptokey --release-desktop` is for (keep the command in mind).
+  that's what `cryptokey --release-desktop` is for (it also restores lock
+  policies; a CAD-power reboot always clears a stranded private desktop
+  since desktop objects die with the session).
 - Elevated windows (e.g. admin Task Manager) resist the input hooks — and the
   **On-Screen Keyboard** (UIAccess privilege) bypasses the keyboard hook
   entirely, so an attacker who opens OSK first can type freely.
@@ -158,7 +167,13 @@ than automatic.
   (or GPO) that deny writes to `HKCU\...\Policies` mean partial/no
   coverage — run the guard elevated there. If the guard dies while
   locked (reboot, or a kill with the watchdog off) the policies persist
-  until the guard next starts and restores.
+  until the guard next starts and restores. Plan accordingly while
+  locked: Switch user and the power button remain, Task Manager and
+  Sign out do not.
+- `config.json` is mirrored to `config.json.bak` on every save; a corrupt
+  primary is quarantined to `.bad` and the backup loads with a modal
+  warning — a boot with a torn config no longer fails silently into
+  "no protection".
 - A running guard rewrites `config.json` on every rotation — kill the guard
   (`cryptokey quit`) before editing it by hand, or your edits are lost.
 - Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC

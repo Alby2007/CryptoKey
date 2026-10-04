@@ -68,4 +68,52 @@ public class ConfigStoreTests
         Assert.True(ConfigStore.VerifyPassphrase(config, "second-pass"));
         Assert.False(ConfigStore.VerifyPassphrase(config, "first-pass"));
     }
+
+    [Fact]
+    public void Corrupt_primary_falls_back_to_bak_and_quarantines()
+    {
+        KeyConfig config = ConfigStore.CreateNew("SER-BAK",
+            TestDisk.RandomSecret(), "pp");
+        ConfigStore.Save(config);
+
+        File.WriteAllText(ConfigStore.ConfigPath, "{ not json at all");
+        KeyConfig? loaded = ConfigStore.Load(out bool fromBackup);
+
+        Assert.True(fromBackup);
+        Assert.NotNull(loaded);
+        Assert.Equal("SER-BAK", loaded.DeviceSerial);
+        Assert.Equal(config.SecretHash, loaded.SecretHash);
+        // The corrupt file is kept for forensics, not silently overwritten.
+        Assert.True(File.Exists(ConfigStore.ConfigPath + ".bad"));
+    }
+
+    [Fact]
+    public void Both_files_corrupt_throws()
+    {
+        ConfigStore.Save(ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pp"));
+        File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
+        File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
+        Assert.ThrowsAny<Exception>(() => ConfigStore.Load());
+    }
+
+    [Fact]
+    public void Passphrase_iterations_upgrade_on_change()
+    {
+        KeyConfig config = ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pass-one");
+        Assert.Equal(600_000, config.PassphraseIterations);
+
+        // A legacy 100k hash keeps verifying under its own count…
+        byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
+        config.PassphraseIterations = 100_000;
+        config.PassphraseHash = Convert.ToBase64String(
+            System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
+                "pass-one", salt, 100_000,
+                System.Security.Cryptography.HashAlgorithmName.SHA256, 32));
+        Assert.True(ConfigStore.VerifyPassphrase(config, "pass-one"));
+
+        // …and the next change rewrites at the current work factor.
+        ConfigStore.ChangePassphrase(config, "pass-two");
+        Assert.Equal(600_000, config.PassphraseIterations);
+        Assert.True(ConfigStore.VerifyPassphrase(config, "pass-two"));
+    }
 }

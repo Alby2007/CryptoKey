@@ -90,13 +90,13 @@ internal static class Program
 
     private static int Gui(bool devMode, bool takeover, bool forceClassic)
     {
-        if (!TryLoadConfig(out KeyConfig? config))
+        if (!TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
         if (config == null)
         {
             Console.WriteLine("No enrolled key — starting enroll first.");
             if (Enrollment.Run() != 0
-                || !TryLoadConfig(out config)
+                || !TryLoadConfig(out config, alertModal: true)
                 || config == null)
                 return 1;
         }
@@ -120,6 +120,9 @@ internal static class Program
     /// </summary>
     private static int ReleaseDesktop()
     {
+        // The rescue hatch frees everything the lock applied — including
+        // lock policies, which a died-while-locked guard can leave behind.
+        LockPolicies.Restore(Console.WriteLine);
         IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
             NativeMethods.DESKTOP_SWITCHDESKTOP);
         if (h == IntPtr.Zero)
@@ -214,7 +217,7 @@ internal static class Program
 
     private static int Guard(bool devMode, bool takeover, bool forceClassic)
     {
-        if (!TryLoadConfig(out KeyConfig? config))
+        if (!TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
         if (config == null)
         {
@@ -311,19 +314,36 @@ internal static class Program
         return m;
     }
 
-    private static bool TryLoadConfig(out KeyConfig? config)
+    private static bool TryLoadConfig(out KeyConfig? config, bool alertModal = false)
     {
         try
         {
-            config = ConfigStore.Load();
+            config = ConfigStore.Load(out bool restoredFromBackup);
+            if (restoredFromBackup)
+                Alert("CryptoKey's config.json was corrupt — restored the last-good " +
+                    "backup (config.json.bak). The corrupt file was quarantined as " +
+                    "config.json.bad.", alertModal);
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Config at {ConfigStore.ConfigPath} is corrupt: {ex.Message}");
+            // Autostart/scheduled launches hide the console — without a modal
+            // alert a corrupt config means "booted with no protection and no
+            // sign", which is the worst failure shape this app can have.
+            Alert($"CryptoKey config at {ConfigStore.ConfigPath} is corrupt and no " +
+                $"usable backup exists ({ex.Message}). Run 'cryptokey enroll' to " +
+                "re-enroll — the guard will not start without a config.", alertModal);
             config = null;
             return false;
         }
+    }
+
+    private static void Alert(string message, bool modal)
+    {
+        Console.WriteLine(message);
+        if (modal)
+            MessageBox.Show(message, "CryptoKey",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     private static int Status()

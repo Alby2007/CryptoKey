@@ -19,6 +19,13 @@ internal sealed class KeyConfig
     public DateTime? LastRotationUtc { get; set; }
     public string PassphraseSalt { get; set; } = "";
     public string PassphraseHash { get; set; } = "";
+    /// <summary>
+    /// PBKDF2 rounds for <see cref="PassphraseHash"/>. Legacy configs carry
+    /// 100k; anything written now uses the current OWASP floor (600k).
+    /// Verify uses the stored count, change rewrites it — old hashes keep
+    /// verifying until the next passphrase change upgrades them.
+    /// </summary>
+    public int PassphraseIterations { get; set; } = 100_000;
     public GuardSettings Guard { get; set; } = new();
 }
 
@@ -69,7 +76,7 @@ internal sealed class GuardSettings
 
 internal static class ConfigStore
 {
-    private const int Pbkdf2Iterations = 100_000;
+    private const int CurrentPbkdf2Iterations = 600_000;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
@@ -86,11 +93,41 @@ internal static class ConfigStore
 
     public static string ConfigPath => Path.Combine(ConfigDir, "config.json");
 
-    public static KeyConfig? Load()
+    /// <summary>Last-good mirror written by every Save — Load falls back to it.</summary>
+    public static string BackupPath => ConfigPath + ".bak";
+
+    public static KeyConfig? Load() => Load(out _);
+
+    /// <summary>
+    /// Load config; a corrupt primary is quarantined to config.json.bad
+    /// and the last-good .bak is loaded instead, so a torn/corrupt file
+    /// degrades to one-save-behind rather than "no protection, no signal".
+    /// Throws only when the primary AND the backup are both unreadable.
+    /// </summary>
+    public static KeyConfig? Load(out bool restoredFromBackup)
     {
+        restoredFromBackup = false;
         if (!File.Exists(ConfigPath))
             return null;
-        KeyConfig? config = JsonSerializer.Deserialize<KeyConfig>(File.ReadAllText(ConfigPath));
+        try
+        {
+            return Parse(File.ReadAllText(ConfigPath));
+        }
+        catch (Exception)
+        {
+            try { File.Move(ConfigPath, ConfigPath + ".bad", overwrite: true); }
+            catch (Exception) { }
+            if (!File.Exists(BackupPath))
+                throw;
+            KeyConfig? backup = Parse(File.ReadAllText(BackupPath));
+            restoredFromBackup = true;
+            return backup;
+        }
+    }
+
+    private static KeyConfig? Parse(string json)
+    {
+        KeyConfig? config = JsonSerializer.Deserialize<KeyConfig>(json);
         if (config != null)
             config.Guard ??= new GuardSettings();
         return config;
@@ -99,9 +136,11 @@ internal static class ConfigStore
     public static void Save(KeyConfig config)
     {
         Directory.CreateDirectory(ConfigDir);
-        string tmp = ConfigPath + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(config, JsonOptions));
-        File.Move(tmp, ConfigPath, overwrite: true);
+        string json = JsonSerializer.Serialize(config, JsonOptions);
+        AtomicFile.WriteAllText(ConfigPath, json);
+        // The backup is written durably too — a torn .bak is no better
+        // than none when it's the file that covers a torn primary.
+        AtomicFile.WriteAllText(BackupPath, json);
     }
 
     public static KeyConfig CreateNew(string serial, byte[] secret, string passphrase)
@@ -115,7 +154,9 @@ internal static class ConfigStore
             SecretHash = Convert.ToBase64String(HashSecret(secret, secretSalt)),
             RotationCount = 1,
             PassphraseSalt = Convert.ToBase64String(passSalt),
-            PassphraseHash = Convert.ToBase64String(HashPassphrase(passphrase, passSalt)),
+            PassphraseHash = Convert.ToBase64String(
+                HashPassphrase(passphrase, passSalt, CurrentPbkdf2Iterations)),
+            PassphraseIterations = CurrentPbkdf2Iterations,
         };
     }
 
@@ -169,7 +210,9 @@ internal static class ConfigStore
     {
         byte[] salt = RandomNumberGenerator.GetBytes(16);
         config.PassphraseSalt = Convert.ToBase64String(salt);
-        config.PassphraseHash = Convert.ToBase64String(HashPassphrase(newPassphrase, salt));
+        config.PassphraseHash = Convert.ToBase64String(
+            HashPassphrase(newPassphrase, salt, CurrentPbkdf2Iterations));
+        config.PassphraseIterations = CurrentPbkdf2Iterations;
     }
 
     public static bool VerifyPassphrase(KeyConfig config, string passphrase)
@@ -178,7 +221,8 @@ internal static class ConfigStore
         {
             byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
             byte[] expected = Convert.FromBase64String(config.PassphraseHash);
-            return CryptographicOperations.FixedTimeEquals(HashPassphrase(passphrase, salt), expected);
+            return CryptographicOperations.FixedTimeEquals(
+                HashPassphrase(passphrase, salt, config.PassphraseIterations), expected);
         }
         catch (Exception)
         {
@@ -215,6 +259,6 @@ internal static class ConfigStore
         return SHA256.HashData(combined);
     }
 
-    private static byte[] HashPassphrase(string passphrase, byte[] salt)
-        => Rfc2898DeriveBytes.Pbkdf2(passphrase, salt, Pbkdf2Iterations, HashAlgorithmName.SHA256, 32);
+    private static byte[] HashPassphrase(string passphrase, byte[] salt, int iterations)
+        => Rfc2898DeriveBytes.Pbkdf2(passphrase, salt, iterations, HashAlgorithmName.SHA256, 32);
 }

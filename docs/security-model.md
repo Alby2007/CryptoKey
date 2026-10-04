@@ -38,7 +38,7 @@ for the rest.
 | Device secret | `.cryptokey` on the drive | 64 random bytes, generated at enroll; never stored locally in plaintext |
 | `SecretSalt` / `SecretHash` | `config.json` | Verifier: `SHA-256(salt ‖ secret)` — 64 B of entropy, single salted SHA-256 suffices |
 | `PrevSecretHash` | `config.json` | Prior generation — the interrupted-rotation heal window |
-| `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256, 100 000 iterations, salted — the failsafe factor |
+| `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256, per-config iteration count (600 000 new, legacy 100 000 verifies), salted — the failsafe factor |
 | Attestation | inside the keyfile envelope | `HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)` |
 
 ## Keyfile envelope (v2)

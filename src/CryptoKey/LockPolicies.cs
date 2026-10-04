@@ -64,10 +64,8 @@ internal static class LockPolicies
                 var priors = new Dictionary<string, PriorEntry>();
                 foreach (Policy p in Policies)
                     priors[p.ValueName] = CapturePrior(p);
-                // Same atomic tmp+move pattern as config.json.
-                string tmp = BackupPath + ".tmp";
-                File.WriteAllText(tmp, JsonSerializer.Serialize(priors));
-                File.Move(tmp, BackupPath, overwrite: true);
+                // Same flushed-tmp+move pattern as config.json.
+                AtomicFile.WriteAllText(BackupPath, JsonSerializer.Serialize(priors));
             }
             int applied = 0;
             foreach (Policy p in Policies)
