@@ -69,11 +69,14 @@ internal static class Program
                 return SendIpc("quit");
             case "watchdog":
                 // Internal process role — spawned by the guard's Supervisor,
-                // not a user-facing command.
+                // not a user-facing command. --dev/--classic are forwarded
+                // to every guard it respawns.
                 if (args.Length >= 3
                     && args[1].Equals("--parent", StringComparison.OrdinalIgnoreCase)
                     && int.TryParse(args[2], out int guardPid))
-                    return Watchdog.Run(guardPid);
+                    return Watchdog.Run(guardPid,
+                        args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                        args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
                 Console.WriteLine("usage: cryptokey watchdog --parent <pid>");
                 return 1;
             case "help":

@@ -5,9 +5,12 @@ namespace CryptoKey;
 /// <summary>
 /// Persistent guard supervisor — `cryptokey watchdog --parent &lt;pid&gt;`.
 /// Heartbeats the guard over the cryptokey-ctl pipe's `status` command every
-/// ~750ms; three consecutive failed beats (~2s) declare death. A guard that
-/// died while LOCKED gets the fail-closed response: release the input
-/// desktop, LockWorkStation, respawn. An unlocked death gets respawn only.
+/// ~750ms. Death is declared when the watched process is gone AND the pipe
+/// is silent (immediate), or when a live process misses 8 beats (~6s —
+/// wider than the pipe's worst-case stall, so one stalled client can't fake
+/// a death). A guard that died while LOCKED gets the fail-closed response:
+/// release the input desktop, LockWorkStation, respawn. An unlocked death
+/// gets respawn only. --dev/--classic are forwarded to every respawn.
 ///
 /// Deliberately dumb: no config loading, no state machine, no UI — just a
 /// heartbeat, a mutex, a stop event, a respawn, and a lock. Adoption is
@@ -25,28 +28,44 @@ internal static class Watchdog
 
     private const int BeatMs = 750;
     private const int ReplyTimeoutMs = 500;
-    private const int DeathBeats = 3;
+    // ~6s of silent heartbeats to call a live-but-wedged process dead —
+    // deliberately wider than the pipe's worst-case stall (~5s read
+    // timeout) so ONE stalled client can never fake a death.
+    private const int DeathBeats = 8;
     private const int MaxFastRespawnFails = 5;
+    // A freshly respawned guard needs a few seconds to stand the pipe up —
+    // misses inside the grace window don't count toward the wedged budget.
+    private const int RespawnGraceMs = 10_000;
 
     private static string LogPath => Path.Combine(ConfigStore.ConfigDir, "watchdog.log");
     private static string OldLogPath => Path.Combine(ConfigStore.ConfigDir, "watchdog.log.1");
 
-    public static int Run(int parentPid)
+    public static int Run(int parentPid, bool devMode, bool forceClassic)
     {
         using var mutex = new Mutex(true, MutexName, out bool createdNew);
         if (!createdNew)
             return 0; // single instance — a second spawner just exits
 
+        // NOTE: no stop.Reset() here — the Supervisor resets the event
+        // right before spawning. Resetting on this side would clear a
+        // stand-down that lands between spawn and our first WaitOne and
+        // respawn a guard that was explicitly quit.
         using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, StopEventName);
-        // A leftover SET event from a previous Stop() must not insta-kill us.
-        stop.Reset();
+
+        // Respawn the same guard we were launched beside — losing --dev
+        // would strip the panic combo, losing --classic flips the lock mode.
+        string respawnArgs = "guard"
+            + (devMode ? " --dev" : "")
+            + (forceClassic ? " --classic" : "");
 
         Log($"watchdog up (parent pid {parentPid}).");
 
         int fails = 0;
         int respawnFails = 0;
         bool wasLocked = false;
+        int watchPid = parentPid;
         DateTime nextRespawnAt = DateTime.MinValue;
+        DateTime respawnGraceUntil = DateTime.MinValue;
 
         while (true)
         {
@@ -70,70 +89,108 @@ internal static class Watchdog
                 continue;
             }
 
-            if (++fails < DeathBeats)
-                continue;
+            // Pipe missed. Process-gone + silent pipe = dead NOW; process
+            // alive + silent pipe = possibly wedged — count to the wide
+            // budget (any guard answering the pipe wins over the pid —
+            // adoption stays automatic).
+            bool newlyDead;
+            if (!ParentAlive(watchPid))
+            {
+                newlyDead = fails < DeathBeats;
+                fails = Math.Max(fails, DeathBeats);
+            }
+            else if (DateTime.UtcNow < respawnGraceUntil)
+            {
+                continue; // fresh spawn still standing its pipe up
+            }
+            else
+            {
+                newlyDead = ++fails == DeathBeats;
+            }
 
-            // Death declared. Fail-closed only when the guard was locked:
-            // a lock surface (or its desktop) may outlive the process.
-            if (wasLocked)
+            // Death declared — once per declaration, not per missed beat.
+            // Fail-closed only when the guard was locked: a lock surface
+            // (or its desktop) may outlive the process.
+            if (newlyDead && wasLocked)
             {
                 Log("guard died while LOCKED — fail-closed: release desktop, lock workstation, respawn.");
                 ReleaseDesktop();
                 NativeMethods.LockWorkStation();
             }
-            else if (fails == DeathBeats)
+            else if (newlyDead)
             {
                 Log("guard heartbeat lost.");
             }
 
             if (!File.Exists(ConfigStore.ConfigPath))
             {
-                if (fails == DeathBeats)
+                if (newlyDead)
                     Log("no config on disk — nothing to respawn; idle.");
                 continue;
             }
             if (DateTime.UtcNow < nextRespawnAt)
                 continue;
 
-            if (TryRespawn())
+            // Counts attempts without a recovered heartbeat, not just spawn
+            // errors — a spawn that dies again still escalates the backoff.
+            respawnFails++;
+            if (TryRespawn(respawnArgs, out int newPid))
             {
                 Log("guard respawned.");
+                watchPid = newPid;
                 fails = 0;
-                respawnFails = 0;
                 wasLocked = false;
+                respawnGraceUntil = DateTime.UtcNow.AddMilliseconds(RespawnGraceMs);
+                nextRespawnAt = DateTime.UtcNow.AddSeconds(2); // bound respawn cadence
             }
             else
             {
-                respawnFails++;
-                if (respawnFails >= MaxFastRespawnFails)
-                {
-                    Log("respawn failing — locking workstation; retrying every 30s.");
-                    NativeMethods.LockWorkStation();
-                    nextRespawnAt = DateTime.UtcNow.AddSeconds(30);
-                }
-                else
-                {
-                    nextRespawnAt = DateTime.UtcNow.AddSeconds(2);
-                }
+                Log($"respawn attempt #{respawnFails} failed.");
+            }
+
+            if (respawnFails >= MaxFastRespawnFails)
+            {
+                Log("respawn failing — locking workstation; retrying every 30s.");
+                NativeMethods.LockWorkStation();
+                nextRespawnAt = DateTime.UtcNow.AddSeconds(30);
             }
         }
     }
 
-    private static bool TryRespawn()
+    /// <summary>Is the watched guard process still alive?</summary>
+    private static bool ParentAlive(int pid)
     {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch (Exception)
+        {
+            return false; // gone, or the pid never existed
+        }
+    }
+
+    private static bool TryRespawn(string args, out int pid)
+    {
+        pid = 0;
         try
         {
             // `guard` = tray daemon. Inherits the watchdog's integrity level —
             // an elevated guard spawned an elevated watchdog, so respawns
             // stay elevated.
             Process? p = Process.Start(new ProcessStartInfo(
-                Environment.ProcessPath ?? Application.ExecutablePath, "guard")
+                Environment.ProcessPath ?? Application.ExecutablePath, args)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
             });
-            return p != null;
+            if (p == null)
+                return false;
+            pid = p.Id;
+            p.Dispose();
+            return true;
         }
         catch (Exception ex)
         {
@@ -203,7 +260,7 @@ internal sealed class Supervisor
     }
 
     /// <summary>Spawn the watchdog if the mutex says none exists.</summary>
-    public void Ensure(int parentPid)
+    public void Ensure(int parentPid, bool devMode, bool forceClassic)
     {
         if (Alive)
             return;
@@ -218,15 +275,27 @@ internal sealed class Supervisor
         catch (Exception) { }
         try
         {
-            Process.Start(new ProcessStartInfo(
+            // The watchdog forwards these flags to every respawned guard —
+            // a respawn must come back with the same panic combo / lock mode.
+            Process? p = Process.Start(new ProcessStartInfo(
                 Environment.ProcessPath ?? Application.ExecutablePath,
-                $"watchdog --parent {parentPid}")
+                $"watchdog --parent {parentPid}"
+                    + (devMode ? " --dev" : "")
+                    + (forceClassic ? " --classic" : ""))
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
             });
-            _log("Watchdog spawned.");
+            if (p != null)
+            {
+                p.Dispose();
+                _log("Watchdog spawned.");
+            }
+            else
+            {
+                _log("Watchdog spawn failed: no process started.");
+            }
         }
         catch (Exception ex)
         {

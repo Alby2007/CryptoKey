@@ -167,7 +167,7 @@ internal sealed class GuardService : IDisposable
         try
         {
             if (_config.Guard.Watchdog)
-                _supervisor.Ensure(Environment.ProcessId);
+                _supervisor.Ensure(Environment.ProcessId, _devMode, _forceClassic);
             else
                 _supervisor.Stop(); // toggled off mid-run — stand it down
         }
