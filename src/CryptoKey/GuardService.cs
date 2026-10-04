@@ -135,12 +135,20 @@ internal sealed class GuardService : IDisposable
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
         // Supervisor: bring the watchdog up now, then re-check every 5s —
         // a killed watchdog gets respawned; a disabled setting stands it down.
-        WatchdogTick();
+        SlowTick();
         _watchdogTimer = new System.Threading.Timer(
-            _ => WatchdogTick(), null, 5000, 5000);
+            _ => SlowTick(), null, 5000, 5000);
         _surface.SetAnimations(_config.Guard.Animations);
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
             $"auto-lock {( _config.Guard.LockOnRemoval ? "on" : "off")}).");
+
+        // Registry restore means the config *directory* was wiped — a
+        // tamper-flavored event, louder than a plain .bak restore.
+        if (ConfigStore.LastRestoreFromRegistry)
+        {
+            Log("Config restored from the registry backup — the config directory had been wiped.");
+            Alert("Config restore", "config restored from registry — config directory had been wiped");
+        }
         UsbDisk? disk = null;
         try
         {
@@ -166,6 +174,13 @@ internal sealed class GuardService : IDisposable
         EmitSnapshot();
     }
 
+    /// <summary>Shared ~5s cadence: watchdog supervision + idle lock.</summary>
+    private void SlowTick()
+    {
+        WatchdogTick();
+        IdleTick();
+    }
+
     private void WatchdogTick()
     {
         try
@@ -174,6 +189,25 @@ internal sealed class GuardService : IDisposable
                 _supervisor.Ensure(Environment.ProcessId, _devMode, _forceClassic);
             else
                 _supervisor.Stop(); // toggled off mid-run — stand it down
+        }
+        catch (Exception) { }
+    }
+
+    private void IdleTick()
+    {
+        int mins = _config.Guard.IdleLockMinutes;
+        if (mins <= 0)
+            return;
+        try
+        {
+            if (NativeMethods.IdleMilliseconds() < (uint)mins * 60_000)
+                return;
+            // Lock on the UI thread — the timer callback is a pool thread.
+            _monitor.BeginInvoke(new Action(() =>
+            {
+                if (State == GuardState.Unlocked) // Paused/Locked suppress it
+                    LockNow($"idle {mins} min");
+            }));
         }
         catch (Exception) { }
     }
@@ -404,11 +438,16 @@ internal sealed class GuardService : IDisposable
             {
                 _tamperNote = note;
                 if (note != null)
-                    Log(stale
+                {
+                    string msg = stale
                         ? "Keyfile presented a previous-generation secret — " +
                           "possible clone or interrupted rotation."
                         : "Keyfile attestation mismatch — config.json " +
-                          "tampered or the keyfile was forged.");
+                          "tampered or the keyfile was forged.";
+                    Log(msg);
+                    Snap("tamper");
+                    Alert("Tamper", msg);
+                }
             }
 
             if (State == GuardState.Locked)
@@ -662,6 +701,7 @@ internal sealed class GuardService : IDisposable
         {
             _failedAttempts++;
             _surface.SetFailedAttempts(_failedAttempts);
+            Snap("badpass");
             // Exponential cooldown: fails 1-2 free, then 15s/30s/60s/120s/…
             // capped at 300s. Enforced in the hook so mashing can't pile up.
             int secs = Backoff.Seconds(_failedAttempts);
@@ -699,6 +739,8 @@ internal sealed class GuardService : IDisposable
             if (_config.Guard.StrictTamper && _staleKeyPresent)
             {
                 Log("Break-glass unlock — passphrase accepted over a stale keyfile.");
+                Snap("breakglass");
+                Alert("Break-glass", "passphrase accepted over a stale keyfile");
                 UnlockNow();
             }
             else
@@ -729,6 +771,7 @@ internal sealed class GuardService : IDisposable
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
+        Alert("Locked", $"locked — {reason}");
         // Policies apply even if both surfaces fail — the user is still
         // locked (degraded, screen-only) and shouldn't get Task Manager back.
         if (_config.Guard.LockPolicies)
@@ -787,6 +830,7 @@ internal sealed class GuardService : IDisposable
         LockPolicies.Restore(Log);
         Log("Unlocked.");
         SetState(GuardState.Unlocked);
+        Alert("Unlocked", "session unlocked");
     }
 
     private void SetState(GuardState state)
@@ -810,6 +854,17 @@ internal sealed class GuardService : IDisposable
     private static string OldLogPath => Path.Combine(ConfigStore.ConfigDir, "guard.log.1");
 
     /// <summary>Append a line to the feed/console/guard.log — also used by IPC startup.</summary>
+    /// <summary>Webcam snap if enabled — fire-and-forget, failures self-log once.</summary>
+    private void Snap(string reason)
+    {
+        if (_config.Guard.WebcamOnTamper)
+            CaptureService.Snap(reason, Log);
+    }
+
+    /// <summary>Push an event to the configured alert endpoint; "" URL = off.</summary>
+    private void Alert(string title, string body)
+        => AlertService.Send(_config.Guard.AlertUrl, title, body, Log);
+
     public void Log(string message)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";

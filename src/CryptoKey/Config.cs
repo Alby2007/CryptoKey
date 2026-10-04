@@ -72,6 +72,15 @@ internal sealed class GuardSettings
 
     /// <summary>Hide Task Manager/sign-out/power affordances while locked.</summary>
     public bool LockPolicies { get; set; } = true;
+
+    /// <summary>Auto-lock after N minutes of no input (0 = off).</summary>
+    public int IdleLockMinutes { get; set; } = 0;
+
+    /// <summary>Snapshot the webcam on tamper events (privacy opt-in).</summary>
+    public bool WebcamOnTamper { get; set; } = false;
+
+    /// <summary>POST target for security events — ntfy.sh topic or any webhook ("" = off).</summary>
+    public string AlertUrl { get; set; } = "";
 }
 
 internal static class ConfigStore
@@ -96,33 +105,89 @@ internal static class ConfigStore
     /// <summary>Last-good mirror written by every Save — Load falls back to it.</summary>
     public static string BackupPath => ConfigPath + ".bak";
 
+    // Third copy, different kill surface: a folder wipe can't reach the
+    // registry, a registry delete can't reach the folder. Same trust bar
+    // as .bak — only ever honored *after* the keyfile's own attestation
+    // verifies, so a planted config still can't unlock anything.
+    private const string RegKeyPath = @"Software\CryptoKey";
+    private const string RegValueName = "Config";
+
+    /// <summary>Set when the last Load came from the registry — means the
+    /// config directory itself had been wiped. Callers log it louder.</summary>
+    public static bool LastRestoreFromRegistry { get; private set; }
+
+    /// <summary>Can any copy of the config produce a usable Load?</summary>
+    public static bool Resumable =>
+        File.Exists(ConfigPath) || File.Exists(BackupPath)
+        || ReadRegistryBackup() != null;
+
+    private static string? ReadRegistryBackup()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RegKeyPath);
+            return key?.GetValue(RegValueName) as string;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public static KeyConfig? Load() => Load(out _);
 
     /// <summary>
-    /// Load config; a corrupt primary is quarantined to config.json.bad
-    /// and the last-good .bak is loaded instead, so a torn/corrupt file
-    /// degrades to one-save-behind rather than "no protection, no signal".
-    /// Throws only when the primary AND the backup are both unreadable.
+    /// Load config. Chain: primary → .bak → registry backup. A corrupt
+    /// primary is quarantined to config.json.bad; a missing file just falls
+    /// through (covers folder wipes). A registry restore rewrites both
+    /// files so the store self-heals, and flags <see cref="LastRestoreFromRegistry"/>.
+    /// Throws only when the primary was corrupt and NO backup parses.
     /// </summary>
     public static KeyConfig? Load(out bool restoredFromBackup)
     {
         restoredFromBackup = false;
-        if (!File.Exists(ConfigPath))
-            return null;
-        try
+        LastRestoreFromRegistry = false;
+        bool primaryExisted = File.Exists(ConfigPath);
+        if (primaryExisted)
         {
-            return Parse(File.ReadAllText(ConfigPath));
+            try
+            {
+                return Parse(File.ReadAllText(ConfigPath));
+            }
+            catch (Exception)
+            {
+                try { File.Move(ConfigPath, ConfigPath + ".bad", overwrite: true); }
+                catch (Exception) { }
+            }
         }
-        catch (Exception)
+
+        if (File.Exists(BackupPath))
         {
-            try { File.Move(ConfigPath, ConfigPath + ".bad", overwrite: true); }
-            catch (Exception) { }
-            if (!File.Exists(BackupPath))
-                throw;
             KeyConfig? backup = Parse(File.ReadAllText(BackupPath));
             restoredFromBackup = true;
             return backup;
         }
+
+        string? reg = ReadRegistryBackup();
+        if (reg != null)
+        {
+            KeyConfig? restored = Parse(reg);
+            try
+            {
+                Directory.CreateDirectory(ConfigDir);
+                AtomicFile.WriteAllText(ConfigPath, reg);
+                AtomicFile.WriteAllText(BackupPath, reg);
+            }
+            catch (Exception) { /* restore best-effort — the copy in hand still works */ }
+            restoredFromBackup = true;
+            LastRestoreFromRegistry = true;
+            return restored;
+        }
+
+        if (primaryExisted)
+            throw new InvalidDataException(
+                $"Config at {ConfigPath} was corrupt and no backup (file or registry) is readable.");
+        return null;
     }
 
     private static KeyConfig? Parse(string json)
@@ -141,6 +206,14 @@ internal static class ConfigStore
         // The backup is written durably too — a torn .bak is no better
         // than none when it's the file that covers a torn primary.
         AtomicFile.WriteAllText(BackupPath, json);
+        // Third copy into the registry — best-effort; a denied HKCU write
+        // must not fail the save.
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RegKeyPath);
+            key.SetValue(RegValueName, json);
+        }
+        catch (Exception) { }
     }
 
     public static KeyConfig CreateNew(string serial, byte[] secret, string passphrase)

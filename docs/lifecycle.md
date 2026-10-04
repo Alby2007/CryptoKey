@@ -22,6 +22,11 @@ tamper note, key-factor armed).
 the enrolled device since startup — a machine booted without the key
 doesn't instantly lock itself while WMI enumerates.
 
+Idle lock (`Guard.IdleLockMinutes`, default 0 = off): the ~5 s slow tick
+(the watchdog timer) reads `GetLastInputInfo`; when idle exceeds the
+threshold it locks on the UI thread with reason `idle N min`. Fires only
+from `Unlocked` — `Paused` suppresses it like all auto-lock.
+
 Lock-time policies (`Guard.LockPolicies`, default on): `LockNow` applies
 HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` right after `SetState(Locked)`
 — even if both surfaces fail — persisting priors to `lockpolicies.json`

@@ -78,6 +78,14 @@ lives only on the drive.
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
+| `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it |
+| `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad passphrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
+| `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
+
+`config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
+on every save — a third copy on a different kill surface. Load chain:
+primary → `.bak` → registry (a registry restore rewrites both files and
+is logged as a tamper event; the watchdog's respawn gate accepts any copy).
 
 ## Keyfile — `<drive>:\.cryptokey`
 
@@ -124,6 +132,8 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Secure desktop | `WinSta0\CryptoKeyLock` |
 | Run value | `HKCU\...\Run\CryptoKey` |
 | Scheduled task | `CryptoKey` |
+| Registry config backup | `HKCU\Software\CryptoKey\Config` (REG_SZ, same JSON) |
+| Tamper captures | `%APPDATA%\CryptoKey\captures\` (newest 50 kept) |
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |

@@ -26,6 +26,10 @@ internal sealed class SettingsPage : UserControl
     private readonly AppButton _desktopShortcutBtn;
     private readonly Slider _poll;
     private readonly Label _pollValue;
+    private readonly Slider _idle;
+    private readonly Label _idleValue;
+    private readonly ToggleSwitch _webcam;
+    private readonly TextField _alertUrl;
     private readonly bool _elevated;
     private bool _suppressStartupEvent;
     // Slider drags fire ValueChanged per tick — debounce the disk write.
@@ -46,7 +50,7 @@ internal sealed class SettingsPage : UserControl
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             BackColor = Theme.Bg,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -251,6 +255,115 @@ internal sealed class SettingsPage : UserControl
         pol.Controls.Add(_policyWarn, 0, 3);
         policyCard.Controls.Add(pol);
 
+        // ---- Tripwires & alerts ----
+        var tripCard = new CardPanel
+        {
+            Title = "Tripwires & alerts",
+            Glyph = Glyphs.Warning,
+            Dock = DockStyle.Top,
+            Height = 176,
+            Margin = new Padding(0, 0, 0, 10),
+        };
+        var trip = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Theme.Surface,
+            Padding = new Padding(0),
+        };
+        for (int i = 0; i < 3; i++)
+            trip.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 3f));
+
+        var idleRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        idleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34f));
+        idleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46f));
+        idleRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20f));
+        var idleLabel = new Label
+        {
+            Text = "Lock after idle",
+            Font = Theme.UIFont(9f),
+            ForeColor = Theme.Text,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+        };
+        _idle = new Slider
+        {
+            Minimum = 0,
+            Maximum = 30,
+            Step = 1,
+            Value = Math.Clamp(_config.Guard.IdleLockMinutes, 0, 30),
+            Dock = DockStyle.Fill,
+            Margin = new Padding(6, 0, 6, 0),
+        };
+        _idleValue = new Label
+        {
+            Text = _idle.Value == 0 ? "off" : $"{_idle.Value} min",
+            Font = Theme.MonoFont(8.5f),
+            ForeColor = Theme.TextDim,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleRight,
+            AutoSize = false,
+        };
+        idleRow.Controls.Add(idleLabel);
+        idleRow.Controls.Add(_idle);
+        idleRow.Controls.Add(_idleValue);
+
+        _webcam = Toggle("Webcam snapshot on tamper events", _config.Guard.WebcamOnTamper);
+
+        var alertRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        alertRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34f));
+        alertRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46f));
+        alertRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20f));
+        var alertLabel = new Label
+        {
+            Text = "Alert webhook (ntfy.sh, …)",
+            Font = Theme.UIFont(9f),
+            ForeColor = Theme.Text,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+        };
+        _alertUrl = new TextField
+        {
+            Text = _config.Guard.AlertUrl,
+            PlaceholderText = "https://ntfy.sh/my-cryptokey",
+            Dock = DockStyle.Fill,
+            Margin = new Padding(6, 4, 6, 4),
+        };
+        var testAlert = new AppButton
+        {
+            Text = "Send test",
+            Glyph = Glyphs.Play,
+            Variant = ButtonVariant.Ghost,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(6, 4, 0, 4),
+        };
+        testAlert.Click += (_, _) => SendTestAlert();
+        alertRow.Controls.Add(alertLabel);
+        alertRow.Controls.Add(_alertUrl);
+        alertRow.Controls.Add(testAlert);
+
+        trip.Controls.Add(idleRow, 0, 0);
+        trip.Controls.Add(_webcam, 0, 1);
+        trip.Controls.Add(alertRow, 0, 2);
+        tripCard.Controls.Add(trip);
+
         // ---- Storage ----
         var storeCard = new CardPanel
         {
@@ -344,7 +457,8 @@ internal sealed class SettingsPage : UserControl
 
         layout.Controls.Add(behCard, 0, 0);
         layout.Controls.Add(policyCard, 0, 1);
-        layout.Controls.Add(storeCard, 0, 2);
+        layout.Controls.Add(tripCard, 0, 2);
+        layout.Controls.Add(storeCard, 0, 3);
         Controls.Add(layout);
 
         _lockOnRemoval.CheckedChanged += (_, _) => Save();
@@ -360,6 +474,14 @@ internal sealed class SettingsPage : UserControl
         _startupAdmin.CheckedChanged += (_, _) => ApplyStartupMode();
         _watchdog.CheckedChanged += (_, _) => Save();
         _lockPolicies.CheckedChanged += (_, _) => Save();
+        _webcam.CheckedChanged += (_, _) => Save();
+        _idle.ValueChanged += (_, _) =>
+        {
+            _idleValue.Text = _idle.Value == 0 ? "off" : $"{_idle.Value} min";
+            _pollSave.Stop();
+            _pollSave.Start();
+        };
+        _alertUrl.TextValueChanged += (_, _) => { _pollSave.Stop(); _pollSave.Start(); };
         _pollSave.Tick += (_, _) => { _pollSave.Stop(); Save(); };
         _poll.ValueChanged += (_, _) =>
         {
@@ -509,6 +631,20 @@ internal sealed class SettingsPage : UserControl
         }
     }
 
+    private void SendTestAlert()
+    {
+        string url = _alertUrl.Text.Trim();
+        if (url.Length == 0)
+        {
+            _notify("Set an alert URL first.", true);
+            return;
+        }
+        // Test the field value, not the saved config — a bad URL should fail
+        // visibly NOW, not during an attack. Failures land in guard.log.
+        AlertService.Send(url, "Test", "test alert — CryptoKey is armed", _service.Log);
+        _notify("Test alert queued — check your endpoint (failures log to guard.log).", false);
+    }
+
     private void RestartElevated()
     {
         try
@@ -556,6 +692,9 @@ internal sealed class SettingsPage : UserControl
         _config.Guard.LockMode = _privateDesktop.Checked ? "secure" : "overlay";
         _config.Guard.Watchdog = _watchdog.Checked;
         _config.Guard.LockPolicies = _lockPolicies.Checked;
+        _config.Guard.IdleLockMinutes = _idle.Value;
+        _config.Guard.WebcamOnTamper = _webcam.Checked;
+        _config.Guard.AlertUrl = _alertUrl.Text.Trim();
         try
         {
             ConfigStore.Save(_config);

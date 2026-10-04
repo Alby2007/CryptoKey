@@ -55,6 +55,12 @@ failsafe passphrase — to unlock.
 - **IPC** — `lock` / `pause` / `resume` / `status` / `quit` reach the running
   guard over `\\.\pipe\cryptokey-ctl` (one line in, one line out; `quit` is
   refused while locked).
+- **Tripwires** (Settings → Tripwires & alerts, all off by default): lock
+  after N idle minutes via `GetLastInputInfo`; webcam still on tamper events
+  (bad passphrase, clone flag, break-glass) into `captures/`; and remote
+  alerts — every lock/unlock/tamper event POSTs to your ntfy.sh topic or
+  any webhook. The camera and the endpoint are opt-in, nothing leaves the
+  machine otherwise.
 
 ## Usage
 
@@ -171,10 +177,11 @@ than automatic.
   until the guard next starts and restores. Plan accordingly while
   locked: Switch user and the power button remain, Task Manager and
   Sign out do not.
-- `config.json` is mirrored to `config.json.bak` on every save; a corrupt
-  primary is quarantined to `.bad` and the backup loads with a modal
-  warning — a boot with a torn config no longer fails silently into
-  "no protection".
+- `config.json` survives on three surfaces: `config.json.bak` mirrors every
+  save (corrupt primary → `.bad` quarantine + backup load with a modal
+  warning), and `HKCU\Software\CryptoKey\Config` holds a third copy — a
+  wiped config *folder* restores from the registry and logs it as a tamper
+  event.
 - A running guard rewrites `config.json` on every rotation — kill the guard
   (`cryptokey quit`) before editing it by hand, or your edits are lost.
 - Auto-start is opt-in (Settings → Start with Windows). Until enabled, the PC

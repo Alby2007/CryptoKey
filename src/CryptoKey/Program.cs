@@ -329,7 +329,11 @@ internal static class Program
         try
         {
             config = ConfigStore.Load(out bool restoredFromBackup);
-            if (restoredFromBackup)
+            if (ConfigStore.LastRestoreFromRegistry)
+                Alert("CryptoKey's config directory was wiped — the config was " +
+                    "restored from the registry backup. If you didn't delete it, " +
+                    "treat this as a tamper event.", alertModal);
+            else if (restoredFromBackup)
                 Alert("CryptoKey's config.json was corrupt — restored the last-good " +
                     "backup (config.json.bak). The corrupt file was quarantined as " +
                     "config.json.bad.", alertModal);

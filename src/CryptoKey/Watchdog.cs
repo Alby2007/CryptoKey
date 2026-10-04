@@ -122,10 +122,10 @@ internal static class Watchdog
                 Log("guard heartbeat lost.");
             }
 
-            if (!File.Exists(ConfigStore.ConfigPath))
+            if (!ConfigStore.Resumable)
             {
                 if (newlyDead)
-                    Log("no config on disk — nothing to respawn; idle.");
+                    Log("no config anywhere (disk or registry) — nothing to respawn; idle.");
                 continue;
             }
             if (DateTime.UtcNow < nextRespawnAt)
