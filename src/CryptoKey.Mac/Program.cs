@@ -1,3 +1,6 @@
+using Avalonia;
+using Avalonia.Controls;
+
 namespace CryptoKey;
 
 /// <summary>
@@ -10,18 +13,19 @@ internal static class Program
     private sealed class HostVerbs : IHostVerbs
     {
         public int RunGuard(bool devMode, bool takeover, bool forceClassic)
-            => Guard(devMode, takeover);
+            => Guard(devMode, takeover, headless: false);
     }
 
     private static int Main(string[] args)
     {
         Platform.Init(MacPlatform.Services);
 
-        // Bare `cryptokey` (optionally --dev) = the daemon. There is no GUI
-        // tier yet — same code path as `guard`.
+        // Bare `cryptokey` (optionally --dev/--takeover/--headless) = the
+        // daemon. Avalonia tier by default; --headless forces the pump path.
         if (args.Length == 0 || args[0].StartsWith("--"))
             return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
-                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase));
+                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
+                args.Contains("--headless", StringComparer.OrdinalIgnoreCase));
 
         // Shared verbs: enroll, status, guard, open, lock, pause, resume,
         // quit, watchdog.
@@ -30,6 +34,12 @@ internal static class Program
 
         switch (args[0].ToLowerInvariant())
         {
+            case "uitest":
+                // Hidden dev smoke: engage the real lock surface (tap +
+                // capture + windows) for a few seconds, then release.
+                // --dev arms the panic combo; --headless skips the windows.
+                return UiTest(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                    args.Contains("--headless", StringComparer.OrdinalIgnoreCase));
             case "install":
                 Console.WriteLine("install is not wired on macOS yet — run " +
                     "'cryptokey guard' directly (LaunchAgent lands in Phase 4).");
@@ -43,7 +53,7 @@ internal static class Program
         }
     }
 
-    private static int Guard(bool devMode, bool takeover)
+    private static int Guard(bool devMode, bool takeover, bool headless)
     {
         if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
@@ -64,19 +74,144 @@ internal static class Program
         if (devMode)
             Console.WriteLine("DEV MODE: panic exit is Ctrl+Opt+Shift+F12.");
 
-        // The pump IS the main thread — GuardService marshals IPC dispatch,
-        // idle-lock ticks, and rotation logging through it.
-        var pump = (MacPump)Platform.Services.AppLifetime;
-        using var service = new GuardService(config, devMode, forceClassic: false);
-        using var ipc = new IpcServer(service.UiDispatcher,
-            line => service.DispatchCommand(line));
-        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-            Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
+        if (!headless)
+        {
+            try
+            {
+                return GuardWithUi(config, devMode);
+            }
+            catch (Exception ex)
+            {
+                // UI stack failed — security outranks chrome: run headless.
+                Console.WriteLine(
+                    $"UI unavailable ({ex.Message}) — running headless.");
+            }
+        }
+        return GuardHeadless(config, devMode);
+    }
 
+    /// <summary>Avalonia tier: Dispatcher is the pump, shielding windows + tray.</summary>
+    private static int GuardWithUi(KeyConfig config, bool devMode)
+    {
+        var ui = new AvaloniaUiDispatcher();
+        var lockUi = new LockWindowCtl();
+        Platform.Init(MacPlatform.UiServices(ui, lockUi));
+
+        GuardService? service = null;
+        IpcServer? ipc = null;
+        MacApp.OnStartup = () =>
+        {
+            MacInterop.HideFromDock(); // daemon — no Dock icon
+            service = StartBackend(config, devMode, out ipc);
+            MacTray.Install(service);
+        };
+        try
+        {
+            AppBuilder.Configure<MacApp>()
+                .UsePlatformDetect()
+                .WithInterFont()
+                .StartWithClassicDesktopLifetime(Array.Empty<string>(),
+                    ShutdownMode.OnExplicitShutdown);
+            return 0;
+        }
+        finally
+        {
+            MacApp.OnStartup = null;
+            try { ipc?.Dispose(); } catch (Exception) { }
+            try { service?.Dispose(); } catch (Exception) { }
+        }
+    }
+
+    /// <summary>Headless tier: MacPump main thread, capture+tap lock only.</summary>
+    private static int GuardHeadless(KeyConfig config, bool devMode)
+    {
+        var pump = new MacPump();
+        Platform.Init(MacPlatform.Headless(pump));
+        using var service = StartBackend(config, devMode, out IpcServer? ipc);
+        using (ipc)
+        {
+            pump.Run(); // blocks until AppLifetime.Exit() — quit/panic land here
+        }
+        return 0;
+    }
+
+    private static GuardService StartBackend(
+        KeyConfig config, bool devMode, out IpcServer? ipc)
+    {
+        var service = new GuardService(config, devMode, forceClassic: false);
+        ipc = new IpcServer(service.UiDispatcher,
+            line => service.DispatchCommand(line));
         service.Start();
         ipc.Start(service.Log);
-        pump.Run(); // blocks until AppLifetime.Exit() — quit/panic land here
-        return 0;
+        return service;
+    }
+
+    /// <summary>
+    /// Dev-only surface smoke test — engages for 3s like a real lock, then
+    /// releases and exits. Proves tap + capture + windows end-to-end without
+    /// an enrolled key.
+    /// </summary>
+    private static int UiTest(bool devMode, bool headless)
+    {
+        ILockSurface surface;
+        if (headless)
+        {
+            var pump = new MacPump();
+            Platform.Init(MacPlatform.Headless(pump));
+            surface = new MacLockSurface(devMode, null);
+            Console.WriteLine("uitest (headless): engaging 3s…");
+            bool ok = surface.Engage();
+            Console.WriteLine($"  engage={ok} err={surface.EngageError ?? "—"}");
+            Thread.Sleep(3000);
+            surface.ReleaseInput();
+            surface.Dispose();
+            Console.WriteLine("released.");
+            return ok ? 0 : 1;
+        }
+
+        var ui = new AvaloniaUiDispatcher();
+        var lockUi = new LockWindowCtl();
+        Platform.Init(MacPlatform.UiServices(ui, lockUi));
+        var surfaceBox = new MacLockSurface(devMode, lockUi);
+        surface = surfaceBox;
+        MacApp.OnStartup = () =>
+        {
+            MacInterop.HideFromDock();
+            // Worker thread — a sleep on the UI thread would freeze the
+            // very windows we're testing.
+            new Thread(() =>
+            {
+                Console.WriteLine("uitest: engaging 3s…");
+                bool ok = surface.Engage();
+                Console.WriteLine($"  engage={ok} err={surface.EngageError ?? "—"}");
+                surface.SetStatus("uitest — type to see dots; Enter submits.");
+                surface.PassphraseSubmitted += buf =>
+                {
+                    Console.WriteLine($"  submitted {buf.Length} chars (wiped)");
+                    Array.Clear(buf);
+                    surface.SetStatus("submitted — releasing…");
+                };
+                Thread.Sleep(3000);
+                if (ok)
+                {
+                    surface.ReleaseInput();
+                    Console.WriteLine("released.");
+                }
+                surface.Dispose();
+                ui.Post(ui.Exit);
+            })
+            { IsBackground = true }.Start();
+        };
+        try
+        {
+            AppBuilder.Configure<MacApp>()
+                .UsePlatformDetect()
+                .WithInterFont()
+                .StartWithClassicDesktopLifetime(Array.Empty<string>(),
+                    ShutdownMode.OnExplicitShutdown);
+            return 0;
+        }
+        finally { MacApp.OnStartup = null; }
     }
 
     private static void Usage()

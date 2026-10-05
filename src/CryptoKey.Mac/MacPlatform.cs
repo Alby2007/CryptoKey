@@ -11,34 +11,48 @@ namespace CryptoKey;
 /// </summary>
 internal static class MacPlatform
 {
+    /// <summary>Headless bundle — own pump, no lock windows.</summary>
     public static PlatformServices Services
     {
         get
         {
             var pump = new MacPump();
-            return new PlatformServices
-            {
-                Paths = new MacPaths(),
-                Protector = new KeychainProtector(),
-                Usb = new MacUsbEnumerator(),
-                KeyMonitors = new MacKeyMonitorFactory(pump),
-                Ipc = new MacIpcSecurity(),
-                SingleInstance = new FlockSingleInstance(),
-                StopSignals = new MacStopSignals(),
-                LockPolicies = new NullLockPolicies(),
-                Capture = new NullCaptureService(),
-                SystemActions = new MacSystemActions(),
-                ConfigBackup = new FileConfigBackup(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    "Library", "Preferences", "CryptoKey", "config-backup.json")),
-                KeyfileAttrs = new NoopKeyfileAttrs(), // ".cryptokey" is a dotfile already
-                AppLifetime = pump,
-                Surfaces = new MacLockSurfaceFactory(),
-                EnrollmentExtras = new NoopEnrollmentExtras(),
-                UserAlerts = new MacUserAlerts(),
-            };
+            return Build(pump, pump, null);
         }
     }
+
+    /// <summary>Avalonia bundle — the Dispatcher is the pump, windows exist.</summary>
+    public static PlatformServices UiServices(
+        AvaloniaUiDispatcher ui, LockWindowCtl lockUi)
+        => Build(ui, ui, lockUi);
+
+    /// <summary>Headless bundle on a caller-owned pump.</summary>
+    public static PlatformServices Headless(MacPump pump)
+        => Build(pump, pump, null);
+
+    private static PlatformServices Build(
+        IUiDispatcher ui, IAppLifetime lifetime, LockWindowCtl? lockUi)
+        => new PlatformServices
+        {
+            Paths = new MacPaths(),
+            Protector = new KeychainProtector(),
+            Usb = new MacUsbEnumerator(),
+            KeyMonitors = new MacKeyMonitorFactory(ui),
+            Ipc = new MacIpcSecurity(),
+            SingleInstance = new FlockSingleInstance(),
+            StopSignals = new MacStopSignals(),
+            LockPolicies = new NullLockPolicies(),
+            Capture = new NullCaptureService(),
+            SystemActions = new MacSystemActions(),
+            ConfigBackup = new FileConfigBackup(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Preferences", "CryptoKey", "config-backup.json")),
+            KeyfileAttrs = new NoopKeyfileAttrs(), // ".cryptokey" is a dotfile already
+            AppLifetime = lifetime,
+            Surfaces = new MacLockSurfaceFactory(lockUi),
+            EnrollmentExtras = new NoopEnrollmentExtras(),
+            UserAlerts = new MacUserAlerts(),
+        };
 }
 
 internal sealed class MacPaths : IPlatformPaths
@@ -202,11 +216,11 @@ internal sealed class MacKeyMonitor : IKeyMonitor
 
 internal sealed class MacKeyMonitorFactory : IKeyMonitorFactory
 {
-    private readonly MacPump _pump;
-    public MacKeyMonitorFactory(MacPump pump) => _pump = pump;
+    private readonly IUiDispatcher _ui;
+    public MacKeyMonitorFactory(IUiDispatcher ui) => _ui = ui;
 
     public KeyMonitorHandle Create(string targetSerial)
-        => new(new MacKeyMonitor(targetSerial, _pump), _pump);
+        => new(new MacKeyMonitor(targetSerial, _ui), _ui);
 }
 
 /// <summary>
@@ -363,13 +377,17 @@ internal sealed class MacSystemActions : ISystemActions
 
 internal sealed class MacLockSurfaceFactory : ILockSurfaceFactory
 {
+    private readonly LockWindowCtl? _ui;
+
+    public MacLockSurfaceFactory(LockWindowCtl? ui) => _ui = ui;
+
     /// <summary>
     /// One surface, both tiers: capture+tap IS the strong tier on macOS;
-    /// the overlay distinction is a Windows artifact. securePreferred=false
-    /// asks for the degrade-friendly shape (same machinery, IsOverlay=true).
+    /// the overlay distinction is a Windows artifact. securePreferred is
+    /// ignored — same machinery either way.
     /// </summary>
     public ILockSurface Create(bool securePreferred, bool devMode)
-        => new MacLockSurface(devMode, headless: !securePreferred);
+        => new MacLockSurface(devMode, _ui);
 }
 
 /// <summary>Headless alert: osascript dialog if a UI session is up, else console.</summary>

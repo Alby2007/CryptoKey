@@ -228,4 +228,35 @@ internal static class MacInterop
     internal const int LOCK_EX = 2;
     internal const int LOCK_NB = 4;
     internal const int EWOULDBLOCK = 35;
+
+    // ---------- Objective-C runtime (NSWindow level, activation policy) ----------
+
+    private const string ObjC = "/usr/lib/libobjc.A.dylib";
+
+    [DllImport(ObjC)] internal static extern IntPtr objc_getClass(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(ObjC)] internal static extern IntPtr sel_registerName(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")]
+    internal static extern IntPtr ObjcMsgSend(IntPtr receiver, IntPtr selector);
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")]
+    internal static extern IntPtr ObjcMsgSendLong(IntPtr receiver, IntPtr selector, long arg);
+
+    internal static IntPtr Sel(string name) => sel_registerName(name);
+
+    /// <summary>Put an NSWindow at the capture-shielding level.</summary>
+    internal static void SetShieldingLevel(IntPtr nsWindow)
+    {
+        ObjcMsgSendLong(nsWindow, Sel("setLevel:"), CGShieldingWindowLevel());
+        // canJoinAllSpaces — the lock card must not be stranded on another Space.
+        ObjcMsgSendLong(nsWindow, Sel("setCollectionBehavior:"), 1);
+    }
+
+    /// <summary>NSApplicationActivationPolicyAccessory — daemon, no Dock icon.</summary>
+    internal static void HideFromDock()
+    {
+        IntPtr app = ObjcMsgSend(objc_getClass("NSApplication"), Sel("sharedApplication"));
+        if (app != IntPtr.Zero)
+            ObjcMsgSendLong(app, Sel("setActivationPolicy:"), 1);
+    }
 }

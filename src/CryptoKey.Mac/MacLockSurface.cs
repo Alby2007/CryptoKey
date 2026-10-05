@@ -4,12 +4,13 @@ using System.Security.Cryptography;
 namespace CryptoKey;
 
 /// <summary>
-/// macOS lock surface, headless tier: CGDisplayCapture blanks every active
-/// display and a session-level CGEventTap eats all keyboard/mouse input.
-/// No window, no status UI — the phrase is typed blind (the Avalonia
-/// surface with a real status card is Phase 3). The invariant that matters
-/// is identical to Windows: the callback runs on the tap's own run-loop
-/// thread and the OS eats input at the session boundary.
+/// macOS lock surface: CGDisplayCapture blanks every active display and a
+/// session-level CGEventTap eats all keyboard/mouse input. With a
+/// <see cref="LockWindowCtl"/> it also shows the per-screen status card —
+/// but input still only ever lives in the tap-side buffer; the windows
+/// render dots, never characters. The invariant that matters is identical
+/// to Windows: the callback runs on the tap's own run-loop thread and the
+/// OS eats input at the session boundary.
 ///
 /// Death safety: capture + taps are per-process — a killed guard releases
 /// the session on its own, no dead-man's watchdog needed.
@@ -25,7 +26,7 @@ internal sealed class MacLockSurface : ILockSurface
     private const int MaxPassphraseLength = 256;
 
     private readonly bool _devMode;
-    private readonly bool _headless;
+    private readonly LockWindowCtl? _ui; // null = headless tier (no windows)
     private readonly object _engageSync = new();
 
     private readonly char[] _buffer = new char[MaxPassphraseLength];
@@ -45,10 +46,10 @@ internal sealed class MacLockSurface : ILockSurface
     // The callback must be rooted — the GC can't see the CFMachPort's ref.
     private readonly MacInterop.CgEventTapCallBack _tapCallback;
 
-    public MacLockSurface(bool devMode, bool headless)
+    public MacLockSurface(bool devMode, LockWindowCtl? ui)
     {
         _devMode = devMode;
-        _headless = headless;
+        _ui = ui;
         _tapCallback = OnTapEvent;
     }
 
@@ -70,6 +71,7 @@ internal sealed class MacLockSurface : ILockSurface
                 // permission) must not blank the screens first.
                 StartTap();
                 CaptureAll();
+                _ui?.Open();
                 _engaged = true;
                 _engageError = null;
                 return true;
@@ -97,6 +99,9 @@ internal sealed class MacLockSurface : ILockSurface
     public void ReleaseInput()
     {
         try { KillTap(); } catch (Exception) { }
+        // Windows go before capture release — a topmost fullscreen card
+        // must never linger on the normal desktop.
+        try { _ui?.Close(); } catch (Exception) { }
         try { ReleaseDisplays(); } catch (Exception) { }
         WipeBuffer();
     }
@@ -269,6 +274,7 @@ internal sealed class MacLockSurface : ILockSurface
                 var attempt = new char[_len];
                 _buffer.AsSpan(0, _len).CopyTo(attempt);
                 WipeBuffer();
+                _ui?.SetDots(0);
                 PassphraseSubmitted?.Invoke(attempt); // subscriber owns + wipes
                 return;
             case MacInterop.VkDelete:
@@ -276,12 +282,14 @@ internal sealed class MacLockSurface : ILockSurface
                 {
                     _len--;
                     _buffer[_len] = '\0';
+                    _ui?.SetDots(_len);
                 }
                 return;
             default:
                 // Unicode straight off the event — the OS already applied
                 // modifiers/layout; normalize forgives the rest.
                 AppendChars(evt);
+                _ui?.SetDots(_len);
                 return;
         }
     }
@@ -310,15 +318,18 @@ internal sealed class MacLockSurface : ILockSurface
         _len = 0;
     }
 
-    // ---------- cosmetic setters: no window to show them on (Phase 3) ----------
+    // ---------- cosmetic setters → the lock windows (null-safe headless) ----------
 
-    public void SetAnimations(bool enabled) { }
-    public void SetStatus(string message) { }
-    public void ResetStatus() { }
-    public void SetPassphraseLength(int len) { }
-    public void SetFailedAttempts(int count) { }
+    public void SetAnimations(bool enabled) => _ui?.SetAnimations(enabled);
+    public void SetStatus(string message) => _ui?.SetStatus(message);
+    public void ResetStatus() => _ui?.ResetStatus();
+    public void SetPassphraseLength(int len) => _ui?.SetDots(len);
+    public void SetFailedAttempts(int count) => _ui?.SetFailed(count);
     public void SetCooldown(DateTime? until)
-        => _cooldownUntil = until ?? DateTime.MinValue;
+    {
+        _cooldownUntil = until ?? DateTime.MinValue;
+        _ui?.SetFrozen(until);
+    }
 
     public void Dispose()
     {
