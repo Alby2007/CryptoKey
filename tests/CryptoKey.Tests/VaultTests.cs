@@ -823,6 +823,35 @@ public class VaultTests : IDisposable
     }
 
     [Fact]
+    public void Clamp_only_heal_persists_across_reopen()
+    {
+        // A freelist whose ONLY defect is garbage entries has no orphans —
+        // the heal still dirtied the manifest, else it silently re-runs on
+        // every open forever (the overwrite bug this regresses).
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            var free = (SortedSet<int>)typeof(VaultVolume)
+                .GetField("_free", System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance)!
+                .GetValue(vol)!;
+            free.Add(vol.ChunkCount + 5); // garbage entry, no orphans
+            vol.CreateFile("\\touch.txt", out _); // force a manifest flush
+        }
+
+        using (var v2 = Open(path, secret))
+        {
+            Assert.Equal(0, v2.LastHealOrphans); // clamp ran, nothing orphaned
+            var dirty = (bool)typeof(VaultVolume)
+                .GetField("_dirty", System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance)!
+                .GetValue(v2)!;
+            Assert.True(dirty); // the repaired freelist must persist on close
+        }
+    }
+
+    [Fact]
     public void Clean_open_reports_no_heal_and_stays_clean()
     {
         string path = Img();

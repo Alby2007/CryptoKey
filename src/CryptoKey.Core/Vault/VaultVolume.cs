@@ -843,8 +843,7 @@ internal sealed class VaultVolume : IDisposable
         foreach (int id in dto.Free)
             _free.Add(id);
         _highWater = dto.HighWater;
-        RebuildFreeList();
-        _dirty = LastHealOrphans > 0; // a healed freelist persists on the next flush
+        RebuildFreeList(); // owns _dirty — every change class must persist
     }
 
     /// <summary>
@@ -887,8 +886,9 @@ internal sealed class VaultVolume : IDisposable
         // reference wins (keep the data), the free entry drops.
         int conflicts = _free.RemoveWhere(referenced.Contains);
         LastHealOrphans += conflicts;
-        if (clamped > 0)
-            _dirty = true;
+        // All three change classes dirty the manifest — a clamp-only heal
+        // that doesn't persist just re-runs silently on every open.
+        _dirty = clamped > 0 || LastHealOrphans > 0;
     }
 
     /// <summary>Sum of every node's chunk list — structural self-check for tests.</summary>
