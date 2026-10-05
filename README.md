@@ -134,12 +134,33 @@ design while locked).
 `--dev` enables the emergency exit combo **Ctrl+Alt+Shift+F12**.
 **Always use `--dev` during development and testing.**
 
+## macOS
+
+The same security model runs on macOS via `src/CryptoKey.Mac` (Avalonia UI)
+— enroll/status/lock/pause/resume/quit/guard are identical, and the lock is
+`CGDisplayCapture` + a session event tap + per-screen shielding windows
+instead of a private desktop. The keyfile is wrapped by a Keychain-held
+AES-GCM key rather than DPAPI; autostart is a per-user LaunchAgent.
+
+```bash
+dotnet build src/CryptoKey.Mac/CryptoKey.Mac.csproj -c Release
+./src/CryptoKey.Mac/bin/Release/net9.0/cryptokey uitest      # 3s lock smoke
+./src/CryptoKey.Mac/bin/Release/net9.0/cryptokey enroll      # same flow
+./src/CryptoKey.Mac/bin/Release/net9.0/cryptokey             # guard (UI tier)
+./src/CryptoKey.Mac/bin/Release/net9.0/cryptokey install     # ~/Applications + LaunchAgent
+```
+
+The event tap needs **Accessibility** permission — without it a lock
+attempt fails closed onto the real macOS lock screen. Full mapping,
+publish profiles, and limits: [`docs/macos.md`](docs/macos.md).
+
 ## Build
 
 ```console
-dotnet build
+dotnet build                   # Core + both hosts (Win needs net9.0-windows)
 dotnet test                    # xUnit suite — pure security invariants
-dotnet run --project src/CryptoKey.Win -- enroll
+dotnet run --project src/CryptoKey.Win -- enroll    # Windows host
+dotnet run --project src/CryptoKey.Mac -- enroll    # macOS host
 ```
 
 Enroll **generates** your recovery phrase — 20 Crockford Base32 characters

@@ -5,6 +5,12 @@ The rule throughout: **fail closed** — an ambiguous state locks rather than
 exposes, and every lock mode keeps an escape path that doesn't depend on
 the lock working.
 
+The tables below name the Windows mechanisms. On macOS the same rules hold
+with different machinery: a killed guard releases capture+tap automatically
+(process-scoped resources — no lock-watchdog or `--release-desktop` needed),
+a failed engage fails closed to `CGSession -suspend`, and respawn layers are
+flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
+
 ## Lock-surface failures
 
 | Failure | What happens | Rescue |

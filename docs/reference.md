@@ -144,3 +144,9 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |
+
+macOS equivalents: config/log dir `~/Library/Application Support/CryptoKey/`,
+config backup `~/Library/Preferences/CryptoKey/config-backup.json`, flock
+locks + `watchdog.stop` under that dir, unix socket `cryptokey-ctl.sock` under
+`$TMPDIR`, LaunchAgent `~/Library/LaunchAgents/com.cryptokey.guard.plist`,
+unix socket `cryptokey-ctl` under `$TMPDIR`,

@@ -14,6 +14,7 @@ These docs describe how the pieces fit together. For the user-facing guide
 | [lifecycle.md](lifecycle.md) | Guard state machine, secure-desktop engage/disengage, secret ratchet, unlock decision flow, backoff |
 | [recovery.md](recovery.md) | Every failure mode and the mechanism that survives it |
 | [reference.md](reference.md) | CLI verbs, IPC protocol, `config.json` fields, file paths, startup modes, log format |
+| [macos.md](macos.md) | The macOS port — `CryptoKey.Mac` host, platform mapping, LaunchAgent install, permissions, limits |
 
 ## Thirty-second tour
 
@@ -26,3 +27,7 @@ on it, and drives an `ILockSurface` — either the classic per-monitor overlay
 or a private Windows desktop the session is switched onto. A rolling-secret
 ratchet burns the keyfile secret after every verified session so a cloned
 drive ages out; everything else is documented from there.
+
+On macOS the same Core runs inside `CryptoKey.Mac` — capture+tap lock,
+Keychain-wrapped keyfiles, unix-socket IPC, LaunchAgent autostart; see
+[macos.md](macos.md).

@@ -1,5 +1,10 @@
 # Lifecycle
 
+The state machine below is host-neutral — it lives in `CryptoKey.Core` and
+runs identically on Windows and macOS. The OS-side actors (private desktop,
+watchdog rescue, pipe) are the Windows incarnations; the Mac substitutions
+are in [macos.md](macos.md).
+
 ## Guard state machine
 
 ```mermaid

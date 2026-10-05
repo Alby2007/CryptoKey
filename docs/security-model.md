@@ -184,6 +184,36 @@ input during a freeze is eaten without counting. The lock screen paints a
 live countdown. The counter is in-memory — it clears on unlock, re-lock,
 config reload, or restart (documented trade-off).
 
+## macOS equivalences (`CryptoKey.Mac`)
+
+The crypto and state machine are identical; the OS-facing primitives differ:
+
+- **Keyfile binding**: DPAPI's machine+user seal becomes a random AES-256-GCM
+  wrap key in the login Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
+  — never iCloud, unusable while locked). The caller-supplied `entropy` rides
+  as AES-GCM *additional authenticated data*, so a ciphertext can only be
+  unwrapped under the same call context. A copied keyfile is as dead off this
+  Mac as a DPAPI blob is off the Windows box.
+- **IPC**: `cryptokey-ctl` is a unix socket under the per-user `$TMPDIR` —
+  same-user-only by filesystem layout; the DACL/SACL hardening has no analog
+  needed (no cross-integrity sharing to label for).
+- **Single-instance / supervision**: `flock` on config-dir lockfiles (dies
+  with the process, same semantics as the mutexes). The watchdog pair is
+  unchanged; launchd (`KeepAlive=Crashed`) adds a third, outermost respawn
+  layer — it revives signal-killed guards but lets clean exits stay dead.
+- **Lock surface**: there is no private-desktop API on macOS. The single tier
+  is `CGDisplayCapture` (blanks every display to the capturing app) +
+  shielding-level windows + a session `CGEventTap` that eats all HID events
+  and feeds the same fixed 256-char buffer. Death safety is stronger than
+  Windows by construction — capture and taps are per-process resources, so a
+  killed guard always releases the session; no lock-watchdog needed.
+- **Fail-closed**: a failed engage (missing Accessibility permission)
+  releases everything and calls `CGSession -suspend` — the real OS lock
+  stands in for Task-Manager sealing.
+- **Tripwires**: idle meter via `CGEventSourceSecondsSinceLastEventType`;
+  lock policies and webcam capture are no-ops (no platform equivalent
+  wired yet).
+
 ## Known limits
 
 Carried from the [root README](../README.md#warnings--known-limits):

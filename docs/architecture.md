@@ -3,7 +3,8 @@
 ## Process roles — one exe, several hats
 
 `CryptoKey.exe` dispatches on `argv` before anything else happens. All roles
-share the same binary and config:
+share the same binary and config (the diagram shows the Windows host —
+[macos.md](macos.md) has the Mac equivalents):
 
 ```mermaid
 flowchart TD
@@ -150,6 +151,19 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |
 | `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |
+
+### `src/CryptoKey.Mac` — macOS host (`cryptokey`, Avalonia 11)
+
+| File | Role |
+|---|---|
+| `MacPlatform.cs` | The `PlatformServices` bundle: `~/Library/Application Support` paths, Keychain protector, DA enumerator, poll `MacKeyMonitor`, unix-socket IPC, `flock` single-instance + stand-down file, `FileConfigBackup`, `CGSession`/`pmset`/`osascript` actions, pump or Avalonia dispatcher, surface factory |
+| `MacInterop.cs` | P/Invoke surface — CoreFoundation, CoreGraphics, Security, DiskArbitration, libc (`statfs`, `flock`), libobjc (`setLevel:`, activation policy) |
+| `MacUsbEnumerator.cs` | `/Volumes` → `statfs` → `DADiskCreateFromBSDName` — removable + serial per mount, grouped per whole disk |
+| `KeychainProtector.cs` | AES-GCM wrap key in the login Keychain (device-only accessible); entropy → AAD |
+| `MacLockSurface.cs` | `CGEventTap` on its own run-loop thread + `CGDisplayCapture` + fixed char buffer; engage fails closed via `CGSession -suspend` |
+| `Ui/` | `MacApp` + `AvaloniaUiDispatcher`, `LockWindowCtl`/`LockWindow` (per-screen shielding cards), `MacTray` (menu-bar verbs → `DispatchCommand`) |
+| `MacInstall.cs` | `install`/`uninstall` — payload copy to `~/Applications/CryptoKey`, LaunchAgent plist + `launchctl bootstrap` |
+| `Program.cs` | `Platform.Init` + argv dispatch — UI tier by default, `--headless` pump fallback, hidden `uitest` smoke |
 
 `tests/CryptoKey.Tests` (xUnit, `net9.0`) covers the pure security
 invariants — rotation chain (incl. `keepPrev` orphan-proofing),
