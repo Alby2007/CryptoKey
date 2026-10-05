@@ -67,3 +67,16 @@ internal sealed class NoopEnrollmentExtras : IEnrollmentExtras
 {
     public void AfterEnroll() { }
 }
+
+/// <summary>No mount engine — vault stays image-only where Dokany doesn't exist.</summary>
+internal sealed class NullVaultMounter : IVaultMounter
+{
+    public bool DriverPresent => false;
+    public string? DriverHint => "no vault mount driver on this platform";
+
+    public IVaultMount? Mount(VaultVolume volume, string mountPoint, out string? error)
+    {
+        error = DriverHint;
+        return null;
+    }
+}

@@ -55,6 +55,8 @@ internal static class MacPlatform
             // afplay /System/Library/Sounds/*.aiff is the natural impl —
             // silent until the Mac host picks it up.
             Cues = new NullCues(),
+            // macFUSE is the eventual mount engine — vault stays image-only for now.
+            VaultMounts = new NullVaultMounter(),
         };
 }
 

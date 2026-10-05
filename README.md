@@ -69,6 +69,15 @@ your recovery phrase — to unlock.
 - **Sound cues** — a synthesized low thunk on lock, a two-note chime on
   unlock, and a triple blip for tamper storms (Settings → "Lock/unlock
   sound cues", on by default). The cues are generated PCM, not shipped WAVs.
+- **Encrypted vault** — a single `vault.ckv` image (AES-256-GCM chunks,
+  filenames sealed in an authenticated manifest) that mounts as a real
+  drive letter via Dokany **only while the key is in**: pull the key and
+  it force-dismounts with every secret buffer zeroed. There is no vault
+  passphrase — the device secret is the only factor, and its two key
+  slots ride the rotation ratchet so a cloned keyfile unseals it for at
+  most one generation. Vault tab → Create. Requires the Dokany driver;
+  the app reports honestly when it's absent. (`cryptokey vault …` for the
+  CLI verbs.)
 
 ## Usage
 

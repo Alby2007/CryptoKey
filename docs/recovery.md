@@ -34,6 +34,19 @@ flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
 | Attestation mismatch (config tampered) | Tripwire: tamper note + log, secret still verifies | Next rotation re-binds the envelope to the live config |
 | Corrupt/malformed keyfile | Unwrap/parse failure → `SecretMatch.None` → fail closed | Re-enroll; under `KeyOrPassphrase` the recovery phrase still works |
 
+## Vault failures (`vault.ckv`)
+
+| Failure | What happens | Rescue |
+|---|---|---|
+| Key pulled while vault is mounted | `KeyGone` → force-dismount + every secret buffer zeroed | Reinsert the key — slot A (or B inside the heal window) unseals and auto-mount returns the drive |
+| Recovery-phrase unlock | The vault **stays sealed** — it has no passphrase factor by design | Insert the physical key; a stolen image is inert without it |
+| Image left unopened through two rotations | Both key slots slid past — `SEALED — DEAD`, permanent | **None.** The volume key exists nowhere else. Vault page → Reformat to start over |
+| Dokany driver not installed | `NEEDS DRIVER` — image unseals in memory but can't mount | Install Dokany (the Vault page says so); the image itself is untouched |
+| Torn manifest write (power loss mid-flush) | Newest slot rejects → falls back to the older epoch | Automatic — the last pre-crash tree returns; the torn epoch's writes are rolled back |
+| Chunk ciphertext corrupted | GCM tag reject → `CrcError` surfaces to the app that touched it | That file's block is dead; the rest of the volume is unaffected |
+| Crash mid-write | Allocated chunks can be orphaned (space leaks, not corruption) | Reformat reclaims them — v1 has no journaling |
+| `vault.ckv` copied/stolen | Wrapped volume key only — useless without the device secret | Nothing to rescue; nothing to fear |
+
 ## Config failures
 
 | Failure | What happens | Rescue |

@@ -34,6 +34,7 @@ internal static class WinPlatform
         EnrollmentExtras = new WinEnrollmentExtras(),
         UserAlerts = new WinUserAlerts(),
         Cues = new WinCues(),
+        VaultMounts = new DokanVaultMounter(),
     };
 }
 

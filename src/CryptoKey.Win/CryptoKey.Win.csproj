@@ -18,6 +18,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CryptoKey.Tests" />
     <ProjectReference Include="..\CryptoKey.Core\CryptoKey.Core.csproj" />
+    <PackageReference Include="DokanNet" Version="2.3.0.3" />
     <PackageReference Include="FlashCap" Version="1.12.0" />
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
     <PackageReference Include="System.Management" Version="10.0.12" />

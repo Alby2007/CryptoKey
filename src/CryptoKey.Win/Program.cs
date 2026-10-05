@@ -70,6 +70,8 @@ internal static class Program
         {
             case "install":
                 return Install(args);
+            case "vault":
+                return Vault(args);
             case "help":
                 Usage();
                 return 0;
@@ -423,6 +425,175 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// `cryptokey vault …` — power-user/testing verbs. Mount/unmount/create go
+    /// to the live guard over IPC when one's running (that's where auto-mount
+    /// lives); standalone paths exist for create/status and a foreground
+    /// mount for driver smoke tests.
+    /// </summary>
+    private static int Vault(string[] args)
+    {
+        string sub = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+        if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: false))
+            return 1;
+        if (config == null)
+        {
+            Console.WriteLine("Not enrolled — run 'cryptokey enroll' first.");
+            return 1;
+        }
+
+        // A running guard owns the vault lifecycle — forward through the pipe.
+        bool live = IpcClient.Send("status", 400) != null;
+        if (live && sub is "mount" or "unmount" or "create" or "status")
+        {
+            string cmd = $"vault {sub}";
+            if (sub == "create" && args.Length > 2)
+                cmd += " " + args[2];
+            return CryptoKeyCli.SendIpc(cmd);
+        }
+
+        return sub switch
+        {
+            "create" => VaultCreateStandalone(config, args),
+            "status" => VaultStatus(config),
+            "mount" => VaultMountStandalone(config),
+            "unmount" => VaultUnmount(config),
+            "delete" => VaultDelete(config),
+            _ => VaultUsage(),
+        };
+    }
+
+    /// <summary>Feed a verified device secret into a VaultService for standalone ops.</summary>
+    private static bool FeedVerifiedSecret(KeyConfig config, VaultService vault)
+    {
+        UsbDisk? disk;
+        try
+        {
+            disk = Platform.Services.Usb.FindDisk(config.DeviceSerial);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"USB enumeration failed: {ex.Message}");
+            return false;
+        }
+        if (disk == null)
+        {
+            Console.WriteLine("Enrolled key not present — the vault needs the device secret.");
+            return false;
+        }
+        KeyfileCheck chk = KeyVerifier.Check(config, disk);
+        if (chk.Match == SecretMatch.None || chk.Secret == null)
+        {
+            Console.WriteLine($"Key present but not verified ({chk.Detail}).");
+            return false;
+        }
+        vault.KeyVerified(chk.Secret,
+            (uint)(chk.Match == SecretMatch.Previous
+                ? Math.Max(1, config.RotationCount - 1)
+                : config.RotationCount));
+        return true;
+    }
+
+    private static int VaultCreateStandalone(KeyConfig config, string[] args)
+    {
+        int mb = args.Length > 2 && int.TryParse(args[2], out int m)
+            ? m : config.Guard.VaultSizeMb;
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        return vault.TryCreate(mb, out string err)
+            ? OkSay($"Vault created — {mb} MB at {vault.ImagePath}" +
+                    (vault.State == VaultState.Mounted
+                        ? $" (mounted at {vault.MountPoint})" : ""))
+            : Fail(err);
+    }
+
+    private static int VaultStatus(KeyConfig config)
+    {
+        var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { });
+        Console.WriteLine($"Vault image:   {vault.ImagePath}");
+        Console.WriteLine($"Enabled:       {config.Guard.VaultEnabled}");
+        Console.WriteLine($"Auto-mount:    {config.Guard.VaultAutoMount}");
+        Console.WriteLine($"Mount point:   {vault.ConfiguredMountPoint}");
+        Console.WriteLine($"Driver:        {(vault.DriverPresent ? "present" : "MISSING — " + vault.DriverHint)}");
+        if (!vault.ImageExists)
+        {
+            Console.WriteLine("State:         no image (create with 'cryptokey vault create')");
+            return 0;
+        }
+        VaultHeader? header = VaultVolume.PeekHeader(vault.ImagePath);
+        if (header == null)
+        {
+            Console.WriteLine("State:         unreadable/corrupt image");
+            return 1;
+        }
+        Console.WriteLine($"State:         sealed (format v{header.Version}, " +
+            $"{header.ChunkCount} chunks ~ " +
+            $"{(header.ChunkCount * (long)VaultFormat.ChunkSize + VaultFormat.DataOffset) / (1024 * 1024)} MB)");
+        Console.WriteLine($"Key slots:     gen {header.KeySlots[0].RotationGen} / {header.KeySlots[1].RotationGen}");
+        return 0;
+    }
+
+    /// <summary>Foreground mount for driver smoke tests — Enter dismounts.</summary>
+    private static int VaultMountStandalone(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        if (!vault.TryMount(out string err))
+            return Fail(err);
+        Console.WriteLine($"Mounted at {vault.MountPoint} — press Enter to dismount.");
+        Console.ReadLine();
+        return 0;
+    }
+
+    private static int VaultUnmount(KeyConfig config)
+    {
+        // No live guard — try a driver-level unmount of the configured letter.
+        var mounter = (DokanVaultMounter)Platform.Services.VaultMounts;
+        if (!mounter.DriverPresent)
+            return Fail("no Dokany driver — nothing to unmount");
+        try
+        {
+            using var dokan = new DokanNet.Dokan(new DokanNet.Logging.NullLogger());
+            string mp = config.Guard.VaultMountPoint.Trim().TrimEnd('\\') + "\\";
+            dokan.RemoveMountPoint(mp);
+            return OkSay($"Unmount requested for {mp}");
+        }
+        catch (Exception ex)
+        {
+            return Fail($"unmount failed: {ex.Message}");
+        }
+    }
+
+    private static int VaultDelete(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { });
+        return vault.TryDeleteImage(out string err)
+            ? OkSay("Vault image deleted.")
+            : Fail(err);
+    }
+
+    private static int VaultUsage()
+    {
+        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete");
+        return 1;
+    }
+
+    private static int OkSay(string message)
+    {
+        Console.WriteLine(message);
+        return 0;
+    }
+
+    private static int Fail(string message)
+    {
+        Console.WriteLine($"error: {message}");
+        return 1;
+    }
+
     /// <summary>[Y/n] prompt — a redirected/piped stdin counts as yes.</summary>
     private static bool Ask(string question)
     {
@@ -473,6 +644,8 @@ internal static class Program
         Console.WriteLine("  cryptokey quit          Stop the guard (refused while locked)");
         Console.WriteLine("  cryptokey install       Copy the app to %LOCALAPPDATA%\\CryptoKey and");
         Console.WriteLine("                          repoint shortcuts + autostart at it");
+        Console.WriteLine("  cryptokey vault …       Encrypted drive: create|status|mount|unmount|delete");
+        Console.WriteLine("                          (needs the Dokany driver; create needs the key in)");
         Console.WriteLine();
         Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12");
         Console.WriteLine("  --classic          force the overlay lock (skip the private desktop)");

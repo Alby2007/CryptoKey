@@ -21,6 +21,7 @@ for the rest.
 | Wiping the whole `%APPDATA%\CryptoKey` folder | Registry backup — `HKCU\Software\CryptoKey\Config` holds the same JSON, a third copy on a different kill surface. Load chain: primary → `.bak` → registry (registry restores re-create both files and log as tamper); the watchdog's respawn gate accepts any copy |
 | Silent tamper | Webcam stills (opt-in, `captures/` trimmed to 50) + remote alerts via ntfy.sh/any webhook — tripwires become forensics and a pager |
 | `SwitchDesktop`-away attack | Flap monitor — while the secure desktop is engaged it polls `OpenInputDesktop` every ~300ms inside `_engageSync`; a foreign input desktop gets re-switched instantly, ≥3 in 10s escalates to `LockWorkStation` + alert + snap (the attacker lands on real OS auth). Legit paths — `Winlogon` by name, or an `OpenInputDesktop` failure (the SAS ACL-deny tell) — are skipped, not counted |
+| Stolen machine / copied `vault.ckv` | The vault image holds only an AES-GCM-wrapped volume key — the KEK derives from the **device secret**, which lives nowhere but the USB key. No key, no mount; filenames are ciphertext too |
 
 | Does **not** defend against | Why |
 |---|---|
@@ -36,6 +37,8 @@ for the rest.
 | Ctrl+Alt+Del / On-Screen Keyboard | SAS and UIAccess can't be hooked from user mode (OSK bypasses the keyboard hook entirely) |
 | Firmware-level serial spoofing | WMI serials are what the drive reports; cheap drives report junk |
 | An attacker who can enroll their own drive | Enrolling requires interactive access to the app — an unlocked session is already lost |
+| Vault recovery via passphrase alone | Deliberate: the vault has **no** passphrase factor — only the physical key unseals it. A stolen `vault.ckv` is inert |
+| Vault surviving two rotations unopened | Dead by design — the heal window is exactly one generation. An image not unsealed before slot B's generation retires is permanently sealed; reformat is the only path |
 
 ## Key material
 
@@ -45,6 +48,8 @@ for the rest.
 | `SecretSalt` / `SecretHash` | `config.json` | Verifier: `SHA-256(salt ‖ secret)` — 64 B of entropy, single salted SHA-256 suffices |
 | `PrevSecretHash` | `config.json` | Prior generation — the interrupted-rotation heal window |
 | `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256 over the normalized recovery phrase, per-config iteration count (600 000 new, legacy 100 000 verifies), salted — the failsafe factor |
+| Vault volume key | `vault.ckv` key slots | 256 random bits, AES-256-GCM-wrapped twice — once under the current-generation KEK, once under previous. Never stored or logged unwrapped |
+| Vault KEK | derived, in-memory only | `HMAC-SHA256(deviceSecret, "CryptoKeyVaultKEK" ‖ headerSalt)` — lives in a pinned buffer, zeroed on dismount/dispose |
 | Attestation | inside the keyfile envelope | `HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)` |
 
 ## Recovery phrase
@@ -122,6 +127,17 @@ Failure semantics:
 - **Previous-generation match** → unlocks (non-strict) but logs
   "possible clone", sets the tamper badge, and re-poisons itself.
 - Clone lifetime is bounded: every guard restart burns a generation.
+
+The **vault inherits the ratchet**: its two key slots track the secret
+window — slot A wraps under the current generation, slot B under previous.
+Every rotation edge the vault service witnesses rewrites both slots
+(`{cur, prev}` slides forward), so a copied `.cryptokey` opens the vault
+only inside the same one-generation window it can unlock the PC in. A
+cloned drive stopped being useful the moment the real key rotated twice;
+so does a vault it could once unseal. The other edge of the knife: an
+image that misses two consecutive rotations (vault created, key rotated
+twice without the vault ever mounting) is sealed **permanently** — the
+volume key exists nowhere else, by design.
 
 ## Unlock policies
 

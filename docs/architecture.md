@@ -103,7 +103,46 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
 | `captures\*.jpg` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — newest 50 kept |
+| `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — header + dual manifest slots + AES-GCM chunks; mounted via Dokany only while the key verifies |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
+
+## Vault format — `CKVAULT1`
+
+A single-file encrypted volume we own end-to-end. The image never carries
+the device secret — only a random **volume key**, wrapped per key slot.
+Everything is AES-256-GCM; every encrypted object authenticates its
+location as AAD so ciphertext can't be relocated silently.
+
+```text
+header page (4 KiB)
+  magic "CKVAULT\x01" | version u32 | flags u32 | salt 16B
+  keySlot[2]:  { rotationGen u32 | nonce 12B | wrappedVolKey 48B }
+  manifestSeq[2] u64 | chunkCount u32 | chunkRegionBase u64
+manifest slot A + slot B (4 MiB each, fixed)
+  magic u32 | seq u64 | plainLen u32 | nonce 12B | tag 16B | ct
+chunk region (fills the rest of the image)
+  chunk i = nonce 12B | tag 16B | ct 4096B     (4124 B per 4 KiB chunk)
+```
+
+- **KEK** = `HMAC-SHA256(deviceSecret, "CryptoKeyVaultKEK" ‖ salt)` —
+  derived on demand, never stored, zeroed after use.
+- **Key slots** ride the keyfile ratchet: slot A wraps under the current
+  generation, slot B under the previous — a stale-but-legit keyfile still
+  unseals the vault inside the heal window. Each rotation edge rewraps
+  `{cur, prev}`; two rotations without an open seals the image
+  permanently (by design — the volume key is nowhere else).
+- **Manifest** = JSON tree (paths → metadata + chunk ids + freelist),
+  sealed with `(slot, seq)` AAD. Filenames are ciphertext — a stolen
+  image reveals nothing. Flush alternates slots and bumps `seq`; a torn
+  write falls back to the older decrypting epoch.
+- **Chunks** are write-through, independently framed; chunk index is AAD.
+  Reads on tag failure raise an I/O error (`CrcError` at the Dokan seam),
+  never plaintext.
+- **Secrets** live in `PinnedBuffer`s (GC can't move them); the service
+  copies caller buffers in, zeroes them out, and zeroes everything on
+  `KeyGone`/dispose.
+- Known v1 gap: a crash mid-write can orphan allocated chunks (space
+  leaks, no corruption); journaling is a v2 item. No ADS/hardlinks.
 
 ## Module inventory
 
@@ -132,6 +171,9 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `FlapPolicy.cs` | Desktop-flap classification + sliding-window storm counter — pure logic, unit-tested |
 | `AlertService.cs` | Security-event push: POST + `Title` header to a user URL (ntfy.sh/webhook), 4 s, quiet after first failure |
 | `Backoff.cs` | Phrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
+| `Vault/VaultFormat.cs` | CKVAULT1 codecs — header page, KEK derivation, key-slot wrap/unwrap, chunk + manifest AES-GCM framing |
+| `Vault/VaultVolume.cs` | The sealed device: image create/open, case-insensitive dir tree, freelist allocator, chunked R/W, dual-slot manifest with torn-write fallback, `PinnedBuffer` key hygiene |
+| `Vault/VaultService.cs` | Lifecycle owner — consumes verified secrets from the guard, unseals/mounts on verify, force-dismounts on `KeyGone`, slides key slots on rotation |
 
 ### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
 
@@ -151,7 +193,9 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |
 | `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
-| `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |
+| `Vault/DokanVaultFileSystem.cs` | `IDokanOperations` adapter — translates driver callbacks to `VaultVolume`, maps results to `NtStatus` (tamper → `CrcError`) |
+| `Vault/DokanMount.cs` | `IVaultMounter`/`IVaultMount` over DokanNet — mount thread, driver-presence probe, drive-letter selection, force-dismount |
+| `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/vault/log pages, theming |
 
 ### `src/CryptoKey.Mac` — macOS host (`cryptokey`, Avalonia 11)
 
@@ -169,7 +213,10 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 `tests/CryptoKey.Tests` (xUnit, `net9.0`) covers the pure security
 invariants — rotation chain (incl. `keepPrev` orphan-proofing),
 envelope/attestation, tri-state match, `RotateKeyfiles` semantics, backoff
-ladder, config-store round-trip. The store is redirected into a temp dir
+ladder, config-store round-trip, and the vault suite (header/kekslot
+round-trips, two-generation seal window, chunk tamper → integrity error,
+torn-manifest fallback, tree/alloc/capacity semantics, filename
+confidentiality). The store is redirected into a temp dir
 by `CRYPTOKEY_CONFIG_ROOT` and `Platform.Services` gets a null/temp
 bundle — both set in a module initializer before any test code runs, so
 the ambient can't be captured too early. The interactive layer

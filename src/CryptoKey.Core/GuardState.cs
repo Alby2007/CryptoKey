@@ -7,6 +7,9 @@ internal enum GuardState
     Paused,
 }
 
+/// <summary>Vault state for the dashboard badge — null hides it entirely.</summary>
+internal sealed record VaultStatus(VaultState State, string MountPoint);
+
 internal sealed record StatusSnapshot(
     GuardState State,
     bool KeyPresent,
@@ -15,4 +18,5 @@ internal sealed record StatusSnapshot(
     DateTime? PausedUntil,
     string? TamperNote,
     bool KeyFactorArmed,
-    bool WatchdogAlive);
+    bool WatchdogAlive,
+    VaultStatus? Vault = null);

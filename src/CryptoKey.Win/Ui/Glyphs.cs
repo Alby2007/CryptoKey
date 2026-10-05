@@ -31,6 +31,7 @@ internal static class Glyphs
     public const string EyeHide   = "\uED1A";
     public const string Activity  = "\uE9D9";
     public const string Download  = "\uE896";
+    public const string Vault     = "\uEDA2";
 
     private static FontFamily? _family;
 

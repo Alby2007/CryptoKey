@@ -13,6 +13,7 @@ internal sealed class DashboardPage : UserControl
     private readonly Badge _cloneBadge;
     private readonly Badge _devBadge;
     private readonly Badge _wdBadge;
+    private readonly Badge _vaultBadge;
     private readonly Label _keyModel;
     private readonly Label _keySerial;
     private readonly Label _keyVolume;
@@ -102,9 +103,16 @@ internal sealed class DashboardPage : UserControl
             Text = "watchdog",
             BadgeColor = Theme.Accent,
             Visible = false,
+            Margin = new Padding(0, 1, 6, 0),
+        };
+        _vaultBadge = new Badge
+        {
+            Text = "vault",
+            BadgeColor = Theme.TextDim,
+            Visible = false,
         };
         subRow.Controls.AddRange(new Control[]
-            { _reasonLabel, _keyBadge, _cloneBadge, _devBadge, _wdBadge });
+            { _reasonLabel, _keyBadge, _cloneBadge, _devBadge, _wdBadge, _vaultBadge });
         heroPanel.Controls.Add(_hero, 0, 0);
         heroPanel.Controls.Add(_stateLabel, 0, 1);
         heroPanel.Controls.Add(subRow, 0, 2);
@@ -366,6 +374,25 @@ internal sealed class DashboardPage : UserControl
         }
         _cloneBadge.Visible = snap.TamperNote != null;
         _wdBadge.Visible = snap.WatchdogAlive;
+        if (snap.Vault is VaultStatus vs)
+        {
+            _vaultBadge.Visible = true;
+            (string text, Color color) = vs.State switch
+            {
+                VaultState.Mounted => ($"vault {vs.MountPoint}", Theme.AccentGreen),
+                VaultState.Unsealed => ("vault unsealed", Theme.AccentAmber),
+                VaultState.NeedsDriver => ("vault needs driver", Theme.AccentAmber),
+                VaultState.SealedDead => ("vault sealed", Theme.AccentRed),
+                _ => ("vault sealed", Theme.TextDim),
+            };
+            _vaultBadge.Text = text;
+            _vaultBadge.BadgeColor = color;
+            _vaultBadge.Size = _vaultBadge.GetPreferredSize(Size.Empty);
+        }
+        else
+        {
+            _vaultBadge.Visible = false;
+        }
         _keyBadge.Size = _keyBadge.GetPreferredSize(Size.Empty);
         _cloneBadge.Size = _cloneBadge.GetPreferredSize(Size.Empty);
         _devBadge.Size = _devBadge.GetPreferredSize(Size.Empty);

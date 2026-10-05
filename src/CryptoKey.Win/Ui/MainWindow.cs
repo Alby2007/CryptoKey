@@ -29,6 +29,7 @@ internal sealed class MainWindow : ChromeForm
         _tabs = new TabStrip { Dock = DockStyle.Top, Height = 46 };
         _tabs.AddTab("Dashboard", Glyphs.Home);
         _tabs.AddTab("Security", Glyphs.Key);
+        _tabs.AddTab("Vault", Glyphs.Vault);
         _tabs.AddTab("Settings", Glyphs.Settings);
         _tabs.AddTab("About", Glyphs.Info);
         _tabs.SelectedIndexChanged += (_, _) => ShowPage(_tabs.SelectedIndex);
@@ -56,8 +57,9 @@ internal sealed class MainWindow : ChromeForm
             page = index switch
             {
                 1 => new SecurityPage(_config, _service, Notify),
-                2 => new SettingsPage(_config, _service, Notify),
-                3 => new AboutPage(),
+                2 => new VaultPage(_config, _service, Notify),
+                3 => new SettingsPage(_config, _service, Notify),
+                4 => new AboutPage(),
                 _ => new DashboardPage(_service, _config, _devMode),
             };
             page.Dock = DockStyle.Fill;

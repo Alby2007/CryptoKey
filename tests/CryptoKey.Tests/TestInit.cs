@@ -73,6 +73,7 @@ internal static class TestPlatform
         EnrollmentExtras = new NoopEnrollmentExtras(),
         UserAlerts = new ConsoleUserAlerts(),
         Cues = new NullCues(),
+        VaultMounts = new TestVaultMounter(),
     };
 
     private sealed class TestPaths : IPlatformPaths
@@ -221,6 +222,27 @@ internal static class TestPlatform
     private sealed class TestAppLifetime : IAppLifetime
     {
         public void Exit() { }
+    }
+
+    /// <summary>In-memory mount stand-in — records mounts, pretends a driver exists.</summary>
+    private sealed class TestVaultMounter : IVaultMounter
+    {
+        public bool DriverPresent => true;
+        public string? DriverHint => null;
+
+        public IVaultMount? Mount(VaultVolume volume, string mountPoint, out string? error)
+        {
+            error = null;
+            return new TestMount(mountPoint);
+        }
+
+        private sealed class TestMount : IVaultMount
+        {
+            public TestMount(string mp) => MountPoint = mp;
+            public string MountPoint { get; }
+            public event Action? Detached { add { } remove { } }
+            public void Dispose() { }
+        }
     }
 
     private sealed class TestLockSurfaceFactory : ILockSurfaceFactory

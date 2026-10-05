@@ -191,3 +191,31 @@ internal interface ICues
     /// <summary>Harsh triple blip — tamper/flap-storm events.</summary>
     void Alarm();
 }
+
+/// <summary>
+/// The vault mount engine — Dokany on Windows; null impl elsewhere.
+/// <see cref="DriverPresent"/> must be honest: a missing kernel driver
+/// means mounts can never succeed, and the UI reports that rather than
+/// pretending.
+/// </summary>
+internal interface IVaultMounter
+{
+    /// <summary>True when the mount engine's driver/dependency is installed.</summary>
+    bool DriverPresent { get; }
+
+    /// <summary>User-facing hint when <see cref="DriverPresent"/> is false.</summary>
+    string? DriverHint { get; }
+
+    /// <summary>Mount a prepared volume at a drive letter; null + error on failure.</summary>
+    IVaultMount? Mount(VaultVolume volume, string mountPoint, out string? error);
+}
+
+/// <summary>A live mount — Dispose force-dismounts (open handles see I/O errors).</summary>
+internal interface IVaultMount : IDisposable
+{
+    /// <summary>The mounted drive root, e.g. "V:\".</summary>
+    string MountPoint { get; }
+
+    /// <summary>Raised when the filesystem detaches on its own (external unmount, driver loss).</summary>
+    event Action? Detached;
+}

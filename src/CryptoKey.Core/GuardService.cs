@@ -18,6 +18,7 @@ internal sealed class GuardService : IDisposable
     private readonly bool _forceClassic;
     private ILockSurface _surface;
     private readonly Supervisor _supervisor;
+    private readonly VaultService _vault;
     private System.Threading.Timer? _watchdogTimer;
 
     private UsbDisk? _lastDisk;
@@ -43,6 +44,8 @@ internal sealed class GuardService : IDisposable
         _ui = handle.Ui;
         _surface = CreateSurface(config, devMode, forceClassic);
         _supervisor = new Supervisor(msg => Log(msg));
+        _vault = new VaultService(config, Platform.Services.VaultMounts, Log);
+        _vault.StatusChanged += OnVaultStatusChanged;
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
@@ -152,6 +155,17 @@ internal sealed class GuardService : IDisposable
 
     /// <summary>Marshals work onto the pump the monitor owns (IPC dispatch goes through it).</summary>
     public IUiDispatcher UiDispatcher => _ui;
+
+    /// <summary>The encrypted-vault lifecycle service — the Vault page and CLI drive it.</summary>
+    public VaultService Vault => _vault;
+
+    /// <summary>Vault state transitions fold into the snapshot stream + balloon on mount.</summary>
+    private void OnVaultStatusChanged()
+    {
+        if (_vault.State == VaultState.Mounted && _config.Guard.BalloonTips)
+            Notification?.Invoke("CryptoKey", $"Vault mounted at {_vault.MountPoint}");
+        EmitSnapshot();
+    }
 
     public void Start()
     {
@@ -337,6 +351,7 @@ internal sealed class GuardService : IDisposable
             _cooldownUntil = null;
             _surface.SetCooldown(null);
             _lastAttest = AttestState.Ok;
+            _vault.ReloadConfig();
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
             return "ok re-enrolled";
         }
@@ -363,7 +378,10 @@ internal sealed class GuardService : IDisposable
 
     public StatusSnapshot Snapshot()
         => new(State, _lastDisk != null, _lastDisk?.Model, _lastVerifyFailure,
-            _pausedUntil, _tamperNote, _keyVerifiedNow, _supervisor.Alive);
+            _pausedUntil, _tamperNote, _keyVerifiedNow, _supervisor.Alive,
+            _vault.State is VaultState.Disabled or VaultState.NoImage
+                ? null
+                : new VaultStatus(_vault.State, _vault.MountPoint));
 
     /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
     public string DispatchCommand(string line)
@@ -394,6 +412,8 @@ internal sealed class GuardService : IDisposable
                     : "err locked — insert the key or enter the recovery phrase first";
             case "reenrolled":
                 return ReloadConfig();
+            case "vault":
+                return DispatchVault(parts);
             case "status":
                 StatusSnapshot s = Snapshot();
                 return $"ok state={s.State.ToString().ToLowerInvariant()} " +
@@ -404,9 +424,47 @@ internal sealed class GuardService : IDisposable
                        $"tamper=\"{s.TamperNote ?? "-"}\" " +
                        $"keyVerified={_keyVerifiedNow} " +
                        $"policy={_config.Guard.UnlockPolicy} " +
-                       $"watchdog={(s.WatchdogAlive ? "alive" : "down")}";
+                       $"watchdog={(s.WatchdogAlive ? "alive" : "down")} " +
+                       $"vault={(s.Vault == null ? "off" :
+                           s.Vault.State.ToString().ToLowerInvariant() +
+                           (s.Vault.State == VaultState.Mounted ? $"@{s.Vault.MountPoint}" : ""))}";
             default:
                 return $"err unknown command '{parts[0]}'";
+        }
+    }
+
+    /// <summary>`cryptokey vault …` piped to a live guard — mount/unmount/create/status.</summary>
+    private string DispatchVault(string[] parts)
+    {
+        if (parts.Length < 2)
+            return "err usage: vault status|mount|unmount|create [mb]";
+        switch (parts[1].ToLowerInvariant())
+        {
+            case "status":
+                var usage = _vault.Usage;
+                var hdr = VaultVolume.PeekHeader(_vault.ImagePath);
+                string slots = hdr == null ? "-"
+                    : $"{hdr.KeySlots[0].RotationGen}/{hdr.KeySlots[1].RotationGen}";
+                return $"ok vault state={_vault.State.ToString().ToLowerInvariant()} " +
+                       $"image=\"{_vault.ImagePath}\" " +
+                       $"exists={_vault.ImageExists} " +
+                       $"driver={(_vault.DriverPresent ? "present" : "missing")} " +
+                       $"mount={(_vault.State == VaultState.Mounted ? _vault.MountPoint : "-")} " +
+                       $"slots={slots} " +
+                       $"used={(usage?.Used ?? 0)} total={(usage?.Total ?? 0)}";
+            case "mount":
+                return _vault.TryMount(out string mErr)
+                    ? $"ok mounted at {_vault.MountPoint}"
+                    : $"err {mErr}";
+            case "unmount":
+                return _vault.TryUnmount(out _) ? "ok unmounted" : "err unmount failed";
+            case "create":
+                int mb = parts.Length > 2 && int.TryParse(parts[2], out int m)
+                    ? m : _config.Guard.VaultSizeMb;
+                return _vault.TryCreate(mb, out string cErr)
+                    ? "ok vault created" : $"err {cErr}";
+            default:
+                return $"err unknown vault command '{parts[1]}'";
         }
     }
 
@@ -448,6 +506,7 @@ internal sealed class GuardService : IDisposable
             _tamperNote = null;
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
+            _vault.KeyGone();
             // Under 2FA the screen may still say "Key verified — enter the
             // recovery phrase" from when the factor was armed; keep it honest.
             if (State == GuardState.Locked
@@ -469,6 +528,20 @@ internal sealed class GuardService : IDisposable
             _keyVerifiedNow = !stale || !strict;
             _lastVerifyFailure = null;
             bool edgeFlip = !_verifiedEdge;
+            // The vault consumes the verified secret for its key slots —
+            // a stale secret counts only when it counts for the lock, and
+            // an attestation mismatch seals the vault even though the
+            // secret itself checked out (config tamper is vault tamper).
+            if (_keyVerifiedNow && check.Attest != AttestState.Mismatch)
+                _vault.KeyVerified(check.Secret!,
+                    (uint)(stale ? Math.Max(1, _config.RotationCount - 1)
+                                 : _config.RotationCount));
+            else
+            {
+                if (check.Secret != null)
+                    CryptographicOperations.ZeroMemory(check.Secret);
+                _vault.KeyGone();
+            }
             _verifiedEdge = true;
 
             // Tamper reporting — a replayed old secret is what a clone looks
@@ -543,6 +616,7 @@ internal sealed class GuardService : IDisposable
             _tamperNote = null;
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
+            _vault.KeyGone(); // present but unverified — the vault seals too
             bool changed = check.Detail != _lastVerifyFailure;
             _lastVerifyFailure = check.Detail;
             if (State != GuardState.Locked)
@@ -848,6 +922,7 @@ internal sealed class GuardService : IDisposable
         _pausedUntil = null;
         _failedAttempts = 0;
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
+        _vault.KeyGone(); // the vault seals with the session — before the surface drops
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
         Alert("Locked", $"locked — {reason}");
@@ -989,6 +1064,7 @@ internal sealed class GuardService : IDisposable
         // takeover handoff). Ungraceful deaths never reach this — by design.
         _supervisor.Shutdown();
         _watchdogTimer?.Dispose();
+        _vault.Dispose(); // dismounts + zeroes keys — before surface teardown
         Platform.Services.LockPolicies.Restore(Log);
         _surface.Dispose();
         _monitor.Dispose();

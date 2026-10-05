@@ -58,6 +58,9 @@ internal sealed class PlatformServices
 
     /// <summary>Audible lock/unlock/alarm cues — null impl where unsupported.</summary>
     public required ICues Cues { get; init; }
+
+    /// <summary>Vault mount engine (Dokany on Windows) — null impl where unsupported.</summary>
+    public required IVaultMounter VaultMounts { get; init; }
 }
 
 /// <summary>

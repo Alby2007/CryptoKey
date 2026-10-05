@@ -3,12 +3,19 @@ using System.Text;
 
 namespace CryptoKey;
 
-/// <summary>Result of checking a mounted device's keyfile against the config.</summary>
+/// <summary>
+/// Result of checking a mounted device's keyfile against the config.
+/// <paramref name="Secret"/> is the winning device secret on a match —
+/// ownership transfers to the consumer (VaultService copies it into a
+/// pinned buffer and zeroes this array); null on failure. Never serialized,
+/// never logged.
+/// </summary>
 internal sealed record KeyfileCheck(
     SecretMatch Match,
     string Detail,
     IReadOnlyList<string> MatchedLetters,
-    AttestState Attest);
+    AttestState Attest,
+    byte[]? Secret = null);
 
 internal static class KeyVerifier
 {
@@ -157,6 +164,7 @@ internal static class KeyVerifier
         var matched = new List<string>();
         bool foundCurrent = false, foundPrevious = false;
         AttestState bestAttest = AttestState.Missing;
+        byte[]? winningSecret = null;
         string lastError = "no keyfile found";
         foreach (string volume in disk.VolumePaths)
         {
@@ -194,13 +202,19 @@ internal static class KeyVerifier
             {
                 case SecretMatch.Current:
                     if (!foundCurrent)
+                    {
                         bestAttest = attest;
+                        winningSecret = secret;
+                    }
                     foundCurrent = true;
                     matched.Add(volume);
                     break;
                 case SecretMatch.Previous:
                     if (!foundCurrent && !foundPrevious)
+                    {
                         bestAttest = attest;
+                        winningSecret = secret;
+                    }
                     foundPrevious = true;
                     matched.Add(volume);
                     break;
@@ -213,12 +227,12 @@ internal static class KeyVerifier
         if (foundCurrent)
             return new KeyfileCheck(SecretMatch.Current,
                 $"verified — generation {config.RotationCount}{AttestSuffix(bestAttest)}",
-                matched, bestAttest);
+                matched, bestAttest, winningSecret);
         if (foundPrevious)
             return new KeyfileCheck(SecretMatch.Previous,
                 $"stale — previous-generation secret (gen {Math.Max(0, config.RotationCount - 1)})" +
                     AttestSuffix(bestAttest),
-                matched, bestAttest);
+                matched, bestAttest, winningSecret);
         return new KeyfileCheck(SecretMatch.None, lastError, matched, AttestState.Missing);
     }
 

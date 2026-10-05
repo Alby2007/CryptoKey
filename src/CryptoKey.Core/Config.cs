@@ -81,6 +81,21 @@ internal sealed class GuardSettings
 
     /// <summary>POST target for security events — ntfy.sh topic or any webhook ("" = off).</summary>
     public string AlertUrl { get; set; } = "";
+
+    /// <summary>Enable the encrypted vault (CKVAULT1 image → Dokan drive letter).</summary>
+    public bool VaultEnabled { get; set; } = false;
+
+    /// <summary>Mount automatically when the key verifies (off = mount via Vault page/CLI).</summary>
+    public bool VaultAutoMount { get; set; } = true;
+
+    /// <summary>Vault image path; "" = default (%LOCALAPPDATA%\CryptoKey\vault.ckv).</summary>
+    public string VaultImagePath { get; set; } = "";
+
+    /// <summary>Mount letter, "V:" form.</summary>
+    public string VaultMountPoint { get; set; } = "V:";
+
+    /// <summary>Created image size in MiB.</summary>
+    public int VaultSizeMb { get; set; } = 256;
 }
 
 internal static class ConfigStore

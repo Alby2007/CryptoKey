@@ -13,6 +13,11 @@ cryptokey lock                   # IPC: lock now
 cryptokey pause [mins]           # IPC: pause auto-lock (default 5; works while paused to extend)
 cryptokey resume                 # IPC: end a pause
 cryptokey quit                   # IPC: stop the guard (refused while locked)
+cryptokey vault create [mb]      # create the encrypted image (IPC when a guard runs; needs the key in)
+cryptokey vault status           # image state, key-slot generations, driver presence
+cryptokey vault mount            # IPC: mount now (guard running); standalone: foreground mount, Enter dismounts
+cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
+cryptokey vault delete           # delete the image entirely (destructive — contents unrecoverable)
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
 cryptokey help                   # usage
@@ -51,6 +56,9 @@ read timeout ~5 s.
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
 | `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
+| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`needsdriver`/`unsealed`/`mounted` |
+| `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
+| `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 
 Security: DACL grants `GA` to the owning user's SID; a medium-integrity
@@ -87,6 +95,11 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One warn (~20 s before, as a balloon) + one lock per idle streak — both re-arm only after input returns, so a present key's auto-unlock can't flap |
 | `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad phrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
 | `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
+| `Guard.VaultEnabled` | Vault feature gate — default `false` until the first `vault create` (the Vault page enables it on create) |
+| `Guard.VaultAutoMount` | Mount as soon as the key verifies — default `true` |
+| `Guard.VaultImagePath` | Image location — default `%LOCALAPPDATA%\CryptoKey\vault.ckv` |
+| `Guard.VaultMountPoint` | Drive letter — default `V:\`; free letters offered in the Vault page |
+| `Guard.VaultSizeMb` | Image size used by `vault create` — default 256, range 64–8192 |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
 on every save — a third copy on a different kill surface. Load chain:
@@ -142,6 +155,7 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Scheduled task | `CryptoKey` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` (REG_SZ, same JSON) |
 | Tamper captures | `%APPDATA%\CryptoKey\captures\` (newest 50 kept) |
+| Vault image | `%LOCALAPPDATA%\CryptoKey\vault.ckv` (default; `VaultImagePath` overrides) |
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |
