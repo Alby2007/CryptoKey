@@ -80,6 +80,11 @@ internal sealed class MacLockSurface : ILockSurface
             {
                 _engageError = ex.Message;
                 ReleaseInput();
+                // Nothing on screen can block input — hand the session to
+                // the real OS lock rather than leave a marked-locked but
+                // open desktop (the macOS fail-closed path).
+                try { Platform.Services.SystemActions.LockScreen(); }
+                catch (Exception) { }
                 return false;
             }
         }
