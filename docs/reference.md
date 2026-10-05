@@ -17,7 +17,7 @@ cryptokey vault create [mb]      # create the encrypted image (IPC when a guard 
 cryptokey vault status           # image state, key-slot generations, driver presence
 cryptokey vault mount            # IPC: mount now (guard running); standalone: foreground mount, Enter dismounts
 cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
-cryptokey vault delete           # delete the image entirely (destructive — contents unrecoverable)
+cryptokey vault delete           # delete the image entirely (IPC when a guard runs; destructive)
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
 cryptokey help                   # usage
@@ -56,7 +56,7 @@ read timeout ~5 s.
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
 | `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
-| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`needsdriver`/`unsealed`/`mounted` |
+| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted` |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace CryptoKey;
 
@@ -444,7 +445,7 @@ internal static class Program
 
         // A running guard owns the vault lifecycle — forward through the pipe.
         bool live = IpcClient.Send("status", 400) != null;
-        if (live && sub is "mount" or "unmount" or "create" or "status")
+        if (live && sub is "mount" or "unmount" or "create" or "status" or "delete")
         {
             string cmd = $"vault {sub}";
             if (sub == "create" && args.Length > 2)
@@ -487,6 +488,20 @@ internal static class Program
             Console.WriteLine($"Key present but not verified ({chk.Detail}).");
             return false;
         }
+        // Same gates the guard applies: attestation mismatch seals the vault,
+        // and under strict tamper a stale secret never counts.
+        if (chk.Attest == AttestState.Mismatch)
+        {
+            CryptographicOperations.ZeroMemory(chk.Secret);
+            Console.WriteLine("Config attestation mismatch — the vault stays sealed.");
+            return false;
+        }
+        if (chk.Match == SecretMatch.Previous && config.Guard.StrictTamper)
+        {
+            CryptographicOperations.ZeroMemory(chk.Secret);
+            Console.WriteLine("Stale keyfile under strict tamper — the vault stays sealed.");
+            return false;
+        }
         vault.KeyVerified(chk.Secret,
             (uint)(chk.Match == SecretMatch.Previous
                 ? Math.Max(1, config.RotationCount - 1)
@@ -502,11 +517,12 @@ internal static class Program
             Console.WriteLine);
         if (!FeedVerifiedSecret(config, vault))
             return 1;
-        return vault.TryCreate(mb, out string err)
-            ? OkSay($"Vault created — {mb} MB at {vault.ImagePath}" +
-                    (vault.State == VaultState.Mounted
-                        ? $" (mounted at {vault.MountPoint})" : ""))
-            : Fail(err);
+        if (!vault.TryCreate(mb, out string err))
+            return Fail(err);
+        vault.WaitForPendingOps(); // auto-mount lands async
+        return OkSay($"Vault created — {mb} MB at {vault.ImagePath}" +
+                (vault.State == VaultState.Mounted
+                    ? $" (mounted at {vault.MountPoint})" : ""));
     }
 
     private static int VaultStatus(KeyConfig config)
@@ -542,6 +558,7 @@ internal static class Program
             Console.WriteLine);
         if (!FeedVerifiedSecret(config, vault))
             return 1;
+        vault.WaitForPendingOps(); // the async unseal must land first
         if (!vault.TryMount(out string err))
             return Fail(err);
         Console.WriteLine($"Mounted at {vault.MountPoint} — press Enter to dismount.");

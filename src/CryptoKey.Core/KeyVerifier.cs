@@ -143,6 +143,7 @@ internal static class KeyVerifier
         ReadOnlySpan<byte> storedAttest = plain.AsSpan(SecretLen, AttestLen);
         bool ok = CryptographicOperations.FixedTimeEquals(storedAttest,
             ConfigStore.ComputeAttest(unwrapped, config));
+        CryptographicOperations.ZeroMemory(plain); // secret+attest blob — done with it
         attest = ok ? AttestState.Ok : AttestState.Mismatch;
         detail = ok ? "attested" : "config attestation failed — config.json tampered";
         secret = unwrapped;
@@ -204,7 +205,13 @@ internal static class KeyVerifier
                     if (!foundCurrent)
                     {
                         bestAttest = attest;
+                        if (winningSecret != null)
+                            CryptographicOperations.ZeroMemory(winningSecret); // displaced stale winner
                         winningSecret = secret;
+                    }
+                    else
+                    {
+                        CryptographicOperations.ZeroMemory(secret); // losing copy
                     }
                     foundCurrent = true;
                     matched.Add(volume);
@@ -215,10 +222,15 @@ internal static class KeyVerifier
                         bestAttest = attest;
                         winningSecret = secret;
                     }
+                    else
+                    {
+                        CryptographicOperations.ZeroMemory(secret); // losing copy
+                    }
                     foundPrevious = true;
                     matched.Add(volume);
                     break;
                 default:
+                    CryptographicOperations.ZeroMemory(secret); // not the secret — drop it
                     lastError = "keyfile secret mismatch";
                     break;
             }

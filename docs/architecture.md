@@ -103,7 +103,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
 | `captures\*.jpg` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — newest 50 kept |
-| `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — header + dual manifest slots + AES-GCM chunks; mounted via Dokany only while the key verifies |
+| `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — dual header pages (checksummed) + dual manifest slots + AES-GCM chunks; session-scoped Dokan mount only while the key verifies |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Vault format — `CKVAULT1`
@@ -114,10 +114,12 @@ Everything is AES-256-GCM; every encrypted object authenticates its
 location as AAD so ciphertext can't be relocated silently.
 
 ```text
-header page (4 KiB)
+header page (4 KiB) ×2 — primary at 0, identical shadow at 4096
   magic "CKVAULT\x01" | version u32 | flags u32 | salt 16B
   keySlot[2]:  { rotationGen u32 | nonce 12B | wrappedVolKey 48B }
   manifestSeq[2] u64 | chunkCount u32 | chunkRegionBase u64
+  headerCheck 8B — truncated SHA-256 of the page; a torn-but-plausible
+                   primary rejects and the shadow carries the open
 manifest slot A + slot B (4 MiB each, fixed)
   magic u32 | seq u64 | plainLen u32 | nonce 12B | tag 16B | ct
 chunk region (fills the rest of the image)
@@ -140,9 +142,16 @@ chunk region (fills the rest of the image)
   never plaintext.
 - **Secrets** live in `PinnedBuffer`s (GC can't move them); the service
   copies caller buffers in, zeroes them out, and zeroes everything on
-  `KeyGone`/dispose.
-- Known v1 gap: a crash mid-write can orphan allocated chunks (space
-  leaks, no corruption); journaling is a v2 item. No ADS/hardlinks.
+  `KeyGone`/dispose. Derived KEKs are scoped arrays, zeroed after each use.
+- **Mount scope**: the Dokan letter is session-scoped (no MountManager
+  registration) and the reported ACL names only the owning user — other
+  sessions can't see the drive while it's mounted.
+- **Unseal/mount are async** — the manifest decrypt (8 MiB) and the driver's
+  mount call run on a pool thread with a generation counter dropping stale
+  commits, so a key-pull mid-flight can't hold the pump or adopt a dead
+  session's mount.
+- Known gap: a crash mid-write can orphan allocated chunks (space leaks,
+  no corruption); journaling is a future item. No ADS/hardlinks.
 
 ## Module inventory
 

@@ -382,7 +382,8 @@ internal sealed class DashboardPage : UserControl
                 VaultState.Mounted => ($"vault {vs.MountPoint}", Theme.AccentGreen),
                 VaultState.Unsealed => ("vault unsealed", Theme.AccentAmber),
                 VaultState.NeedsDriver => ("vault needs driver", Theme.AccentAmber),
-                VaultState.SealedDead => ("vault sealed", Theme.AccentRed),
+                VaultState.SealedDead => ("vault dead", Theme.AccentRed),
+                VaultState.Corrupt => ("vault corrupt", Theme.AccentRed),
                 _ => ("vault sealed", Theme.TextDim),
             };
             _vaultBadge.Text = text;

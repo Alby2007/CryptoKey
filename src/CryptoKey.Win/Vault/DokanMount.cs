@@ -90,15 +90,25 @@ internal sealed class DokanMount : IVaultMount
 
         _dokan = new Dokan(new NullLogger());
         var fs = new DokanVaultFileSystem(volume, log);
-        _instance = new DokanInstanceBuilder(_dokan)
-            .ConfigureLogger(() => new NullLogger())
-            .ConfigureOptions(o =>
-            {
-                o.MountPoint = MountPoint + "\\";
-                o.Options = DokanOptions.FixedDrive | DokanOptions.MountManager;
-                o.TimeOut = TimeSpan.FromSeconds(20);
-            })
-            .Build(fs); // throws DokanException on mount failure — driver-level
+        try
+        {
+            _instance = new DokanInstanceBuilder(_dokan)
+                .ConfigureLogger(() => new NullLogger())
+                .ConfigureOptions(o =>
+                {
+                    o.MountPoint = MountPoint + "\\";
+                    // No MountManager: a session-scoped drive letter — other
+                    // local users never see the mounted vault.
+                    o.Options = DokanOptions.FixedDrive;
+                    o.TimeOut = TimeSpan.FromSeconds(20);
+                })
+                .Build(fs); // throws DokanException on mount failure — driver-level
+        }
+        catch
+        {
+            _dokan.Dispose(); // Build threw — don't leak the driver handle
+            throw;
+        }
 
         _waiter = new Thread(WaitLoop)
         {

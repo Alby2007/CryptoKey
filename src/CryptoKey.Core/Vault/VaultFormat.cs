@@ -8,7 +8,7 @@ namespace CryptoKey;
 /// codec. Pure format layer: no directory tree, no allocator, no state.
 ///
 /// <code>
-/// header page (4 KiB):
+/// header pages (4 KiB each — primary at 0, shadow at 4096):
 ///   0   magic "CKVAULT\x01"        8B
 ///   8   formatVersion u32
 ///   12  flags u32
@@ -18,9 +18,14 @@ namespace CryptoKey;
 ///   160 manifestSeq[0] u64
 ///   168 manifestSeq[1] u64
 ///   176 chunkCount u32
-///   180 chunkRegionBase u64
+///   184 chunkRegionBase u64
+///   192 headerCheck 8B  (SHA-256 of page[0..192), truncated)
 ///
-/// manifest slot i at HeaderSize + i*ManifestSlotSize (4 MiB each):
+/// The shadow is an identical copy — a torn header write leaves one good
+/// page to open from. The checksum catches a torn-but-plausible page
+/// (valid magic, scrambled fields) before it can misdiagnose as sealed.
+///
+/// manifest slot i at ManifestBase + i*ManifestSlotSize (4 MiB each):
 ///   0   slotMagic "CKVM" u32 | seq u64 | plainLen u32
 ///   16  nonce 12B | tag 16B
 ///   44  ciphertext[plainLen]
@@ -38,7 +43,7 @@ internal static class VaultFormat
 {
     internal static readonly byte[] HeaderMagic = "CKVAULT\x01"u8.ToArray();
 
-    internal const uint FormatVersion = 1;
+    internal const uint FormatVersion = 2;
     internal const uint ManifestMagic = 0x4D564B43; // "CKVM" little-endian
     internal const uint ManifestFormat = 1;
 
@@ -59,8 +64,9 @@ internal static class VaultFormat
     internal const int ManifestHeadLen = 44; // magic|seq|plainLen|nonce|tag
     internal const int MaxManifestPayload = ManifestSlotSize - ManifestHeadLen;
 
-    internal const long ManifestBase = HeaderSize;
-    internal const long DataOffset = HeaderSize + ManifestSlots * (long)ManifestSlotSize;
+    internal const long ShadowBase = HeaderSize;                  // second header copy
+    internal const long ManifestBase = HeaderSize * 2;
+    internal const long DataOffset = ManifestBase + ManifestSlots * (long)ManifestSlotSize;
 
     // Header field offsets.
     private const int OffVersion = 8;
@@ -70,6 +76,8 @@ internal static class VaultFormat
     private const int OffManifestSeq = OffKeySlot + KeySlots * KeySlotLen; // 160
     private const int OffChunkCount = OffManifestSeq + ManifestSlots * 8;  // 176
     private const int OffChunkBase = OffChunkCount + 8;                    // 184
+    private const int OffCheck = OffChunkBase + 8;                         // 192
+    private const int CheckLen = 8; // truncated SHA-256 of page[0..OffCheck)
 
     // Key slot field offsets (within a 64B slot).
     private const int SlotGenOff = 0;
@@ -101,6 +109,9 @@ internal static class VaultFormat
         uint version = BinaryPrimitives.ReadUInt32LittleEndian(page[OffVersion..]);
         if (version != FormatVersion)
             throw new VaultException($"unsupported vault format v{version}");
+        if (!SHA256.HashData(page[..OffCheck]).AsSpan(0, CheckLen)
+                .SequenceEqual(page.Slice(OffCheck, CheckLen)))
+            throw new VaultException("header checksum mismatch — torn write");
         var slots = new VaultKeySlot[KeySlots];
         for (int i = 0; i < KeySlots; i++)
         {
@@ -139,6 +150,8 @@ internal static class VaultFormat
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffManifestSeq + 8), h.ManifestSeq1);
         BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffChunkCount), h.ChunkCount);
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffChunkBase), h.ChunkRegionBase);
+        SHA256.HashData(page.AsSpan(0, OffCheck)).AsSpan(0, CheckLen)
+            .CopyTo(page.AsSpan(OffCheck));
         return page;
     }
 

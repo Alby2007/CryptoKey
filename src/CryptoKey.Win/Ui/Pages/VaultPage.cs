@@ -33,7 +33,7 @@ internal sealed class VaultPage : UserControl
     private readonly Label _imagePath;
     private readonly AppButton _reformatBtn;
     private readonly AppButton _deleteBtn;
-    private int _confirmArm; // 0 = idle; 1 = one-click armed (second click executes)
+    private AppButton? _armedBtn; // the destructively-armed button (null = none)
 
     public VaultPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -476,7 +476,8 @@ internal sealed class VaultPage : UserControl
 
     private void CloseVault()
     {
-        // Dismount + drop the volume key — next mount re-unwraps under the key.
+        // Dismount only — the volume stays unsealed (volKey in memory) for an
+        // instant remount; the key leaves and KeyGone drops it for real.
         VaultService v = _service.Vault;
         v.TryUnmount(out _);
         Refresh();
@@ -513,22 +514,31 @@ internal sealed class VaultPage : UserControl
         Refresh();
     }
 
-    /// <summary>Two-step destructive confirm: first click arms (4s), second executes.</summary>
+    /// <summary>
+    /// Two-step destructive confirm, per button: first click arms THAT button
+    /// (4s), second click on the same button executes. Clicking the other
+    /// button just moves the arm — it never executes unconfirmed.
+    /// </summary>
     private bool ArmDestructive(AppButton btn, string armedText)
     {
-        if (Interlocked.Exchange(ref _confirmArm, 1) == 1)
+        if (_armedBtn == btn)
         {
-            _confirmArm = 0;
+            _armedBtn = null;
             btn.Text = _armedDefault;
             return true;
         }
+        if (_armedBtn != null && !_armedBtn.IsDisposed)
+            _armedBtn.Text = _armedDefault; // disarm the other button
+        _armedBtn = btn;
         _armedDefault = btn.Text;
+        string thisBtnDefault = _armedDefault; // per-arm snapshot — the field moves on
         btn.Text = armedText;
         var t = new System.Windows.Forms.Timer { Interval = 4000 };
         t.Tick += (_, _) =>
         {
-            _confirmArm = 0;
-            if (!btn.IsDisposed) btn.Text = _armedDefault;
+            if (_armedBtn == btn)
+                _armedBtn = null;
+            if (!btn.IsDisposed) btn.Text = thisBtnDefault;
             t.Dispose();
         };
         t.Start();
@@ -564,44 +574,53 @@ internal sealed class VaultPage : UserControl
         // States, in priority order.
         if (!_config.Guard.VaultEnabled)
         {
-            SetState("OFF", Theme.TextDim, "Vault is disabled — enable it in config or create below.");
+            SetState("OFF", Theme.TextDim, "Vault disabled",
+                "Enable it in config, or create below — creating arms the feature.");
             ShowCreate(keyVerified);
         }
         else if (!imageExists)
         {
-            SetState("NO VAULT", Theme.TextDim,
-                "No vault yet — an encrypted drive that only exists while your key is present.");
+            SetState("NO VAULT", Theme.TextDim, "No vault",
+                "An encrypted drive that only exists while your key is present.");
             ShowCreate(keyVerified);
         }
         else if (v.State == VaultState.SealedDead)
         {
-            SetState("SEALED — DEAD", Theme.AccentRed,
+            SetState("SEALED — DEAD", Theme.AccentRed, "Permanently sealed",
                 "Both key slots fell out of the rotation window — this vault cannot be " +
                 "recovered. Reformat is the only path.");
             ShowMounted(false);
         }
+        else if (v.State == VaultState.Corrupt)
+        {
+            SetState("CORRUPT", Theme.AccentRed, "Image unreadable",
+                "Bad header/manifest or a read error — retries on the next verify; " +
+                "reformat if it persists.");
+            ShowMounted(false);
+        }
         else if (v.State == VaultState.Mounted)
         {
-            SetState("MOUNTED", Theme.AccentGreen, $"Mounted at {v.MountPoint}");
+            SetState("MOUNTED", Theme.AccentGreen, $"Mounted at {v.MountPoint}",
+                "Writes encrypt as they land — pull the key and it force-dismounts.");
             ShowMounted(true);
         }
         else if (v.State == VaultState.Unsealed)
         {
-            SetState("UNSEALED", Theme.AccentAmber,
-                v.DriverPresent ? "Unsealed — not mounted."
-                                : "Unsealed, but the mount driver is missing.");
+            SetState("UNSEALED", Theme.AccentAmber, "Unsealed — not mounted",
+                v.DriverPresent ? "Volume key in memory — mount to open the drive."
+                                : "The Dokany driver is missing, so it can't mount yet.");
             ShowMounted(true);
         }
         else if (v.State == VaultState.NeedsDriver)
         {
-            SetState("NEEDS DRIVER", Theme.AccentAmber,
-                "The Dokany driver isn't installed — the image is unsealed but can't mount.");
+            SetState("NEEDS DRIVER", Theme.AccentAmber, "Needs the Dokany driver",
+                "The image is unsealed but can't mount — install Dokany, then retry.");
             ShowMounted(true);
         }
         else
         {
             // Sealed — image exists, key absent
-            SetState("SEALED", Theme.TextDim, "Sealed — insert your key to unlock.");
+            SetState("SEALED", Theme.TextDim, "Sealed", "Insert your key to unlock.");
             ShowMounted(false);
         }
 
@@ -629,13 +648,13 @@ internal sealed class VaultPage : UserControl
         _autoMount.Enabled = _config.Guard.VaultEnabled;
     }
 
-    private void SetState(string badge, Color color, string detail)
+    private void SetState(string badge, Color color, string status, string detail)
     {
         _stateBadge.Text = badge;
         _stateBadge.BadgeColor = color;
         _stateBadge.Size = _stateBadge.GetPreferredSize(Size.Empty);
-        _stateText.Text = detail;
-        _detailText.Text = "";
+        _stateText.Text = status;
+        _detailText.Text = detail;
     }
 
     private void ShowCreate(bool keyVerified)

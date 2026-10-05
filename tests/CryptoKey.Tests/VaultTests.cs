@@ -404,13 +404,38 @@ public class VaultTests : IDisposable
         Assert.Equal(VaultState.NoImage, vault.State);
         vault.KeyVerified(secret.ToArray(), 1);
         Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(vault.WaitForPendingOps()); // unseal/mount land async
         Assert.Equal(VaultState.Mounted, vault.State); // auto-mount on, driver present (test fake)
 
         vault.KeyGone();
         Assert.Equal(VaultState.Sealed, vault.State); // image exists, secret dropped
 
         vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
         Assert.Equal(VaultState.Mounted, vault.State); // unsealed + re-mounted
+    }
+
+    [Fact]
+    public void Unmount_during_inflight_mount_fences_it()
+    {
+        // TryUnmount with _mount still null used to return without fencing —
+        // the in-flight MountBody then committed anyway and the vault stayed
+        // mounted. The _unmountSeq fence must drop the late mount.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        var mounter = new TestMounter { BlockInMount = true };
+        using var vault = new VaultService(c, mounter, _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(mounter.EnteredMount.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.True(vault.TryUnmount(out _)); // nothing mounted yet — must still fence
+        mounter.ReleaseMount.Set();
+        Assert.True(vault.WaitForPendingOps());
+
+        Assert.Equal(VaultState.Unsealed, vault.State); // the late mount was dropped
     }
 
     [Fact]
@@ -422,6 +447,7 @@ public class VaultTests : IDisposable
         KeyConfig c = VaultConfig(path);
         using var vault = new VaultService(c, new TestMounter(), _ => { });
         vault.KeyVerified(TestDisk.RandomSecret(), 9); // gen-9 secret knows nothing of gen 1
+        Assert.True(vault.WaitForPendingOps());
         Assert.Equal(VaultState.SealedDead, vault.State);
     }
 
@@ -444,10 +470,16 @@ public class VaultTests : IDisposable
         public bool DriverPresent => true;
         public string? DriverHint => null;
         public int MountCount;
+        public bool BlockInMount;
+        public readonly ManualResetEventSlim EnteredMount = new();
+        public readonly ManualResetEventSlim ReleaseMount = new();
 
         public IVaultMount? Mount(VaultVolume volume, string mountPoint, out string? error)
         {
             error = null;
+            EnteredMount.Set();
+            if (BlockInMount)
+                ReleaseMount.Wait(TimeSpan.FromSeconds(10));
             MountCount++;
             return new TestMount(mountPoint);
         }
@@ -481,6 +513,7 @@ public class VaultTests : IDisposable
         using var vault = new VaultService(c, new NoDriverMounter(), _ => { });
         vault.KeyVerified(secret.ToArray(), 1);
         Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
         Assert.Equal(VaultState.NeedsDriver, vault.State); // unsealed but no driver
         Assert.False(vault.DriverPresent);
     }
@@ -497,10 +530,12 @@ public class VaultTests : IDisposable
 
         vault.KeyVerified(genA.ToArray(), 1);
         Assert.True(vault.TryCreate(16, out string cerr), cerr);
+        Assert.True(vault.WaitForPendingOps());
 
         // Rotation edge: the drive now presents gen B — service slides slots.
         byte[] genB = TestDisk.RandomSecret();
         vault.KeyVerified(genB.ToArray(), 2);
+        Assert.True(vault.WaitForPendingOps());
 
         // The service holds the image open; drop it to probe slots directly.
         vault.KeyGone();
@@ -515,13 +550,164 @@ public class VaultTests : IDisposable
         // Re-verify B so the service re-opens the image, then one more edge:
         // window becomes {C, B} — A falls out.
         vault.KeyVerified(genB.ToArray(), 2);
+        Assert.True(vault.WaitForPendingOps()); // unseal must land before the next edge
         byte[] genC = TestDisk.RandomSecret();
         vault.KeyVerified(genC.ToArray(), 3);
+        Assert.True(vault.WaitForPendingOps());
         vault.KeyGone();
         using (Open(path, genC)) { }
         using (Open(path, genB)) { }
         byte[] kekA = KekFor(path, genA);
         Assert.False(VaultVolume.TryOpen(path, kekA, out _, out _, out _));
         CryptographicOperations.ZeroMemory(kekA);
+    }
+
+    // ------------------------------------------------------------ regressions
+
+    [Fact]
+    public void Dispose_flushes_dirty_manifest()
+    {
+        // Regression: Dispose set _disposed before the final flush, so a dirty
+        // manifest never persisted — last-session mutations vanished silently.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var v = VaultVolume.Create(path, 16, secret, 1))
+        {
+            v.CreateFile("\\lost.txt", out _);
+            v.Write("\\lost.txt", 0, "data"u8.ToArray(), out _);
+            // No explicit Flush — relying on Dispose's flush-on-close.
+        }
+        using (var vol = Open(path, secret))
+            Assert.True(vol.TryGet("\\lost.txt", out _));
+    }
+
+    [Fact]
+    public void Sparse_grow_then_shrink_does_not_throw()
+    {
+        // Regression: grow leaves Chunks empty; shrink computed a negative
+        // RemoveRange count → ArgumentOutOfRangeException.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using var vol = VaultVolume.Create(path, 16, secret, 1);
+        Assert.Equal(VaultResult.Ok, vol.CreateFile("\\f.bin", out _));
+        Assert.Equal(VaultResult.Ok, vol.SetLength("\\f.bin", 10 * 1024 * 1024));
+        Assert.Equal(VaultResult.Ok, vol.SetLength("\\f.bin", 5 * 1024 * 1024));
+        Assert.True(vol.TryGet("\\f.bin", out VaultNode n));
+        Assert.Equal(5 * 1024 * 1024, n.Size);
+        byte[] buf = new byte[8];
+        Assert.Equal(8, vol.Read("\\f.bin", 5 * 1024 * 1024 - 8, buf));
+        Assert.All(buf, b => Assert.Equal(0, b)); // sparse tail reads zeros
+    }
+
+    [Fact]
+    public void Case_only_rename_updates_display_name()
+    {
+        // Regression: dst.Equals(src, IgnoreCase) returned early without
+        // updating node.Name — the casing change silently dropped.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using var vol = VaultVolume.Create(path, 16, secret, 1);
+        vol.CreateFile("\\Foo.TXT", out _);
+        Assert.Equal(VaultResult.Ok, vol.Move("\\Foo.TXT", "\\foo.txt", false));
+        Assert.True(vol.TryGet("\\FOO.txt", out VaultNode n));
+        Assert.Equal("foo.txt", n.Name); // new casing preserved
+    }
+
+    [Fact]
+    public void Write_reports_partial_bytes_on_full()
+    {
+        // Regression: the early Full return left `written` at 0 even though
+        // earlier chunks in the same call had landed.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using var vol = VaultVolume.Create(path, 16, secret, 1);
+        vol.CreateFile("\\fill.bin", out _);
+        byte[] big = new byte[(vol.ChunkCount + 4) * VaultFormat.ChunkPayload];
+        RandomNumberGenerator.Fill(big);
+        Assert.Equal(VaultResult.Full, vol.Write("\\fill.bin", 0, big, out int w));
+        Assert.Equal(vol.ChunkCount * VaultFormat.ChunkPayload, w);
+    }
+
+    [Fact]
+    public void Torn_primary_header_heals_from_shadow()
+    {
+        // Regression: a single-copy header meant one torn write bricked the
+        // image. The v2 shadow page carries a byte-identical backup; the
+        // checksum catches a torn-but-plausible primary.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\keep.txt", out _);
+            vol.Write("\\keep.txt", 0, "safe"u8.ToArray(), out _);
+        }
+        // Corrupt keyslot bytes in the PRIMARY page — magic/version intact,
+        // so only the checksum catches it; the shadow must carry the open.
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite))
+        {
+            fs.Position = 96; // inside key slot 1
+            fs.WriteByte(0xFF);
+        }
+        using (var vol = Open(path, secret))
+        {
+            Assert.True(vol.TryGet("\\keep.txt", out _));
+            byte[] buf = new byte[4];
+            Assert.Equal(4, vol.Read("\\keep.txt", 0, buf));
+            Assert.Equal("safe"u8.ToArray(), buf);
+        }
+    }
+
+    [Fact]
+    public void Service_reports_corrupt_when_manifest_dead()
+    {
+        // Both header pages AND both manifest slots gone → Corrupt, not
+        // SealedDead — reformat-worthy but distinct from a dead key window.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            // Headers intact (key unwrap still succeeds); both manifest
+            // slots dead → LoadManifest throws → Corrupt, not SealedDead.
+            fs.Position = VaultFormat.ManifestBase;
+            fs.Write(new byte[VaultFormat.ManifestSlots * VaultFormat.ManifestSlotSize]);
+        }
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Corrupt, vault.State);
+    }
+
+    [Fact]
+    public void Old_format_image_reports_corrupt_not_sealed()
+    {
+        // A v1 image (or any header both pages reject) used to sit in Sealed
+        // forever — the peek returned null and the state machine treated it
+        // as transient. Peek now distinguishes "couldn't read" from
+        // "rejected": a rejected header surfaces Corrupt.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+
+        // Forge a pre-v2 header: real magic, version 1. ReadHeader throws on
+        // the version check before the checksum, so no recompute needed.
+        byte[] page = new byte[VaultFormat.HeaderSize];
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite))
+        {
+            int n = fs.Read(page, 0, page.Length);
+            Assert.Equal(VaultFormat.HeaderSize, n);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                page.AsSpan(8), 1);
+            fs.Position = 0;
+            fs.Write(page, 0, page.Length);         // primary page = v1
+            fs.Write(page, 0, page.Length);         // shadow region = v1 too
+        }
+
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+        vault.KeyVerified(secret.ToArray(), 1);
+        // Synchronous — a rejected peek never reaches the async open.
+        Assert.Equal(VaultState.Corrupt, vault.State);
     }
 }

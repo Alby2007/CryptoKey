@@ -295,10 +295,18 @@ internal sealed class DokanVaultFileSystem : IDokanOperations
         out long totalNumberOfBytes, out long totalNumberOfFreeBytes,
         IDokanFileInfo info)
     {
-        (long used, long total) = _vol.GetUsage();
-        totalNumberOfBytes = total;
-        freeBytesAvailable = totalNumberOfFreeBytes = total - used;
-        return NtStatus.Success;
+        freeBytesAvailable = totalNumberOfBytes = totalNumberOfFreeBytes = 0;
+        try
+        {
+            (long used, long total) = _vol.GetUsage();
+            totalNumberOfBytes = total;
+            freeBytesAvailable = totalNumberOfFreeBytes = total - used;
+            return NtStatus.Success;
+        }
+        catch (Exception)
+        {
+            return NtStatus.Unsuccessful;
+        }
     }
 
     public NtStatus GetVolumeInformation(out string volumeLabel,
@@ -308,23 +316,25 @@ internal sealed class DokanVaultFileSystem : IDokanOperations
         volumeLabel = "CryptoKey Vault";
         fileSystemName = "CKVAULT";
         maximumComponentLength = 255;
+        // No PersistentAcls — ACLs aren't stored and SetFileSecurity refuses.
         features = FileSystemFeatures.CasePreservedNames
-                 | FileSystemFeatures.UnicodeOnDisk
-                 | FileSystemFeatures.PersistentAcls;
+                 | FileSystemFeatures.UnicodeOnDisk;
         return NtStatus.Success;
     }
 
     public NtStatus GetFileSecurity(string fileName, out FileSystemSecurity security,
         AccessControlSections sections, IDokanFileInfo info)
     {
-        // Everyone-FullControl — the mount is the security boundary (the drive
-        // only exists while the key is verified); per-node ACLs would be noise.
+        // Current-user-FullControl — the mount is the security boundary (the
+        // drive only exists, session-scoped, while the key is verified), but
+        // the ACL still names the owner SID rather than World so a probing
+        // process sees an honest answer.
         security = new FileSecurity();
+        var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User
+            ?? new System.Security.Principal.SecurityIdentifier(
+                System.Security.Principal.WellKnownSidType.WorldSid, null);
         security.AddAccessRule(new FileSystemAccessRule(
-            new System.Security.Principal.SecurityIdentifier(
-                System.Security.Principal.WellKnownSidType.WorldSid, null),
-            FileSystemRights.FullControl,
-            AccessControlType.Allow));
+            sid, FileSystemRights.FullControl, AccessControlType.Allow));
         return NtStatus.Success;
     }
 

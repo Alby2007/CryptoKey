@@ -457,12 +457,18 @@ internal sealed class GuardService : IDisposable
                     ? $"ok mounted at {_vault.MountPoint}"
                     : $"err {mErr}";
             case "unmount":
+                // Unsealed may hide an in-flight auto-mount — TryUnmount fences it.
+                if (_vault.State is not (VaultState.Mounted or VaultState.Unsealed))
+                    return "err not mounted";
                 return _vault.TryUnmount(out _) ? "ok unmounted" : "err unmount failed";
             case "create":
                 int mb = parts.Length > 2 && int.TryParse(parts[2], out int m)
                     ? m : _config.Guard.VaultSizeMb;
                 return _vault.TryCreate(mb, out string cErr)
                     ? "ok vault created" : $"err {cErr}";
+            case "delete":
+                return _vault.TryDeleteImage(out string dErr)
+                    ? "ok vault deleted" : $"err {dErr}";
             default:
                 return $"err unknown vault command '{parts[1]}'";
         }

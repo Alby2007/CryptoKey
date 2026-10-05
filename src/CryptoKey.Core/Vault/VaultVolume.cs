@@ -86,20 +86,54 @@ internal sealed class VaultVolume : IDisposable
     /// KEK derivation and the slot generations for reporting.
     /// </summary>
     public static VaultHeader? PeekHeader(string path)
+        => PeekHeader(path, out _);
+
+    /// <summary>
+    /// Peek with diagnosis: NoImage when the file can't be opened (absent or
+    /// transiently locked), BadFormat when both header pages reject — the
+    /// distinction a caller needs to tell "retry later" from "corrupt".
+    /// </summary>
+    public static VaultHeader? PeekHeader(string path, out VaultOpenError error)
     {
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite);
-            byte[] page = new byte[VaultFormat.HeaderSize];
-            if (fs.Read(page, 0, page.Length) < page.Length)
-                return null;
-            return VaultFormat.ReadHeader(page);
+            VaultHeader? h = ReadHeaderEither(fs);
+            error = h == null ? VaultOpenError.BadFormat : VaultOpenError.None;
+            return h;
         }
+        catch (FileNotFoundException) { error = VaultOpenError.NoImage; return null; }
+        catch (DirectoryNotFoundException) { error = VaultOpenError.NoImage; return null; }
         catch (Exception)
         {
+            error = VaultOpenError.Corrupt; // sharing/IO — treated as transient by callers
             return null;
         }
+    }
+
+    /// <summary>
+    /// Primary header page, falling back to the shadow copy — a torn
+    /// WriteHeader leaves one intact page. Null only when both reject.
+    /// </summary>
+    private static VaultHeader? ReadHeaderEither(FileStream fs)
+    {
+        foreach (long at in new[] { 0L, VaultFormat.ShadowBase })
+        {
+            byte[] page = new byte[VaultFormat.HeaderSize];
+            fs.Position = at;
+            if (fs.Read(page, 0, page.Length) < page.Length)
+                continue;
+            try
+            {
+                return VaultFormat.ReadHeader(page);
+            }
+            catch (VaultException)
+            {
+                // torn/garbage — try the other copy
+            }
+        }
+        return null;
     }
 
     /// <summary>
@@ -166,6 +200,9 @@ internal sealed class VaultVolume : IDisposable
         catch
         {
             volKey.Dispose();
+            // A half-created image must not squat on the path — the next
+            // TryCreate checks ImageExists and would refuse forever.
+            try { File.Delete(path); } catch (Exception) { }
             throw;
         }
     }
@@ -189,18 +226,8 @@ internal sealed class VaultVolume : IDisposable
             // FileShare.Read: read-only peeks (header/status probes from a
             // second process) are allowed; no second writer can ever open.
             fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-            byte[] page = new byte[VaultFormat.HeaderSize];
-            if (fs.Read(page, 0, page.Length) < page.Length)
-            {
-                error = VaultOpenError.BadFormat;
-                return false;
-            }
-            VaultHeader header;
-            try
-            {
-                header = VaultFormat.ReadHeader(page);
-            }
-            catch (VaultException)
+            VaultHeader? header = ReadHeaderEither(fs);
+            if (header == null)
             {
                 error = VaultOpenError.BadFormat;
                 return false;
@@ -400,7 +427,12 @@ internal sealed class VaultVolume : IDisposable
             if (!dstParent.IsDir)
                 return VaultResult.NotADirectory;
             if (dst.Equals(src, StringComparison.OrdinalIgnoreCase))
-                return VaultResult.Ok; // case-only rename in place
+            {
+                // Case-only rename — same key, new display casing.
+                node.Name = dstLeaf;
+                _dirty = true;
+                return VaultResult.Ok;
+            }
             if (_nodes.ContainsKey(dst))
             {
                 if (!replace)
@@ -513,6 +545,7 @@ internal sealed class VaultVolume : IDisposable
 
             byte[] chunkBuf = new byte[VaultFormat.ChunkPayload];
             int done = 0;
+            var res = VaultResult.Ok;
             try
             {
                 while (done < src.Length)
@@ -530,7 +563,10 @@ internal sealed class VaultVolume : IDisposable
                     if (id < 0)
                     {
                         if (!Alloc(out id))
-                            return VaultResult.Full;
+                        {
+                            res = VaultResult.Full;
+                            break; // fall through — the landed bytes still count
+                        }
                         node.Chunks[idx] = id;
                         chunkBuf.AsSpan().Clear();
                         if (!full && inChunk == 0 && node.Size > offset + done)
@@ -555,7 +591,7 @@ internal sealed class VaultVolume : IDisposable
                 node.Size = end;
             node.ModifiedUtc = node.AccessedUtc = DateTime.UtcNow;
             _dirty = true;
-            return VaultResult.Ok;
+            return res;
         }
     }
 
@@ -570,19 +606,24 @@ internal sealed class VaultVolume : IDisposable
                 return VaultResult.InvalidName;
             if (length < node.Size)
             {
-                int keepChunks = (int)((length + VaultFormat.ChunkPayload - 1) / VaultFormat.ChunkPayload);
-                for (int i = keepChunks; i < node.Chunks.Count; i++)
+                // Chunks.Count can be *below* keepChunks when a sparse grow
+                // preceded this shrink (grown files carry an empty table).
+                int keep = (int)Math.Min(
+                    (length + VaultFormat.ChunkPayload - 1) / VaultFormat.ChunkPayload,
+                    node.Chunks.Count);
+                for (int i = keep; i < node.Chunks.Count; i++)
                     if (node.Chunks[i] >= 0)
                         _free.Add(node.Chunks[i]);
-                node.Chunks.RemoveRange(keepChunks, node.Chunks.Count - keepChunks);
-                if (length % VaultFormat.ChunkPayload != 0 && keepChunks > 0
-                    && node.Chunks[^1] >= 0)
+                node.Chunks.RemoveRange(keep, node.Chunks.Count - keep);
+                int tailIdx = (int)(length / VaultFormat.ChunkPayload);
+                if (length % VaultFormat.ChunkPayload != 0
+                    && tailIdx < node.Chunks.Count && node.Chunks[tailIdx] >= 0)
                 {
-                    // Zero the tail of the last kept chunk so stale bytes can't leak.
+                    // Zero the tail of the straddling chunk so stale bytes can't leak.
                     byte[] buf = new byte[VaultFormat.ChunkPayload];
-                    ReadChunk(node.Chunks[^1], buf);
+                    ReadChunk(node.Chunks[tailIdx], buf);
                     buf.AsSpan((int)(length % VaultFormat.ChunkPayload)).Clear();
-                    WriteChunk(node.Chunks[^1], buf);
+                    WriteChunk(node.Chunks[tailIdx], buf);
                     CryptographicOperations.ZeroMemory(buf);
                 }
             }
@@ -662,7 +703,11 @@ internal sealed class VaultVolume : IDisposable
 
     private void WriteHeader()
     {
+        // Shadow first, primary last: a torn flush leaves the primary —
+        // the page readers prefer — intact.
         byte[] page = VaultFormat.WriteHeader(_header);
+        _img.Position = VaultFormat.ShadowBase;
+        _img.Write(page, 0, page.Length);
         _img.Position = 0;
         _img.Write(page, 0, page.Length);
         _img.Flush(true);
@@ -671,7 +716,8 @@ internal sealed class VaultVolume : IDisposable
     private void LoadManifest(byte[] volKey)
     {
         // Newest decrypting slot wins; the other is the torn-write fallback.
-        ulong[] seqs = { _header.ManifestSeq0, _header.ManifestSeq1 };
+        // The slot's own authenticated seq is authoritative — the header's
+        // manifestSeq fields are write-only bookkeeping.
         byte[]? best = null;
         ulong bestSeq = 0;
         for (int i = 0; i < VaultFormat.ManifestSlots; i++)
@@ -802,9 +848,9 @@ internal sealed class VaultVolume : IDisposable
         {
             if (_disposed)
                 return;
-            _disposed = true;
             try { if (_dirty) Flush(); }
             catch (Exception) { }
+            _disposed = true;
             _volKey.Dispose();
             _img.Dispose();
         }

@@ -46,6 +46,8 @@ flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
 | Chunk ciphertext corrupted | GCM tag reject → `CrcError` surfaces to the app that touched it | That file's block is dead; the rest of the volume is unaffected |
 | Crash mid-write | Allocated chunks can be orphaned (space leaks, not corruption) | Reformat reclaims them — v1 has no journaling |
 | `vault.ckv` copied/stolen | Wrapped volume key only — useless without the device secret | Nothing to rescue; nothing to fear |
+| v1 image after the format bump | `unsupported vault format v1` → `CORRUPT` state | Vault page → Reformat (the bump was deliberate — v2 adds the shadowed header page) |
+| One header page torn | `header checksum mismatch` on that page → opens from the shadow copy | Automatic — the surviving page carries the open; the next write re-syncs both |
 
 ## Config failures
 

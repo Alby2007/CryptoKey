@@ -13,6 +13,9 @@ internal enum VaultState
     /// <summary>The verified secret unwrapped no key slot — the vault fell out of
     /// the two-generation window. Permanent; reformat is the only path.</summary>
     SealedDead,
+    /// <summary>Image present but unreadable (bad format, dead manifests, or an
+    /// I/O error mid-open). May be transient — the next verify retries.</summary>
+    Corrupt,
     /// <summary>Secret verified but the mount engine's driver is absent.</summary>
     NeedsDriver,
     /// <summary>Volume key held in memory; not mounted (auto-mount off or just dismounted).</summary>
@@ -38,12 +41,14 @@ internal sealed class VaultService : IDisposable
     private readonly Action<string> _log;
 
     private PinnedBuffer? _secret;     // newest verified device secret
-    private PinnedBuffer? _prevSecret; // the distinct secret before it (slot-B coverage)
     private uint _secretGen;
-    private uint _prevSecretGen;
     private VaultVolume? _vol;         // open image — volKey lives inside
     private IVaultMount? _mount;
     private VaultState _state = VaultState.Disabled;
+    private int _opSeq;                // bumped on every lifecycle event; stale async commits drop
+    private int _unmountSeq;           // bumped on TryUnmount — a mount issued before it drops
+    private Task? _pendingOps;         // in-flight unseal/auto-mount chain (for CLI/test waits)
+    private long _lastOpenAttempt;     // TickCount64 — paces the transient-failure retry
 
     /// <summary>Raised (on the caller's thread) whenever <see cref="State"/> changes.</summary>
     public event Action? StatusChanged;
@@ -129,18 +134,45 @@ internal sealed class VaultService : IDisposable
             CryptographicOperations.ZeroMemory(secret);
             return;
         }
+        PinnedBuffer? held = null;
         lock (this)
         {
+            bool retryOpen = false;
             if (_secretGen == gen && _secret != null)
             {
-                // Same secret re-verifying — don't auto-mount: a manual
-                // Close-vault must hold for the rest of the key session.
-                CryptographicOperations.ZeroMemory(secret);
-                return;
+                // Same secret re-verifying — normally a no-op (a manual
+                // Close-vault must hold for the rest of the session).
+                // Exception: a Sealed/Corrupt state may be a transient read
+                // failure — retry throttled so a real dead-seal isn't
+                // re-read every poll.
+                retryOpen = _vol == null && ImageExists
+                    && _state is VaultState.Sealed or VaultState.Corrupt
+                    && (_pendingOps?.IsCompleted ?? true)
+                    && Environment.TickCount64 - _lastOpenAttempt > 5000;
+                if (!retryOpen)
+                {
+                    CryptographicOperations.ZeroMemory(secret);
+                    return;
+                }
             }
 
-            var held = new PinnedBuffer(secret);
+            held = retryOpen ? _secret! : new PinnedBuffer(secret);
             CryptographicOperations.ZeroMemory(secret);
+            // The previous secret stays alive until the rewrap below derives
+            // its KEK — disposing it here would collapse the heal window.
+            PinnedBuffer? prevHeld = _secret;
+            uint prevGen = _secretGen;
+            int seq;
+            if (retryOpen)
+            {
+                seq = _opSeq;
+            }
+            else
+            {
+                seq = ++_opSeq;
+                _secret = held;
+                _secretGen = gen;
+            }
 
             if (_vol == null && !ImageExists)
             {
@@ -148,59 +180,230 @@ internal sealed class VaultService : IDisposable
             }
             else if (_vol == null && ImageExists)
             {
-                // Sealed image — try to unwrap under the just-verified secret.
-                VaultHeader? peek = VaultVolume.PeekHeader(ImagePath);
+                // Sealed image — unwrap under the verified secret. The heavy
+                // part (two 4 MiB manifest slots + JSON) runs off the
+                // caller's thread so the guard's UI pump doesn't stall.
+                VaultHeader? peek = VaultVolume.PeekHeader(ImagePath,
+                    out VaultOpenError peekErr);
                 if (peek == null)
                 {
-                    SetState(VaultState.SealedDead);
-                    held.Dispose();
+                    // NoImage = transient/missing → stay Sealed, paced retry.
+                    // BadFormat = both pages rejected (e.g. a v1 image or
+                    // genuine header corruption) — Corrupt, which retries too.
+                    SetState(peekErr == VaultOpenError.NoImage
+                        ? (ImageExists ? VaultState.Sealed : VaultState.NoImage)
+                        : VaultState.Corrupt);
+                    if (!retryOpen)
+                        prevHeld?.Dispose(); // held swapped in — old secret dies here
                     return;
                 }
+                _lastOpenAttempt = Environment.TickCount64;
                 byte[] kek = VaultFormat.DeriveKek(held.Bytes, peek.Salt);
-                try
-                {
-                    if (!VaultVolume.TryOpen(ImagePath, kek,
-                            out VaultVolume? vol, out _, out int slot))
-                    {
-                        // No slot unwrapped OR the manifest is dead — either
-                        // way the page reports terminal-sealed.
-                        SetState(VaultState.SealedDead);
-                        held.Dispose();
-                        return;
-                    }
-                    _vol = vol;
-                    _log($"Vault unsealed (key slot {slot}, wrapped at gen {PeekSlotGen(vol!, slot)}).");
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(kek);
-                }
+                _pendingOps = Task.Run(() => OpenThenMount(kek, seq));
             }
-            else if (_vol != null)
+            else if (_vol != null && !retryOpen)
             {
                 // New generation — slide the slot window forward so the vault
-                // stays openable under current + previous secrets.
+                // stays openable under current + previous secrets. KEKs are
+                // scoped arrays — zero them once the wrap lands. Note the
+                // PREVIOUS secret prevHeld feeds slot B, not the new one.
+                byte[] kekCur = VaultFormat.DeriveKek(held.Bytes, _vol.Salt);
+                byte[]? kekPrev = prevHeld != null
+                    ? VaultFormat.DeriveKek(prevHeld.Bytes, _vol.Salt)
+                    : null;
                 try
                 {
-                    _vol.ReWrapKeys(
-                        VaultFormat.DeriveKek(held.Bytes, _vol.Salt),
-                        _secret != null
-                            ? VaultFormat.DeriveKek(_secret.Bytes, _vol.Salt)
-                            : null,
-                        gen, _secretGen);
+                    _vol.ReWrapKeys(kekCur, kekPrev, gen, prevGen);
                 }
                 catch (Exception ex)
                 {
                     _log($"Vault key-slot re-wrap failed ({ex.Message}) — retries next verify.");
                 }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(kekCur);
+                    if (kekPrev != null)
+                        CryptographicOperations.ZeroMemory(kekPrev);
+                }
             }
 
-            _prevSecret?.Dispose();
-            _prevSecret = _secret;
-            _prevSecretGen = _secretGen;
-            _secret = held;
-            _secretGen = gen;
-            TryAutoMount();
+            if (!retryOpen)
+                prevHeld?.Dispose(); // old generation's secret — fully replaced
+            if (_vol != null)
+                KickAutoMount(seq); // heal-mount after a rewrap edge
+        }
+    }
+
+    /// <summary>
+    /// Pool-thread unseal: TryOpen is the heavy read; adoption happens under
+    /// the lock only if this secret is still the live one (a KeyGone or
+    /// newer verify bumps <see cref="_opSeq"/> and drops the result).
+    /// </summary>
+    private void OpenThenMount(byte[] kek, int seq)
+    {
+        VaultVolume? vol = null;
+        VaultOpenError err = VaultOpenError.None;
+        int slot = -1;
+        try
+        {
+            VaultVolume.TryOpen(ImagePath, kek, out vol, out err, out slot);
+        }
+        catch (Exception ex)
+        {
+            vol = null;
+            err = VaultOpenError.Corrupt;
+            _log($"Vault open error: {ex.Message}");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+        }
+
+        bool adopted = false;
+        bool autoMount = false;
+        int useq = 0;
+        lock (this)
+        {
+            bool alive = seq == _opSeq && _vol == null;
+            if (vol != null && alive)
+            {
+                _vol = vol;
+                adopted = true;
+                _log($"Vault unsealed (key slot {slot}, wrapped at gen {PeekSlotGen(vol, slot)}).");
+                if (!_mounter.DriverPresent)
+                    SetState(VaultState.NeedsDriver);
+                else if (!_config.Guard.VaultAutoMount)
+                    SetState(VaultState.Unsealed);
+                else
+                {
+                    SetState(VaultState.Unsealed); // honest transitional state
+                    autoMount = true;
+                    useq = _unmountSeq; // fence for the mount commit below
+                }
+            }
+            else
+            {
+                vol?.Dispose();
+                if (seq == _opSeq)
+                    SetState(err switch
+                    {
+                        VaultOpenError.NoImage => VaultState.NoImage,
+                        VaultOpenError.Sealed => VaultState.SealedDead,
+                        _ => VaultState.Corrupt, // BadFormat/IO — maybe transient
+                    });
+            }
+        }
+        // Same pool task runs the mount — _pendingOps covers the whole chain.
+        if (adopted && autoMount)
+            MountBody(vol!, seq, useq);
+    }
+
+    /// <summary>
+    /// The auto-mount's slow half — runs on a pool thread; the commit
+    /// re-validates under the lock so a racing teardown drops the mount.
+    /// <paramref name="useq"/> fences out a TryUnmount that landed while the
+    /// driver call was in-flight.
+    /// </summary>
+    private void MountBody(VaultVolume vol, int seq, int useq)
+    {
+        IVaultMount? m;
+        string? err;
+        try
+        {
+            m = _mounter.Mount(vol, ConfiguredMountPoint, out err);
+        }
+        catch (Exception ex)
+        {
+            m = null;
+            err = ex.Message;
+        }
+        lock (this)
+        {
+            if (seq != _opSeq || useq != _unmountSeq
+                || !ReferenceEquals(_vol, vol) || _mount != null)
+            {
+                m?.Dispose(); // KeyGone/reformat/unmount raced the mount — drop it
+                return;
+            }
+            if (m == null)
+            {
+                _log($"Vault auto-mount failed: {err}");
+                SetState(VaultState.Unsealed);
+                return;
+            }
+            _mount = m;
+            m.Detached += OnMountDetached;
+            SetState(VaultState.Mounted);
+            _log($"Vault mounted at {m.MountPoint}");
+        }
+    }
+
+    /// <summary>
+    /// Auto-mount off the caller's thread — the driver's mount call can take
+    /// ~1s and must not stall the pump or hold the service lock (a KeyGone
+    /// waiting on it would delay teardown). The commit re-validates under
+    /// the lock; a racing teardown drops the mount.
+    /// </summary>
+    private void KickAutoMount(int seq)
+    {
+        lock (this)
+        {
+            if (_vol == null || _mount != null)
+                return;
+            if (!_mounter.DriverPresent)
+            {
+                SetState(VaultState.NeedsDriver);
+                return;
+            }
+            if (!_config.Guard.VaultAutoMount)
+            {
+                SetState(VaultState.Unsealed);
+                return;
+            }
+            SetState(VaultState.Unsealed); // transitional — the task flips it to Mounted
+            VaultVolume vol = _vol;
+            int useq = _unmountSeq;
+            _pendingOps = Task.Run(() => MountBody(vol, seq, useq));
+        }
+    }
+
+    /// <summary>
+    /// Block until the in-flight unseal/mount chain settles (or times out) —
+    /// standalone CLI and tests call this after KeyVerified.
+    /// </summary>
+    public bool WaitForPendingOps(int timeoutMs = 15000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            Task? pending;
+            lock (this)
+                pending = _pendingOps;
+            if (pending == null)
+                return true;
+            if (pending.IsCompleted)
+            {
+                lock (this)
+                {
+                    if (ReferenceEquals(_pendingOps, pending))
+                    {
+                        _pendingOps = null;
+                        return true;
+                    }
+                }
+                continue; // a successor task published itself — wait on that
+            }
+            long left = deadline - Environment.TickCount64;
+            if (left <= 0)
+                return false;
+            try
+            {
+                pending.Wait((int)Math.Min(left, int.MaxValue));
+            }
+            catch (Exception)
+            {
+                // A faulted op is still a settled op — treat as done.
+            }
         }
     }
 
@@ -218,14 +421,13 @@ internal sealed class VaultService : IDisposable
     {
         lock (this)
         {
+            ++_opSeq; // drop any in-flight unseal/mount — its commit bounces off
             bool wasMounted = _mount != null;
             DismountLocked();
             CloseVolumeLocked();
             _secret?.Dispose();
-            _prevSecret?.Dispose();
             _secret = null;
-            _prevSecret = null;
-            _secretGen = _prevSecretGen = 0;
+            _secretGen = 0;
             if (_state == VaultState.Disabled)
                 return;
             SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
@@ -252,6 +454,7 @@ internal sealed class VaultService : IDisposable
                 error = "vault image already exists";
                 return false;
             }
+            ++_opSeq; // any pending open against a prior image is stale now
             try
             {
                 _vol = VaultVolume.Create(ImagePath, sizeMb, _secret.Bytes, _secretGen);
@@ -262,9 +465,7 @@ internal sealed class VaultService : IDisposable
                 error = ex.Message;
                 return false;
             }
-            TryAutoMount();
-            SetState(_state is VaultState.Mounted or VaultState.NeedsDriver
-                ? _state : VaultState.Unsealed);
+            KickAutoMount(_opSeq);
             return true;
         }
     }
@@ -282,6 +483,7 @@ internal sealed class VaultService : IDisposable
             }
             DismountLocked();
             CloseVolumeLocked();
+            ++_opSeq;
             try
             {
                 if (File.Exists(ImagePath))
@@ -295,9 +497,7 @@ internal sealed class VaultService : IDisposable
                 SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
                 return false;
             }
-            TryAutoMount();
-            SetState(_state is VaultState.Mounted or VaultState.NeedsDriver
-                ? _state : VaultState.Unsealed);
+            KickAutoMount(_opSeq);
             return true;
         }
     }
@@ -310,6 +510,7 @@ internal sealed class VaultService : IDisposable
             error = "";
             DismountLocked();
             CloseVolumeLocked();
+            ++_opSeq;
             try
             {
                 if (File.Exists(ImagePath))
@@ -364,8 +565,9 @@ internal sealed class VaultService : IDisposable
         lock (this)
         {
             error = "";
+            _unmountSeq++; // fence: an in-flight auto-mount must not land now
             if (_mount == null)
-                return true;
+                return true; // Unsealed/NeedsDriver already; a pending MountBody will drop
             DismountLocked();
             SetState(VaultState.Unsealed);
             _log("Vault dismounted.");
@@ -378,26 +580,6 @@ internal sealed class VaultService : IDisposable
         => _config.Guard.VaultMountPoint = letter;
 
     // ----------------------------------------------------------------- intern
-
-    private void TryAutoMount()
-    {
-        if (_vol == null || _mount != null)
-            return;
-        if (!_mounter.DriverPresent)
-        {
-            SetState(VaultState.NeedsDriver);
-            return;
-        }
-        if (!_config.Guard.VaultAutoMount)
-        {
-            SetState(VaultState.Unsealed);
-            return;
-        }
-        if (TryMount(out string err))
-            return;
-        _log($"Vault auto-mount failed: {err}");
-        SetState(VaultState.Unsealed);
-    }
 
     /// <summary>Force-dismount — the mount thread and open handles unwind via the driver.</summary>
     private void DismountLocked()
