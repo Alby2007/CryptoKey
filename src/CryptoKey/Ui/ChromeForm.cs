@@ -35,6 +35,9 @@ internal class ChromeForm : Form
     {
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
+        // Alt-tab + taskbar read Form.Icon even though the chrome is
+        // owner-drawn — the rendered brand padlock, same as app.ico.
+        Icon = TrayIcons.App;
         BackColor = Theme.Bg;
         Font = Theme.UIFont(9f);
         DoubleBuffered = true;

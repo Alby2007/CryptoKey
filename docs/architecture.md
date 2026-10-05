@@ -126,6 +126,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure |
 | `FlapPolicy.cs` | Desktop-flap classification + sliding-window storm counter — pure logic, unit-tested |
 | `AlertService.cs` | Security-event push: POST + `Title` header to a user URL (ntfy.sh/webhook), 4 s, quiet after first failure |
+| `Sounds.cs` | Synthesized PCM cues (lock thunk, unlock chime, storm blip) — generated WAVs, `SoundPlayer.Play` off-thread |
 | `Backoff.cs` | Passphrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
 
 `tests/CryptoKey.Tests` (xUnit) covers the pure security invariants —

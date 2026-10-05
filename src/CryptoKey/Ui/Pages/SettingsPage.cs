@@ -13,6 +13,7 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _lockOnRemoval;
     private readonly ToggleSwitch _balloonTips;
     private readonly ToggleSwitch _animations;
+    private readonly ToggleSwitch _sounds;
     private readonly ToggleSwitch _startup;
     private readonly ToggleSwitch _startupAdmin;
     private readonly ToggleSwitch _watchdog;
@@ -61,24 +62,25 @@ internal sealed class SettingsPage : UserControl
             Title = "Behavior",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 332,
+            Height = 374,
             Margin = new Padding(0, 0, 0, 10),
         };
         var beh = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 8,
+            RowCount = 9,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 8; i++)
-            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 8f));
+        for (int i = 0; i < 9; i++)
+            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 9f));
 
         StartupMode startupMode = StartupManager.GetMode();
         _lockOnRemoval = Toggle("Auto-lock when the key is removed", _config.Guard.LockOnRemoval);
         _balloonTips = Toggle("Balloon notifications on lock/unlock", _config.Guard.BalloonTips);
         _animations = Toggle("Interface animations", _config.Guard.Animations);
+        _sounds = Toggle("Lock/unlock sound cues", _config.Guard.Sounds);
         _startup = Toggle("Start with Windows", startupMode != StartupMode.Off);
         _watchdog = Toggle("Watchdog process (auto-restart the guard)", _config.Guard.Watchdog);
         _lockPolicies = Toggle("Restrict Task Manager, sign-out & power while locked",
@@ -158,6 +160,7 @@ internal sealed class SettingsPage : UserControl
         beh.Controls.Add(_lockOnRemoval);
         beh.Controls.Add(_balloonTips);
         beh.Controls.Add(_animations);
+        beh.Controls.Add(_sounds);
         beh.Controls.Add(_startup);
         beh.Controls.Add(_watchdog);
         beh.Controls.Add(_lockPolicies);
@@ -470,6 +473,7 @@ internal sealed class SettingsPage : UserControl
             _service.ApplyMotion(_animations.Checked);
             Save();
         };
+        _sounds.CheckedChanged += (_, _) => Save();
         _startup.CheckedChanged += (_, _) => ApplyStartupMode();
         _startupAdmin.CheckedChanged += (_, _) => ApplyStartupMode();
         _watchdog.CheckedChanged += (_, _) => Save();
@@ -686,6 +690,7 @@ internal sealed class SettingsPage : UserControl
     {
         _config.Guard.LockOnRemoval = _lockOnRemoval.Checked;
         _config.Guard.BalloonTips = _balloonTips.Checked;
+        _config.Guard.Sounds = _sounds.Checked;
         _config.Guard.PollIntervalMs = _poll.Value;
         _config.Guard.UnlockPolicy = _policy;
         _config.Guard.StrictTamper = _strictTamper.Checked;

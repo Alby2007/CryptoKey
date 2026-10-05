@@ -44,8 +44,11 @@ failsafe passphrase — to unlock.
     policy-disabled while locked *because* launching it from Ctrl+Alt+Del
     would switch you back to the Default desktop — the SAS is the one path
     the private desktop can't isolate, so the policies seal it. The input hooks
-    still run on a dedicated lock thread to feed the passphrase buffer. If
-    engagement fails at any step, the guard falls back to the overlay below.
+    still run on a dedicated lock thread to feed the passphrase buffer, and a
+    flap monitor polls the input desktop every ~300 ms — a foreign desktop
+    gets yanked back instantly, and 3 flaps inside 10 s escalates to
+    `LockWorkStation` + alert + snapshot. If engagement fails at any step,
+    the guard falls back to the overlay below.
   - **overlay** — the classic surface: one borderless topmost dark overlay
     per monitor (topmost re-asserted every 250 ms) on your own desktop,
     low-level keyboard + mouse hooks that swallow all input, and
@@ -60,7 +63,11 @@ failsafe passphrase — to unlock.
   (bad passphrase, clone flag, break-glass) into `captures/`; and remote
   alerts — every lock/unlock/tamper event POSTs to your ntfy.sh topic or
   any webhook. The camera and the endpoint are opt-in, nothing leaves the
-  machine otherwise.
+  machine otherwise. With idle lock on, a balloon warns ~20 s before it
+  fires so the lock doesn't feel arbitrary.
+- **Sound cues** — a synthesized low thunk on lock, a two-note chime on
+  unlock, and a triple blip for tamper storms (Settings → "Lock/unlock
+  sound cues", on by default). The cues are generated PCM, not shipped WAVs.
 
 ## Usage
 
@@ -83,6 +90,14 @@ Flags:
 --release-desktop       # escape hatch: switch input back to your desktop if
                         # the session ever strands on the lock desktop
 ```
+
+**Try the attack yourself:** lock the PC, run `cryptokey --release-desktop`
+— it warns that the guard is alive, switches anyway, and the flap monitor
+yanks input back to the lock inside ~300 ms (logged as `desktop-flap`).
+Three tries inside ten seconds and the session lands on the Windows
+sign-in screen (`LockWorkStation`), which a script can't answer. The
+hatch exists for dead-guard strands — a live guard treats it as a hostile
+desktop switch.
 
 The secure lock runs the session on its own desktop — if CryptoKey is killed
 or crashes while locked, Windows does NOT return input on its own, so two

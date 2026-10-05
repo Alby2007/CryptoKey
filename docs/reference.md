@@ -78,12 +78,13 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.LockOnRemoval` | Auto-lock when the key disappears — default `true` |
 | `Guard.BalloonTips` | Tray notifications — default `true` |
 | `Guard.Animations` | Dashboard/lock animations — default `true` |
+| `Guard.Sounds` | Synthesized cues: lock thunk, unlock chime, tamper-storm alarm — default `true` |
 | `Guard.UnlockPolicy` | `KeyOrPassphrase` (default) · `KeyAndPassphrase` · `KeyOnly` — enum-as-string |
 | `Guard.StrictTamper` | Stale keyfiles never count as the key factor — default `false` |
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
-| `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One lock per idle streak — re-arms only after input returns, so a present key's auto-unlock can't flap |
+| `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One warn (~20 s before, as a balloon) + one lock per idle streak — both re-arm only after input returns, so a present key's auto-unlock can't flap |
 | `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad passphrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
 | `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
 

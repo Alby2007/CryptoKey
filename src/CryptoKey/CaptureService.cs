@@ -18,7 +18,7 @@ internal static class CaptureService
     private static int _busy;
     private static int _unavailableLogged;
 
-    private static string CapturesDir => Path.Combine(ConfigStore.ConfigDir, "captures");
+    internal static string CapturesDir => Path.Combine(ConfigStore.ConfigDir, "captures");
 
     /// <summary>Queue a snapshot for a tamper-flavored event. Never throws.</summary>
     public static void Snap(string reason, Action<string>? log = null)

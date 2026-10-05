@@ -17,6 +17,14 @@ internal sealed class TrayIcons : IDisposable
     internal static readonly int[] ShellSizes = { 16, 20, 24, 32, 48, 64, 128, 256 };
 
     private readonly Dictionary<GuardState, Icon> _cache = new();
+    private static Icon? _app;
+
+    /// <summary>
+    /// Brand badge (accent slate — the app.ico color, no state tint) for
+    /// window title bars and alt-tab. Process-lifetime; never disposed.
+    /// </summary>
+    internal static Icon App
+        => _app ??= new Icon(new MemoryStream(BuildIcoBytes(Theme.Accent, ShellSizes)));
 
     public Icon For(GuardState state)
     {

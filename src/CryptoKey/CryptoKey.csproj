@@ -10,6 +10,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <NoWarn>$(NoWarn);WFO5001;WFO1000</NoWarn>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <Version>0.9.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

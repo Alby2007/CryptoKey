@@ -58,6 +58,8 @@ internal sealed class GuardSettings
     public bool LockOnRemoval { get; set; } = true;
     public bool BalloonTips { get; set; } = true;
     public bool Animations { get; set; } = true;
+    /// <summary>Lock/unlock/tamper sound cues (synthesized — Sounds.cs).</summary>
+    public bool Sounds { get; set; } = true;
     [JsonConverter(typeof(JsonStringEnumConverter<UnlockPolicy>))]
     public UnlockPolicy UnlockPolicy { get; set; } = UnlockPolicy.KeyOrPassphrase;
 

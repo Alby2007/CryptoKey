@@ -25,6 +25,7 @@ internal static class Glyphs
     public const string Quit      = "\uE7E8";
     public const string Chevron   = "\uE70D";
     public const string Folder    = "\uE8B7";
+    public const string Camera    = "\uE722";
     public const string Copy      = "\uE8C8";
     public const string Eye       = "\uE890";
     public const string EyeHide   = "\uED1A";

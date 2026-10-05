@@ -73,6 +73,8 @@ internal sealed class GuardService : IDisposable
         Log($"Security event: {kind}.");
         if (kind.EndsWith("-storm", StringComparison.Ordinal))
         {
+            if (_config.Guard.Sounds)
+                Sounds.Alarm();
             Snap("desktop-flap");
             Alert("Desktop flap storm", "repeated foreign-desktop switches while locked — workstation locked at OS level");
         }
@@ -132,6 +134,12 @@ internal sealed class GuardService : IDisposable
 
     /// <summary>Raised on every log line (timestamped) — feeds the dashboard activity list.</summary>
     public event Action<string>? ActivityLogged;
+
+    /// <summary>
+    /// User-facing heads-up (title, body) — the tray turns it into a balloon.
+    /// Raised on the UI thread; currently only the idle-lock pre-warning uses it.
+    /// </summary>
+    public event Action<string, string>? Notification;
 
     private readonly List<string> _activity = new();
 
@@ -230,8 +238,19 @@ internal sealed class GuardService : IDisposable
             {
                 // Paused/Locked suppress it; the gate stops re-locking on
                 // the same idle streak after a key-present auto-unlock.
-                if (State == GuardState.Unlocked && _idleGate.ShouldLock(idleMs))
-                    LockNow($"idle {mins} min");
+                if (State != GuardState.Unlocked)
+                    return;
+                switch (_idleGate.Check(idleMs))
+                {
+                    case IdleVerdict.Lock:
+                        LockNow($"idle {mins} min");
+                        break;
+                    case IdleVerdict.Warn:
+                        Log("Idle lock imminent — warning sent.");
+                        Notification?.Invoke("CryptoKey",
+                            "Idle lock in ~20 seconds — any input stays unlocked.");
+                        break;
+                }
             }));
         }
         catch (Exception) { }
@@ -797,6 +816,8 @@ internal sealed class GuardService : IDisposable
         Log($"LOCKED — {reason}.");
         SetState(GuardState.Locked);
         Alert("Locked", $"locked — {reason}");
+        if (_config.Guard.Sounds)
+            Sounds.Lock();
         // Policies apply even if both surfaces fail — the user is still
         // locked (degraded, screen-only) and shouldn't get Task Manager back.
         if (_config.Guard.LockPolicies)
@@ -856,6 +877,8 @@ internal sealed class GuardService : IDisposable
         Log("Unlocked.");
         SetState(GuardState.Unlocked);
         Alert("Unlocked", "session unlocked");
+        if (_config.Guard.Sounds)
+            Sounds.Unlock();
     }
 
     private void SetState(GuardState state)
@@ -937,31 +960,52 @@ internal sealed class GuardService : IDisposable
     }
 }
 
+internal enum IdleVerdict { None, Warn, Lock }
+
 /// <summary>
-/// One lock per idle streak. Fires the first time the idle counter
-/// crosses the threshold, then stays suppressed until input brings it
-/// back under — without this, idle-locking a machine whose key is still
-/// inserted flaps forever: lock → key auto-unlock → re-lock, plus an
-/// alert pair per cycle.
+/// One warn + one lock per idle streak. Fires Warn the first time the idle
+/// counter crosses (threshold − 20s), Lock at the threshold, then stays
+/// suppressed until input brings the counter back under the warn edge —
+/// without this, idle-locking a machine whose key is still inserted flaps
+/// forever: lock → key auto-unlock → re-lock, plus an alert pair per cycle.
 /// </summary>
 internal sealed class IdleLockGate
 {
+    private const int WarnLeadMs = 20_000;
     private readonly uint _thresholdMs;
+    private readonly uint _warnMs;
+    private bool _warned;
     private bool _suppressed;
 
     internal IdleLockGate(int minutes)
-        => _thresholdMs = (uint)minutes * 60_000;
+    {
+        _thresholdMs = (uint)minutes * 60_000;
+        // Warn edge sits ~20s before the lock edge; sub-20s thresholds
+        // clamp to 0 so a warn never outruns the lock itself.
+        _warnMs = _thresholdMs > WarnLeadMs ? _thresholdMs - WarnLeadMs : 0;
+    }
+
+    internal IdleVerdict Check(uint idleMs)
+    {
+        if (idleMs < _warnMs)
+        {
+            // Input returned — both edges re-arm for the next streak.
+            _warned = _suppressed = false;
+            return IdleVerdict.None;
+        }
+        if (idleMs >= _thresholdMs)
+        {
+            if (_suppressed)
+                return IdleVerdict.None;
+            _suppressed = true;
+            return IdleVerdict.Lock;
+        }
+        if (_warned)
+            return IdleVerdict.None;
+        _warned = true;
+        return IdleVerdict.Warn;
+    }
 
     /// <summary>True once when idle crosses the threshold; re-arms when input returns.</summary>
-    internal bool ShouldLock(uint idleMs)
-    {
-        if (idleMs < _thresholdMs)
-        {
-            _suppressed = false;
-            return false;
-        }
-        if (_suppressed)
-            return false;
-        return _suppressed = true;
-    }
+    internal bool ShouldLock(uint idleMs) => Check(idleMs) == IdleVerdict.Lock;
 }

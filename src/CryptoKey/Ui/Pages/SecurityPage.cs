@@ -20,6 +20,8 @@ internal sealed class SecurityPage : UserControl
     private readonly Label _keyStatus;
     private readonly Label _keyDetail;
     private readonly AppButton _repair;
+    private readonly Label _camNote;
+    private readonly PictureBox _camThumb;
 
     public SecurityPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -36,7 +38,7 @@ internal sealed class SecurityPage : UserControl
             Dock = DockStyle.Top,
             AutoSize = true,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             BackColor = Theme.Bg,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
@@ -137,11 +139,77 @@ internal sealed class SecurityPage : UserControl
         passInner.Controls.Add(_result, 0, 5);
         passCard.Controls.Add(passInner);
 
+        // ---- Tamper captures ----
+        var camCard = new CardPanel
+        {
+            Title = "Tamper captures",
+            Glyph = Glyphs.Camera,
+            Dock = DockStyle.Top,
+            Height = 112,
+            Margin = new Padding(0, 0, 0, 10),
+        };
+        _camNote = new Label
+        {
+            Font = Theme.UIFont(8.5f),
+            ForeColor = Theme.TextDim,
+            AutoSize = true,
+            Location = new Point(16, 44),
+        };
+        var testCam = new AppButton
+        {
+            Text = "Test camera",
+            Glyph = Glyphs.Camera,
+            Variant = ButtonVariant.Secondary,
+            Location = new Point(16, 70),
+            Size = new Size(140, 28),
+        };
+        testCam.Click += (_, _) =>
+        {
+            CaptureService.Snap("test", _service.Log);
+            _notify("Snapshot requested — it lands in the captures folder.", false);
+            // The snap warms the sensor for a second or two — refresh late.
+            Task.Delay(4000).ContinueWith(_ =>
+            {
+                try { BeginInvoke(RefreshCaptures); } catch (Exception) { }
+            });
+        };
+        var openCaps = new AppButton
+        {
+            Text = "Open captures",
+            Glyph = Glyphs.Folder,
+            Variant = ButtonVariant.Ghost,
+            Location = new Point(164, 70),
+            Size = new Size(140, 28),
+        };
+        openCaps.Click += (_, _) =>
+        {
+            try
+            {
+                Directory.CreateDirectory(CaptureService.CapturesDir);
+                Process.Start(new ProcessStartInfo("explorer.exe", CaptureService.CapturesDir)
+                { UseShellExecute = true });
+            }
+            catch (Exception ex) { _notify(ex.Message, true); }
+        };
+        _camThumb = new PictureBox
+        {
+            Size = new Size(116, 66),
+            Location = new Point(camCard.Width - 132, 36),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BackColor = Theme.SurfaceHigh,
+        };
+        camCard.Controls.AddRange(new Control[] { _camNote, testCam, openCaps, _camThumb });
+        camCard.Resize += (_, _) =>
+            _camThumb.Left = camCard.Width - _camThumb.Width - 16;
+
         layout.Controls.Add(keyCard, 0, 0);
         layout.Controls.Add(passCard, 0, 1);
+        layout.Controls.Add(camCard, 0, 2);
         Controls.Add(layout);
 
         HandleCreated += (_, _) => RefreshKeyInfo();
+        HandleCreated += (_, _) => RefreshCaptures();
     }
 
     private static TextField Field(string placeholder)
@@ -280,6 +348,51 @@ internal sealed class SecurityPage : UserControl
                 }));
             }
             catch (Exception) { }
+        });
+    }
+
+    /// <summary>Newest capture as a thumbnail; honest note when none exist.</summary>
+    private void RefreshCaptures()
+    {
+        Task.Run(() =>
+        {
+            Image? thumb = null;
+            string note;
+            try
+            {
+                var newest = Directory.Exists(CaptureService.CapturesDir)
+                    ? new DirectoryInfo(CaptureService.CapturesDir).EnumerateFiles()
+                        .OrderByDescending(f => f.CreationTimeUtc)
+                        .FirstOrDefault()
+                    : null;
+                if (newest == null)
+                {
+                    note = _config.Guard.WebcamOnTamper
+                        ? "No captures yet — the first tamper event writes one."
+                        : "Off — enable 'webcam snapshot on tamper' in Settings.";
+                }
+                else
+                {
+                    // FromFile would lock the jpeg — read the bytes instead.
+                    thumb = Image.FromStream(new MemoryStream(File.ReadAllBytes(newest.FullName)));
+                    note = $"{newest.Name}  ({newest.Length / 1024} KB)";
+                }
+            }
+            catch (Exception ex)
+            {
+                note = $"Captures unreadable: {ex.Message}";
+            }
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    _camNote.Text = note;
+                    var old = _camThumb.Image;
+                    _camThumb.Image = thumb;
+                    old?.Dispose();
+                }));
+            }
+            catch (Exception) { thumb?.Dispose(); }
         });
     }
 

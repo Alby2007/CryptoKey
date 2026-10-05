@@ -132,6 +132,14 @@ internal static class Program
     /// </summary>
     private static int ReleaseDesktop()
     {
+        // Self-documenting: a LIVE locked guard treats the switch as a
+        // hostile flap and yanks input back inside one poll (~300ms) — so
+        // say so up front. This rescue only matters for dead-guard strands.
+        string? live = IpcClient.Send("status", 400);
+        if (live?.Contains("state=locked", StringComparison.OrdinalIgnoreCase) == true)
+            Console.WriteLine("Guard is still locked — the flap monitor re-captures " +
+                "input in ~300ms. This rescue is for dead-guard sessions.");
+
         // The rescue hatch frees everything the lock applied — including
         // lock policies, which a died-while-locked guard can leave behind.
         LockPolicies.Restore(Console.WriteLine);

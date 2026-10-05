@@ -84,7 +84,14 @@ internal sealed class TrayApp : IDisposable
         _msgWin.TaskbarCreated += OnTaskbarCreated;
 
         _service.StateChanged += OnStateChanged;
+        _service.Notification += OnNotification;
         ApplySnapshot(_service.Snapshot());
+    }
+
+    private void OnNotification(string title, string body)
+    {
+        if (_config.Guard.BalloonTips)
+            _icon.ShowBalloonTip(4000, title, body, ToolTipIcon.Info);
     }
 
     private void OnStateChanged(StatusSnapshot snap) => ApplySnapshot(snap);
