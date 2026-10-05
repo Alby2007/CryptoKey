@@ -35,8 +35,10 @@ internal sealed class SecureLockSurface : ILockSurface
     private volatile bool _abandoned;
     private volatile bool _engaged; // authoritative "session is switched" flag
     private Process? _watchdog;     // dead-man's switch for the switched session
-    private Thread? _flapThread;
+    private Thread? _flapThread;          // started once — lives for the surface's lifetime
+    private volatile bool _surfaceDead;   // Dispose's exit signal for the flap thread
     private readonly FlapCounter _flapCounter = new();
+    private bool _stormAnnounced;         // storm edge — alert once per burst, not per flap
 
     // Created and owned on the lock thread — never touch directly except
     // through InvokeOnLock (or from the lock thread itself).
@@ -200,6 +202,9 @@ internal sealed class SecureLockSurface : ILockSurface
     private void StartFlapMonitor()
     {
         _flapCounter.Reset();
+        _stormAnnounced = false;
+        if (_flapThread != null)
+            return; // one thread for the surface's lifetime — re-engage just un-parks it
         _flapThread = new Thread(FlapMonitorMain)
         {
             IsBackground = true,
@@ -210,13 +215,22 @@ internal sealed class SecureLockSurface : ILockSurface
 
     private void FlapMonitorMain()
     {
-        while (_engaged)
+        while (!_surfaceDead)
         {
             Thread.Sleep(300);
+            if (!_engaged)
+                continue; // volatile fast-path — no lock churn while unlocked
+
+            // Classify, re-switch, and count under the lock; raise events
+            // AFTER releasing it — handlers must never run inside
+            // _engageSync (Monitor reentrancy would let a callback run
+            // surface teardown on this thread).
+            string? flapEvent = null, stormEvent = null;
+            bool stormNow = false;
             lock (_engageSync)
             {
                 if (!_engaged)
-                    break;
+                    continue;
                 IntPtr h = NativeMethods.OpenInputDesktop(0, false,
                     NativeMethods.DESKTOP_READOBJECTS);
                 bool openFailed = h == IntPtr.Zero;
@@ -229,15 +243,29 @@ internal sealed class SecureLockSurface : ILockSurface
                 if (!FlapPolicy.IsHostile(name, openFailed))
                     continue;
                 if (!_engaged)
-                    break; // ReleaseInput switched back mid-open — don't fight it
+                    continue; // ReleaseInput switched back mid-open — don't fight it
                 NativeMethods.SwitchDesktop(_hLock);
-                SecurityEvent?.Invoke("desktop-flap");
+                flapEvent = "desktop-flap";
                 if (_flapCounter.Record(DateTime.UtcNow))
                 {
-                    SecurityEvent?.Invoke("desktop-flap-storm");
-                    NativeMethods.LockWorkStation();
+                    stormNow = true; // stay pinned at OS auth — fires per flap, idempotent
+                    if (!_stormAnnounced)
+                    {
+                        _stormAnnounced = true; // edge only — a sustained attack
+                        stormEvent = "desktop-flap-storm"; // shouldn't push-spam
+                    }
+                }
+                else
+                {
+                    _stormAnnounced = false; // aged out — a fresh burst re-alerts
                 }
             }
+            if (flapEvent != null)
+                SecurityEvent?.Invoke(flapEvent);
+            if (stormEvent != null)
+                SecurityEvent?.Invoke(stormEvent);
+            if (stormNow)
+                NativeMethods.LockWorkStation();
         }
     }
 
@@ -410,8 +438,8 @@ internal sealed class SecureLockSurface : ILockSurface
     private void TearDownLockThread()
     {
         _abandoned = true;
-        _flapCounter.Reset();
-        _flapThread = null; // exits on its own once _engaged clears
+        // The flap thread outlives the engagement — it idles on _engaged
+        // and resets its counter at the next StartFlapMonitor.
         StopWatchdog();
         LockForm? f = _form;
         if (f != null)
@@ -523,6 +551,7 @@ internal sealed class SecureLockSurface : ILockSurface
 
     public void Dispose()
     {
+        _surfaceDead = true;
         try { Disengage(); }
         catch (Exception) { }
         if (_hLock != IntPtr.Zero)
