@@ -1,12 +1,12 @@
 using System.IO.Pipes;
-using System.Security.Principal;
 
 namespace CryptoKey;
 
 /// <summary>
-/// Named-pipe control channel for the running guard. One text line in, one
-/// line out ("ok ..." / "err ..."). Commands are marshaled onto the UI thread
-/// before dispatch. Default ACL = current user only.
+/// Control channel for the running guard — one text line in, one line out
+/// ("ok ..." / "err ..."). Named pipe on Windows (DACL'd to the user);
+/// .NET maps the same API onto an $TMPDIR unix socket on macOS. Commands
+/// are marshaled onto the UI thread before dispatch.
 /// </summary>
 internal sealed class IpcServer : IDisposable
 {
@@ -16,12 +16,12 @@ internal sealed class IpcServer : IDisposable
     // it — connections are handled sequentially.
     private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(5);
 
-    private readonly Control _marshal;
+    private readonly IUiDispatcher _marshal;
     private readonly Func<string, string> _handler;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
-    public IpcServer(Control marshal, Func<string, string> handler)
+    public IpcServer(IUiDispatcher marshal, Func<string, string> handler)
     {
         _marshal = marshal;
         _handler = handler;
@@ -40,11 +40,9 @@ internal sealed class IpcServer : IDisposable
             IntegrityLabeled = labeled;
             if (log != null)
             {
-                bool elevated = new WindowsPrincipal(WindowsIdentity.GetCurrent())
-                    .IsInRole(WindowsBuiltInRole.Administrator);
                 log(labeled
                     ? "IPC pipe up (integrity label applied — CLI works elevated)."
-                    : elevated
+                    : Platform.Services.Ipc.Elevated
                         ? "IPC pipe up WITHOUT integrity label — elevated guard may be unreachable from the CLI."
                         : "IPC pipe up (per-user ACL — normal at medium integrity).");
             }
@@ -96,48 +94,17 @@ internal sealed class IpcServer : IDisposable
         }
     }
 
-    // Two layers: the SACL's Medium integrity label lets the normal
-    // (medium-IL) CLI reach an *elevated* guard — MIC no-write-up would
-    // otherwise block it — while the DACL scopes access to the owning user.
-    // The pipe lives in the global namespace, so a World DACL would let any
-    // other session on the machine send pause/lock/quit.
+    // Pipe hardening is per-platform: Windows wraps it in a user DACL plus
+    // a Medium-integrity SACL label (so the normal CLI reaches an elevated
+    // guard); macOS's unix-domain socket lives under $TMPDIR already.
     private static NamedPipeServerStream CreatePipe(out bool integrityLabeled)
-    {
-        string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
-
-        // Applying a SACL needs SE_SECURITY_PRIVILEGE — non-elevated guards
-        // can't set the integrity label, and don't need it: a medium-IL pipe
-        // is reachable by medium clients by default. Elevated guards must
-        // have it or the normal CLI can't write, so try SACL first and fall
-        // back to DACL-only.
-        try
-        {
-            var security = new PipeSecurity();
-            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
-            integrityLabeled = true;
-            return Create(security);
-        }
-        catch (Exception)
-        {
-            var security = new PipeSecurity();
-            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})");
-            integrityLabeled = false;
-            return Create(security);
-        }
-
-        static NamedPipeServerStream Create(PipeSecurity security)
-            => NamedPipeServerStreamAcl.Create(
-                PipeName, PipeDirection.InOut,
-                NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
-                0, 0, security, HandleInheritability.None);
-    }
+        => Platform.Services.Ipc.CreatePipe(out integrityLabeled);
 
     private string Dispatch(string line)
     {
         try
         {
-            return (string?)_marshal.Invoke(_handler, line) ?? "err no response";
+            return _marshal.Send(() => _handler(line));
         }
         catch (Exception)
         {

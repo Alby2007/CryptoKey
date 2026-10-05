@@ -310,7 +310,7 @@ internal sealed class SecurityPage : UserControl
     {
         try
         {
-            UsbDisk? disk = UsbMonitor.FindDisk(_config.DeviceSerial);
+            UsbDisk? disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial);
             return disk != null
                 && KeyVerifier.Check(_config, disk).Match == SecretMatch.Current;
         }
@@ -349,7 +349,7 @@ internal sealed class SecurityPage : UserControl
             bool needsRepair = false;
             try
             {
-                UsbDisk? disk = UsbMonitor.FindDisk(_config.DeviceSerial);
+                UsbDisk? disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial);
                 if (disk == null)
                 {
                     status = "ABSENT";
@@ -357,8 +357,8 @@ internal sealed class SecurityPage : UserControl
                 }
                 else
                 {
-                    string vols = disk.DriveLetters.Count > 0
-                        ? string.Join(", ", disk.DriveLetters)
+                    string vols = disk.VolumePaths.Count > 0
+                        ? string.Join(", ", disk.VolumePaths)
                         : "no mounted volume";
                     bool ok = KeyVerifier.Verify(_config, disk, out string why);
                     status = $"PRESENT — {why}";

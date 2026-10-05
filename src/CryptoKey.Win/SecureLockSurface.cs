@@ -57,6 +57,9 @@ internal sealed class SecureLockSurface : ILockSurface
 
     public SecureLockSurface(bool devMode) => _devMode = devMode;
 
+    /// <summary>Secure tier — GuardService falls back to the overlay when Engage fails.</summary>
+    public bool IsOverlay => false;
+
     /// <summary>Why the last Engage failed (for the caller's fallback log line).</summary>
     public string? EngageError => _engageError;
 

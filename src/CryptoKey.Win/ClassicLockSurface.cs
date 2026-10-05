@@ -20,6 +20,7 @@ internal sealed class ClassicLockSurface : ILockSurface
 
     private readonly InputLocker _input;
     private readonly LockScreen _lock;
+    private string? _engageError;
 
     public ClassicLockSurface(bool devMode)
     {
@@ -31,10 +32,17 @@ internal sealed class ClassicLockSurface : ILockSurface
         _lock.ReassertTick += () => _input.ReassertClip();
     }
 
+    /// <summary>Overlay tier — this IS the fallback.</summary>
+    public bool IsOverlay => true;
+
+    /// <summary>Why the last Engage failed — overlay failures are hook failures.</summary>
+    public string? EngageError => _engageError;
+
     /// <summary>Hooks + overlay. One hook retry, as before.</summary>
     public bool Engage()
     {
         bool hooked = _input.Lock() || _input.Lock();
+        _engageError = hooked ? null : "low-level input hooks refused to install";
         _lock.SetFailedAttempts(0);
         _lock.Show();
         return hooked;

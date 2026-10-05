@@ -87,16 +87,15 @@ internal static class ConfigStore
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    // CRYPTOKEY_CONFIG_ROOT overrides the profile root — the test suite
-    // uses it to redirect the store into a temp dir. A dedicated variable
-    // rather than APPDATA itself: nothing else sets it, and a set-but-
-    // empty value falls through instead of collapsing ConfigDir to a
-    // relative path under the launcher's CWD.
-    public static string ConfigDir { get; } = Path.Combine(
+    // CRYPTOKEY_CONFIG_ROOT overrides the platform config dir — the test
+    // suite uses it to redirect the store into a temp dir. A dedicated
+    // variable rather than APPDATA itself: nothing else sets it, and a
+    // set-but-empty value falls through instead of collapsing ConfigDir to
+    // a relative path under the launcher's CWD.
+    public static string ConfigDir =>
         Environment.GetEnvironmentVariable("CRYPTOKEY_CONFIG_ROOT") is { Length: > 0 } root
             ? root
-            : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "CryptoKey");
+            : Platform.Services.Paths.ConfigDir;
 
     public static string ConfigPath => Path.Combine(ConfigDir, "config.json");
 
@@ -104,49 +103,39 @@ internal static class ConfigStore
     public static string BackupPath => ConfigPath + ".bak";
 
     // Third copy, different kill surface: a folder wipe can't reach the
-    // registry, a registry delete can't reach the folder. Same trust bar
-    // as .bak — only ever honored *after* the keyfile's own attestation
-    // verifies, so a planted config still can't unlock anything.
-    // Mutable so tests can redirect it — without that seam, every Save in
-    // a test writes into the user's real HKCU backup.
-    internal static string RegKeyPath = @"Software\CryptoKey";
-    private const string RegValueName = "Config";
+    // registry/plist backup, a backup delete can't reach the folder. Same
+    // trust bar as .bak — only ever honored *after* the keyfile's own
+    // attestation verifies, so a planted config still can't unlock anything.
+    // Impl is per-platform (HKCU on Windows, plist file on macOS, temp in
+    // tests) — swapped through Platform.Services.ConfigBackup.
+    private static string? ReadBackup()
+    {
+        try { return Platform.Services.ConfigBackup.Read(); }
+        catch (Exception) { return null; }
+    }
 
-    /// <summary>Set when the last Load came from the registry — means the
-    /// config directory itself had been wiped. Callers log it louder.</summary>
-    public static bool LastRestoreFromRegistry { get; private set; }
+    /// <summary>Set when the last Load came from the third-copy backup —
+    /// means the config directory itself had been wiped. Callers log it louder.</summary>
+    public static bool LastRestoreFromBackup { get; private set; }
 
     /// <summary>Can any copy of the config produce a usable Load?</summary>
     public static bool Resumable =>
         File.Exists(ConfigPath) || File.Exists(BackupPath)
-        || ReadRegistryBackup() != null;
-
-    private static string? ReadRegistryBackup()
-    {
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RegKeyPath);
-            return key?.GetValue(RegValueName) as string;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
+        || ReadBackup() != null;
 
     public static KeyConfig? Load() => Load(out _);
 
     /// <summary>
-    /// Load config. Chain: primary → .bak → registry backup. A corrupt
+    /// Load config. Chain: primary → .bak → third-copy backup. A corrupt
     /// primary is quarantined to config.json.bad; a missing file just falls
-    /// through (covers folder wipes). A registry restore rewrites both
-    /// files so the store self-heals, and flags <see cref="LastRestoreFromRegistry"/>.
+    /// through (covers folder wipes). A backup restore rewrites both
+    /// files so the store self-heals, and flags <see cref="LastRestoreFromBackup"/>.
     /// Throws only when the primary was corrupt and NO backup parses.
     /// </summary>
     public static KeyConfig? Load(out bool restoredFromBackup)
     {
         restoredFromBackup = false;
-        LastRestoreFromRegistry = false;
+        LastRestoreFromBackup = false;
         bool primaryExisted = File.Exists(ConfigPath);
         if (primaryExisted)
         {
@@ -178,29 +167,29 @@ internal static class ConfigStore
             }
         }
 
-        string? reg = ReadRegistryBackup();
-        if (reg != null)
+        string? thirdCopy = ReadBackup();
+        if (thirdCopy != null)
         {
             try
             {
-                KeyConfig restored = Parse(reg);
+                KeyConfig restored = Parse(thirdCopy);
                 try
                 {
                     Directory.CreateDirectory(ConfigDir);
-                    AtomicFile.WriteAllText(ConfigPath, reg);
-                    AtomicFile.WriteAllText(BackupPath, reg);
+                    AtomicFile.WriteAllText(ConfigPath, thirdCopy);
+                    AtomicFile.WriteAllText(BackupPath, thirdCopy);
                 }
                 catch (Exception) { /* restore best-effort — the copy in hand still works */ }
                 restoredFromBackup = true;
-                LastRestoreFromRegistry = true;
+                LastRestoreFromBackup = true;
                 return restored;
             }
-            catch (Exception) { /* corrupt registry copy — fall through */ }
+            catch (Exception) { /* corrupt third copy — fall through */ }
         }
 
         if (primaryExisted)
             throw new InvalidDataException(
-                $"Config at {ConfigPath} was corrupt and no backup (file or registry) is readable.");
+                $"Config at {ConfigPath} was corrupt and no backup (file or platform copy) is readable.");
         return null;
     }
 
@@ -221,13 +210,9 @@ internal static class ConfigStore
         // The backup is written durably too — a torn .bak is no better
         // than none when it's the file that covers a torn primary.
         AtomicFile.WriteAllText(BackupPath, json);
-        // Third copy into the registry — best-effort; a denied HKCU write
+        // Third copy into the platform store — best-effort; a denied write
         // must not fail the save.
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RegKeyPath);
-            key.SetValue(RegValueName, json);
-        }
+        try { Platform.Services.ConfigBackup.Write(json); }
         catch (Exception) { }
     }
 

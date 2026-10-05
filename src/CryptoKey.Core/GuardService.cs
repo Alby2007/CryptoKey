@@ -12,7 +12,8 @@ namespace CryptoKey;
 internal sealed class GuardService : IDisposable
 {
     private readonly KeyConfig _config;
-    private readonly UsbMonitor _monitor;
+    private readonly IKeyMonitor _monitor;
+    private readonly IUiDispatcher _ui;
     private readonly bool _devMode;
     private readonly bool _forceClassic;
     private ILockSurface _surface;
@@ -37,7 +38,9 @@ internal sealed class GuardService : IDisposable
         _config = config;
         _devMode = devMode;
         _forceClassic = forceClassic;
-        _monitor = new UsbMonitor(config.DeviceSerial);
+        var handle = Platform.Services.KeyMonitors.Create(config.DeviceSerial);
+        _monitor = handle.Monitor;
+        _ui = handle.Ui;
         _surface = CreateSurface(config, devMode, forceClassic);
         _supervisor = new Supervisor(msg => Log(msg));
 
@@ -48,14 +51,16 @@ internal sealed class GuardService : IDisposable
     }
 
     /// <summary>
-    /// "overlay" → classic per-monitor overlay; anything else (including the
-    /// "secure" default) → private-desktop lock. Secure mode auto-falls-back
-    /// to overlay on engage failure, so it stays the safe default.
+    /// "overlay" → overlay-class surface; anything else (including the
+    /// "secure" default) → the platform's strong tier (private desktop /
+    /// display capture). Secure mode auto-falls-back to overlay on engage
+    /// failure, so it stays the safe default.
     /// </summary>
     private static ILockSurface CreateSurface(KeyConfig config, bool devMode, bool forceClassic)
-        => !forceClassic && !config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase)
-            ? (ILockSurface)new SecureLockSurface(devMode)
-            : new ClassicLockSurface(devMode);
+        => Platform.Services.Surfaces.Create(
+            securePreferred: !forceClassic
+                && !config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase),
+            devMode);
 
     private void WireSurface(ILockSurface s)
     {
@@ -88,14 +93,14 @@ internal sealed class GuardService : IDisposable
         catch (Exception) { }
         // Graceful exit — stand the watchdog down so it doesn't respawn us.
         _supervisor.Shutdown();
-        Application.Exit();
+        Platform.Services.AppLifetime.Exit();
     }
 
-    /// <summary>Mid-flight swap to the classic overlay (secure-engage failure).</summary>
+    /// <summary>Mid-flight swap to the overlay-class surface (secure-engage failure).</summary>
     private void SwitchToClassic()
     {
         ILockSurface old = _surface;
-        var s = new ClassicLockSurface(_devMode);
+        ILockSurface s = Platform.Services.Surfaces.Create(securePreferred: false, _devMode);
         WireSurface(s);
         s.SetAnimations(_config.Guard.Animations);
         _surface = s;
@@ -113,12 +118,10 @@ internal sealed class GuardService : IDisposable
     {
         bool wantClassic = _forceClassic
             || _config.Guard.LockMode.Equals("overlay", StringComparison.OrdinalIgnoreCase);
-        if (wantClassic == (_surface is ClassicLockSurface))
+        if (wantClassic == _surface.IsOverlay)
             return;
         ILockSurface old = _surface;
-        _surface = wantClassic
-            ? new ClassicLockSurface(_devMode)
-            : new SecureLockSurface(_devMode);
+        _surface = Platform.Services.Surfaces.Create(!wantClassic, _devMode);
         WireSurface(_surface);
         _surface.SetAnimations(_config.Guard.Animations);
         try { old.Dispose(); }
@@ -139,8 +142,8 @@ internal sealed class GuardService : IDisposable
     /// <summary>Recent log lines, oldest first (for UI backfill).</summary>
     public IReadOnlyList<string> RecentActivity => _activity;
 
-    /// <summary>Message-pump owner used to marshal pipe commands onto the UI thread.</summary>
-    public Control InvokeTarget => _monitor;
+    /// <summary>Marshals work onto the pump the monitor owns (IPC dispatch goes through it).</summary>
+    public IUiDispatcher UiDispatcher => _ui;
 
     public void Start()
     {
@@ -148,7 +151,7 @@ internal sealed class GuardService : IDisposable
         // A stale backup means the last guard died while locked — restore
         // the user's policies before anything else. Moot under the OS lock
         // screen anyway; re-applied on the next lock.
-        LockPolicies.Restore(Log);
+        Platform.Services.LockPolicies.Restore(Log);
         _monitor.SetPollInterval(_config.Guard.PollIntervalMs);
         // Supervisor: bring the watchdog up now, then re-check every 5s —
         // a killed watchdog gets respawned; a disabled setting stands it down.
@@ -159,17 +162,17 @@ internal sealed class GuardService : IDisposable
         Log($"Guard started (poll {_config.Guard.PollIntervalMs}ms, " +
             $"auto-lock {( _config.Guard.LockOnRemoval ? "on" : "off")}).");
 
-        // Registry restore means the config *directory* was wiped — a
+        // Backup restore means the config *directory* was wiped — a
         // tamper-flavored event, louder than a plain .bak restore.
-        if (ConfigStore.LastRestoreFromRegistry)
+        if (ConfigStore.LastRestoreFromBackup)
         {
-            Log("Config restored from the registry backup — the config directory had been wiped.");
-            Alert("Config restore", "config restored from registry — config directory had been wiped");
+            Log("Config restored from the third-copy backup — the config directory had been wiped.");
+            Alert("Config restore", "config restored from backup — config directory had been wiped");
         }
         UsbDisk? disk = null;
         try
         {
-            disk = UsbMonitor.FindDisk(_config.DeviceSerial);
+            disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial);
         }
         catch (Exception ex)
         {
@@ -225,9 +228,9 @@ internal sealed class GuardService : IDisposable
                 _idleGate = new IdleLockGate(mins);
                 _idleGateMins = mins;
             }
-            uint idleMs = NativeMethods.IdleMilliseconds();
+            uint idleMs = Platform.Services.SystemActions.IdleMilliseconds();
             // Lock on the UI thread — the timer callback is a pool thread.
-            _monitor.BeginInvoke(new Action(() =>
+            _ui.Post(new Action(() =>
             {
                 // Paused/Locked suppress it; the gate stops re-locking on
                 // the same idle streak after a key-present auto-unlock.
@@ -335,7 +338,7 @@ internal sealed class GuardService : IDisposable
         // and must not respawn. Defer the exit one pump turn so the IPC
         // reply gets written first.
         _supervisor.Shutdown();
-        _monitor.BeginInvoke(() => Application.Exit());
+        _ui.Post(() => Platform.Services.AppLifetime.Exit());
         return true;
     }
 
@@ -404,7 +407,7 @@ internal sealed class GuardService : IDisposable
         _surface.ReleaseInput();
         // Fail-dead frees the policies with the lock — restore is a no-op
         // when nothing was applied.
-        LockPolicies.Restore(Log);
+        Platform.Services.LockPolicies.Restore(Log);
     }
 
     // Removal locks instantly (when armed). Arrival deliberately does nothing
@@ -641,7 +644,7 @@ internal sealed class GuardService : IDisposable
                     lines = new List<string>
                         { $"Rotation write failed ({ex.Message}) — drive is stale, heals on retry." };
                 }
-                try { _monitor.BeginInvoke(new Action(() => lines.ForEach(Log))); }
+                try { _ui.Post(new Action(() => lines.ForEach(Log))); }
                 catch (Exception) { /* monitor dead — feed already closed */ }
             });
             return true; // config committed — the drive write lands on a worker
@@ -721,7 +724,7 @@ internal sealed class GuardService : IDisposable
 
             try
             {
-                _monitor.BeginInvoke(new Action(() => OnPassphraseResult(ok, policy)));
+                _ui.Post(new Action(() => OnPassphraseResult(ok, policy)));
             }
             catch (Exception)
             {
@@ -810,7 +813,7 @@ internal sealed class GuardService : IDisposable
         // Policies apply even if both surfaces fail — the user is still
         // locked (degraded, screen-only) and shouldn't get Task Manager back.
         if (_config.Guard.LockPolicies)
-            LockPolicies.Apply(Log);
+            Platform.Services.LockPolicies.Apply(Log);
         // Secure first; any engage failure — returned or thrown — falls back
         // to the classic overlay. A throw propagating out of here would kill
         // the guard via the poll callback while State is already Locked.
@@ -822,9 +825,9 @@ internal sealed class GuardService : IDisposable
             Log($"Lock surface engage threw ({ex.Message}).");
             engaged = false;
         }
-        if (!engaged && _surface is SecureLockSurface secure)
+        if (!engaged && !_surface.IsOverlay)
         {
-            Log($"Secure desktop failed to engage ({secure.EngageError ?? "unknown"}).");
+            Log($"Secure lock failed to engage ({_surface.EngageError ?? "unknown"}).");
             SwitchToClassic();
             try { engaged = _surface.Engage(); }
             catch (Exception ex)
@@ -862,7 +865,7 @@ internal sealed class GuardService : IDisposable
             _surface.SetStatus("Couldn't return to your desktop — try again.");
             return;
         }
-        LockPolicies.Restore(Log);
+        Platform.Services.LockPolicies.Restore(Log);
         Log("Unlocked.");
         SetState(GuardState.Unlocked);
         Alert("Unlocked", "session unlocked");
@@ -893,7 +896,7 @@ internal sealed class GuardService : IDisposable
     private void Snap(string reason)
     {
         if (_config.Guard.WebcamOnTamper)
-            CaptureService.Snap(reason, Log);
+            Platform.Services.Capture.Snap(reason, Log);
     }
 
     /// <summary>Push an event to the configured alert endpoint; "" URL = off.</summary>
@@ -941,7 +944,7 @@ internal sealed class GuardService : IDisposable
         // takeover handoff). Ungraceful deaths never reach this — by design.
         _supervisor.Shutdown();
         _watchdogTimer?.Dispose();
-        LockPolicies.Restore(Log);
+        Platform.Services.LockPolicies.Restore(Log);
         _surface.Dispose();
         _monitor.Dispose();
     }

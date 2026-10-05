@@ -4,9 +4,19 @@ namespace CryptoKey;
 
 internal static class Program
 {
+    private sealed class HostVerbs : IHostVerbs
+    {
+        public int RunGuard(bool devMode, bool takeover, bool forceClassic)
+            => Guard(devMode, takeover, forceClassic);
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
+        // Platform services must exist before ANY Core code runs — enroll,
+        // status, guard, watchdog all reach ConfigStore/Platform.Services.
+        Platform.Init(WinPlatform.Services);
+
         // Elevated helper: the parent app spawns this with runas when a
         // startup-mode change needs admin rights (scheduled-task writes).
         if (args.Length >= 1 && args[0].Equals("--set-startup", StringComparison.OrdinalIgnoreCase))
@@ -51,46 +61,15 @@ internal static class Program
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                 args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
 
+        // Shared verbs (enroll, status, guard, open, lock, pause, resume,
+        // quit, watchdog) — null means the verb is this host's own.
+        if (CryptoKeyCli.Run(args, new HostVerbs()) is int shared)
+            return shared;
+
         switch (args[0].ToLowerInvariant())
         {
-            case "enroll":
-                int erc = Enrollment.Run();
-                if (erc == 0)
-                    // A running guard holds the old config in memory — ping it
-                    // so it reloads and watches the new key's serial.
-                    _ = IpcClient.Send("reenrolled", 400);
-                return erc;
-            case "status":
-                return Status();
-            case "guard":
-                return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
-                    args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
-                    args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
-            case "open":
-                return SendIpc("open");
-            case "lock":
-                return SendIpc("lock");
-            case "pause":
-                int mins = args.Length > 1 && int.TryParse(args[1], out int m) ? m : 5;
-                return SendIpc($"pause {mins}");
-            case "resume":
-                return SendIpc("resume");
-            case "quit":
-                return SendIpc("quit");
             case "install":
                 return Install(args);
-            case "watchdog":
-                // Internal process role — spawned by the guard's Supervisor,
-                // not a user-facing command. --dev/--classic are forwarded
-                // to every guard it respawns.
-                if (args.Length >= 3
-                    && args[1].Equals("--parent", StringComparison.OrdinalIgnoreCase)
-                    && int.TryParse(args[2], out int guardPid))
-                    return Watchdog.Run(guardPid,
-                        args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
-                        args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
-                Console.WriteLine("usage: cryptokey watchdog --parent <pid>");
-                return 1;
             case "help":
                 Usage();
                 return 0;
@@ -102,22 +81,23 @@ internal static class Program
 
     private static int Gui(bool devMode, bool takeover, bool forceClassic)
     {
-        if (!TryLoadConfig(out KeyConfig? config, alertModal: true))
+        if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
         if (config == null)
         {
             Console.WriteLine("No enrolled key — starting enroll first.");
             if (Enrollment.Run() != 0
-                || !TryLoadConfig(out config, alertModal: true)
+                || !CryptoKeyCli.TryLoadConfig(out config, alertModal: true)
                 || config == null)
                 return 1;
         }
 
-        using Mutex singleInstance = AcquireGuardMutex(takeover, out bool createdNew);
-        if (!createdNew)
+        using IDisposable? singleInstance =
+            Platform.Services.SingleInstance.Acquire("CryptoKeyGuard", takeover);
+        if (singleInstance == null)
         {
             // Guard already up — just raise its window.
-            return SendIpc("open");
+            return CryptoKeyCli.SendIpc("open");
         }
 
         return RunApp(config, devMode, openDashboard: true, forceClassic);
@@ -134,7 +114,7 @@ internal static class Program
     {
         // The rescue hatch frees everything the lock applied — including
         // lock policies, which a died-while-locked guard can leave behind.
-        LockPolicies.Restore(Console.WriteLine);
+        Platform.Services.LockPolicies.Restore(Console.WriteLine);
         IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
             NativeMethods.DESKTOP_SWITCHDESKTOP);
         if (h == IntPtr.Zero)
@@ -178,17 +158,7 @@ internal static class Program
             // Parent already gone (or pid was never valid) — that's the
             // failure case we're here for, so still try to release.
         }
-        try
-        {
-            IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
-                NativeMethods.DESKTOP_SWITCHDESKTOP);
-            if (h != IntPtr.Zero)
-            {
-                NativeMethods.SwitchDesktop(h);
-                NativeMethods.CloseDesktop(h);
-            }
-        }
-        catch (Exception) { }
+        Platform.Services.SystemActions.ReleaseInputDesktop();
         return 0;
     }
 
@@ -215,21 +185,9 @@ internal static class Program
         }
     }
 
-    private static int SendIpc(string command)
-    {
-        string? reply = IpcClient.Send(command);
-        if (reply == null)
-        {
-            Console.WriteLine("cryptokey guard is not running.");
-            return 1;
-        }
-        Console.WriteLine(reply);
-        return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
-    }
-
     private static int Guard(bool devMode, bool takeover, bool forceClassic)
     {
-        if (!TryLoadConfig(out KeyConfig? config, alertModal: true))
+        if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
         if (config == null)
         {
@@ -237,8 +195,9 @@ internal static class Program
             return 1;
         }
 
-        using Mutex singleInstance = AcquireGuardMutex(takeover, out bool createdNew);
-        if (!createdNew)
+        using IDisposable? singleInstance =
+            Platform.Services.SingleInstance.Acquire("CryptoKeyGuard", takeover);
+        if (singleInstance == null)
         {
             Console.WriteLine("Another guard instance is already running.");
             return 1;
@@ -264,7 +223,7 @@ internal static class Program
 
         using var service = new GuardService(config, devMode, forceClassic);
         using var shell = new AppShell(service, config, devMode);
-        using var ipc = new IpcServer(service.InvokeTarget,
+        using var ipc = new IpcServer(service.UiDispatcher,
             line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
                 ? OpenWindow(shell)
                 : service.DispatchCommand(line));
@@ -347,7 +306,7 @@ internal static class Program
                         : "(Quit the running guard first.)");
                     return 1;
                 }
-                SendIpc("quit");
+                CryptoKeyCli.SendIpc("quit");
                 // Release takes a beat — hooks teardown, mutex drop, process exit.
                 for (int i = 0; i < 20; i++)
                 {
@@ -446,7 +405,7 @@ internal static class Program
         string takeArgs = "--takeover" + modeFlags;
         Process.Start(new ProcessStartInfo(installedExe, takeArgs)
         { UseShellExecute = false, CreateNoWindow = true });
-        if (SendIpc("quit") == 0)
+        if (CryptoKeyCli.SendIpc("quit") == 0)
             Console.WriteLine("Handed off — the installed guard is live.");
         else
             // The takeover parks on the guard mutex with a 30s deadline —
@@ -488,118 +447,6 @@ internal static class Program
             Console.WriteLine(ex.Message); // exit code is the real channel
             return 1;
         }
-    }
-
-    /// <summary>
-    /// Claims the single-guard mutex. With <paramref name="waitForRelease"/>,
-    /// retries for ~30s so a relaunch (e.g. elevated) can take over the moment
-    /// the old instance exits — no unguarded gap between the two.
-    /// </summary>
-    private static Mutex AcquireGuardMutex(bool waitForRelease, out bool createdNew)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        Mutex m;
-        do
-        {
-            m = new Mutex(true, @"Local\CryptoKeyGuard", out createdNew);
-            if (createdNew)
-                return m;
-            m.Dispose();
-            if (waitForRelease)
-                Thread.Sleep(250);
-        }
-        while (waitForRelease && DateTime.UtcNow < deadline);
-        return m;
-    }
-
-    private static bool TryLoadConfig(out KeyConfig? config, bool alertModal = false)
-    {
-        try
-        {
-            config = ConfigStore.Load(out bool restoredFromBackup);
-            if (ConfigStore.LastRestoreFromRegistry)
-                Alert("CryptoKey's config directory was wiped — the config was " +
-                    "restored from the registry backup. If you didn't delete it, " +
-                    "treat this as a tamper event.", alertModal);
-            else if (restoredFromBackup)
-                Alert("CryptoKey's config.json was corrupt — restored the last-good " +
-                    "backup (config.json.bak). The corrupt file was quarantined as " +
-                    "config.json.bad.", alertModal);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            // Autostart/scheduled launches hide the console — without a modal
-            // alert a corrupt config means "booted with no protection and no
-            // sign", which is the worst failure shape this app can have.
-            Alert($"CryptoKey config at {ConfigStore.ConfigPath} is corrupt and no " +
-                $"usable backup exists ({ex.Message}). Run 'cryptokey enroll' to " +
-                "re-enroll — the guard will not start without a config.", alertModal);
-            config = null;
-            return false;
-        }
-    }
-
-    private static void Alert(string message, bool modal)
-    {
-        Console.WriteLine(message);
-        if (modal)
-            MessageBox.Show(message, "CryptoKey",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
-
-    private static int Status()
-    {
-        if (!TryLoadConfig(out KeyConfig? config))
-            return 1;
-        if (config == null)
-        {
-            Console.WriteLine($"Not enrolled (no config at {ConfigStore.ConfigPath}).");
-            return 1;
-        }
-
-        Console.WriteLine($"Config:        {ConfigStore.ConfigPath}");
-        Console.WriteLine($"Device serial: {config.DeviceSerial}");
-        Console.WriteLine($"Unlock policy: {config.Guard.UnlockPolicy}" +
-            (config.Guard.StrictTamper ? " (strict tamper)" : ""));
-        Console.WriteLine($"Lock mode:     {config.Guard.LockMode}");
-
-        int exitCode;
-        UsbDisk? disk;
-        try
-        {
-            disk = UsbMonitor.FindDisk(config.DeviceSerial);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Key:           UNKNOWN (enumeration failed: {ex.Message})");
-            PrintLiveGuard();
-            return 1;
-        }
-        if (disk == null)
-        {
-            Console.WriteLine("Key:           ABSENT");
-            exitCode = 1;
-        }
-        else
-        {
-            string volumes = disk.DriveLetters.Count > 0 ? string.Join(", ", disk.DriveLetters) : "(no volume)";
-            Console.WriteLine($"Key:           PRESENT — {disk.Model} on {volumes}");
-            bool ok = KeyVerifier.Verify(config, disk, out string detail);
-            Console.WriteLine(ok ? $"Keyfile:       {detail}" : $"Keyfile:       FAILED ({detail})");
-            exitCode = ok ? 0 : 1;
-        }
-
-        PrintLiveGuard();
-        return exitCode;
-    }
-
-    private static void PrintLiveGuard()
-    {
-        string? live = IpcClient.Send("status", 800);
-        Console.WriteLine(live != null
-            ? $"Guard:         {live}"
-            : "Guard:         not running");
     }
 
     private static void Usage()

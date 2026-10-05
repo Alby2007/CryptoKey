@@ -104,41 +104,59 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `captures\*.jpg` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — newest 50 kept |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
-## Module inventory (`src/CryptoKey`)
+## Module inventory
+
+The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
+`net9.0`, no Windows dependencies) and per-platform hosts
+(`src/CryptoKey.Win` today). Hosts register a `PlatformServices` bundle via
+`Platform.Init` at startup; Core statics resolve OS capabilities through it.
+
+### `src/CryptoKey.Core` — platform-neutral
 
 | File | Role |
 |---|---|
-| `Program.cs` | argv dispatch, mutex/takeover, watchdog + release modes, `status`, `install` — self-install to `%LOCALAPPDATA%\CryptoKey` (copy tree, repoint shortcuts/autostart, live handoff via bare `--takeover` so a GUI guard hands off to a GUI guard) |
+| `CryptoKeyCli.cs` | Shared verb table — `enroll`, `status`, `guard`, `open`, `lock`, `pause`, `resume`, `quit`, `watchdog`; hosts keep their OS-specific roles |
+| `Platform.cs` / `PlatformInterfaces.cs` / `PlatformImpls.cs` | The seam: `Platform.Services` ambient holder, one interface per OS capability (paths, protector, USB enum, key monitor, IPC ACLs, single-instance, stop-signal, lock policies, capture, system actions, config backup, keyfile attrs, app lifetime, lock surfaces, enroll extras, user alerts), shared null/file impls |
 | `GuardService.cs` | State machine, unlock policy, backoff, ratchet orchestration, IPC dispatch, config reload |
-| `UsbMonitor.cs` | WMI polling, presence events, error logging |
 | `KeyVerifier.cs` | v2 envelope wrap/unwrap, legacy keyfile compat, `RotateKeyfiles` |
-| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror/fallback, `RotateSecret` |
+| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror + third-copy fallback, `RotateSecret` |
 | `RecoveryPhrase.cs` | Generated 20-char Crockford Base32 credential: `Generate`, `Normalize`, `IsValid` — the only user credential, stored hash-only |
-| `AtomicFile.cs` | Durability primitive: tmp → `FlushFileBuffers` → rename — used by config, backup, keyfile, policy writes |
-| `Enrollment.cs` | Drive selection, secret generation, keyfile + config write, `reenrolled` ping |
-| `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput` + setters |
-| `SecureLockSurface.cs` | Private desktop, STA lock thread, watchdog, switch-back discipline |
-| `ClassicLockSurface.cs` | `LockScreen` + `InputLocker` adapter — pre-facade behavior |
-| `LockScreen.cs` / `Ui/LockForm.cs` | Overlay manager (per-monitor) / the lock card form itself |
-| `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, phrase buffer (char[], wiped), panic combo, hook-side cooldown |
-| `IpcServer.cs` / `IpcClient.cs` | Pipe ACLs + accept loop / one-shot CLI transport |
-| `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/`LockWorkStation` role + `Supervisor` — guard-side mutex probe, spawn, stop |
-| `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
-| `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure |
+| `AtomicFile.cs` | Durability primitive: tmp → device flush → rename (`FlushFileBuffers` / `F_FULLFSYNC` gated at runtime) — used by config, backup, keyfile, policy writes |
+| `Enrollment.cs` | Drive selection, phrase display/confirm, keyfile + config write, `reenrolled` ping |
+| `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput`, tier marker (`IsOverlay`), `EngageError`, setters |
+| `IpcServer.cs` / `IpcClient.cs` | Accept loop + dispatch marshal / one-shot CLI transport |
+| `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/OS-lock role + `Supervisor` — guard-side liveness probe, spawn, stop |
+| `UsbDisk.cs` | One USB device: serial, model, mounted volume paths |
+| `GuardState.cs` | `GuardState` + `StatusSnapshot` |
 | `FlapPolicy.cs` | Desktop-flap classification + sliding-window storm counter — pure logic, unit-tested |
 | `AlertService.cs` | Security-event push: POST + `Title` header to a user URL (ntfy.sh/webhook), 4 s, quiet after first failure |
 | `Backoff.cs` | Phrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
 
-`tests/CryptoKey.Tests` (xUnit) covers the pure security invariants —
-rotation chain (incl. `keepPrev` orphan-proofing), envelope/attestation,
-tri-state match, `RotateKeyfiles` semantics, backoff ladder, config-store
-round-trip — the store is redirected into a temp dir by a
-`CRYPTOKEY_CONFIG_ROOT` env var set in a module initializer (before any
-test code, so the static `ConfigDir` can't be captured too early). The
-interactive layer
-(`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
-agents are non-interactive.
+### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
+
+| File | Role |
+|---|---|
+| `WinPlatform.cs` | The `PlatformServices` bundle: `%APPDATA%` paths, DPAPI protector, WMI enumerator, mutex/event primitives, pipe SDDL, HKCU third copy, `LockWorkStation`, surface factory, MessageBox alerts |
+| `Program.cs` | `Platform.Init` + argv dispatch — Windows-only roles (`install`, `--set-startup`, `--release-desktop`, `--lock-watchdog`, `--export-icon`), GUI/tray pump |
+| `UsbMonitor.cs` | `IKeyMonitor` — hidden message window, `WM_DEVICECHANGE` + 1s poll fallback, error tolerance |
+| `SecureLockSurface.cs` | Private desktop, STA lock thread, watchdog, switch-back discipline |
+| `ClassicLockSurface.cs` | `LockScreen` + `InputLocker` adapter — pre-facade behavior |
+| `LockScreen.cs` / `Ui/LockForm.cs` | Overlay manager (per-monitor) / the lock card form itself |
+| `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, phrase buffer (char[], wiped), panic combo, hook-side cooldown |
+| `NativeMethods.cs` | Win32 P/Invoke surface |
+| `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
+| `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure |
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |
 | `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |
+
+`tests/CryptoKey.Tests` (xUnit, `net9.0`) covers the pure security
+invariants — rotation chain (incl. `keepPrev` orphan-proofing),
+envelope/attestation, tri-state match, `RotateKeyfiles` semantics, backoff
+ladder, config-store round-trip. The store is redirected into a temp dir
+by `CRYPTOKEY_CONFIG_ROOT` and `Platform.Services` gets a null/temp
+bundle — both set in a module initializer before any test code runs, so
+the ambient can't be captured too early. The interactive layer
+(`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
+agents are non-interactive.

@@ -93,15 +93,15 @@ public class ConfigStoreTests
         ConfigStore.Save(ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pp"));
         File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
         File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
-        DeleteRegistryBackup();
+        DeleteThirdCopyBackup();
         Assert.ThrowsAny<Exception>(() => ConfigStore.Load());
     }
 
     [Fact]
-    public void Corrupt_files_fall_through_to_registry()
+    public void Corrupt_files_fall_through_to_third_copy()
     {
-        // The registry copy exists precisely for the both-files-dead case —
-        // a corrupt .bak must not end the chain before it's tried.
+        // The platform backup exists precisely for the both-files-dead
+        // case — a corrupt .bak must not end the chain before it's tried.
         ConfigStore.Save(ConfigStore.CreateNew("SER-REG", TestDisk.RandomSecret(), "pp"));
         File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
         File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
@@ -110,15 +110,15 @@ public class ConfigStoreTests
 
         Assert.NotNull(loaded);
         Assert.True(fromBackup);
-        Assert.True(ConfigStore.LastRestoreFromRegistry);
+        Assert.True(ConfigStore.LastRestoreFromBackup);
         Assert.Equal("SER-REG", loaded!.DeviceSerial);
-        // Both files got re-created from the registry copy.
+        // Both files got re-created from the third copy.
         Assert.True(File.Exists(ConfigStore.ConfigPath));
         Assert.True(File.Exists(ConfigStore.BackupPath));
     }
 
     [Fact]
-    public void Folder_wipe_restores_from_registry()
+    public void Folder_wipe_restores_from_third_copy()
     {
         ConfigStore.Save(ConfigStore.CreateNew("SER-WIPE", TestDisk.RandomSecret(), "pp"));
         Directory.Delete(ConfigStore.ConfigDir, recursive: true);
@@ -126,25 +126,23 @@ public class ConfigStoreTests
         KeyConfig? loaded = ConfigStore.Load(out _);
 
         Assert.Equal("SER-WIPE", loaded!.DeviceSerial);
-        Assert.True(ConfigStore.LastRestoreFromRegistry);
+        Assert.True(ConfigStore.LastRestoreFromBackup);
         Assert.True(File.Exists(ConfigStore.ConfigPath));
     }
 
     [Fact]
-    public void Corrupt_registry_copy_falls_to_throw()
+    public void Corrupt_third_copy_falls_to_throw()
     {
         ConfigStore.Save(ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pp"));
         File.WriteAllText(ConfigStore.ConfigPath, "{ bad");
         File.WriteAllText(ConfigStore.BackupPath, "{ also bad");
-        using (var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(ConfigStore.RegKeyPath))
-            key.SetValue("Config", "{ corrupt json");
+        File.WriteAllText(TestInit.ThirdCopyPath, "{ corrupt json");
         Assert.ThrowsAny<Exception>(() => ConfigStore.Load());
     }
 
-    private static void DeleteRegistryBackup()
+    private static void DeleteThirdCopyBackup()
     {
-        Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(
-            ConfigStore.RegKeyPath, throwOnMissingSubKey: false);
+        try { File.Delete(TestInit.ThirdCopyPath); } catch { }
     }
 
     [Fact]
@@ -154,13 +152,14 @@ public class ConfigStoreTests
         Assert.Equal(600_000, config.PassphraseIterations);
 
         // A legacy 100k hash keeps verifying under its own count — the
-        // stored hash is of the normalized form ("PASSONE"), which is how
+        // stored hash is of the normalized form ("pass-one" → "PASS0NE";
+        // separators drop, letters uppercase, O folds to 0), which is how
         // every phrase credential is written now.
         byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
         config.PassphraseIterations = 100_000;
         config.PassphraseHash = Convert.ToBase64String(
             System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
-                "PASSONE", salt, 100_000,
+                "PASS0NE", salt, 100_000,
                 System.Security.Cryptography.HashAlgorithmName.SHA256, 32));
         Assert.True(ConfigStore.VerifyPassphrase(config, "pass-one"));
 

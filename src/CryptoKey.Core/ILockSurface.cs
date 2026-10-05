@@ -1,13 +1,22 @@
 namespace CryptoKey;
 
 /// <summary>
-/// The thing that locks the machine. Two implementations: the classic
-/// on-desktop overlay (<see cref="ClassicLockSurface"/>) and the secure
-/// private-desktop surface (<see cref="SecureLockSurface"/>). GuardService
-/// talks only to this interface; unlock/verify logic never sees the difference.
+/// The thing that locks the machine. Two tiers per platform: the
+/// overlay-class surface (per-monitor forms / fullscreen window) and the
+/// secure surface (private desktop on Windows, display capture on macOS).
+/// GuardService talks only to this interface; unlock/verify logic never
+/// sees the difference.
 /// </summary>
 internal interface ILockSurface : IDisposable
 {
+    /// <summary>True on the overlay-class surface — the fallback tier GuardService
+    /// drops to when the secure surface can't engage (and the mode the "overlay"
+    /// LockMode pins to).</summary>
+    bool IsOverlay { get; }
+
+    /// <summary>Why the last <see cref="Engage"/> returned false, when it did.</summary>
+    string? EngageError { get; }
+
     /// <summary>Raised with the buffered phrase when Enter is pressed —
     /// a char[] the handler must wipe after verifying.</summary>
     event Action<char[]>? PassphraseSubmitted;

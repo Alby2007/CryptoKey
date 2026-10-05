@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Both host assemblies are named "cryptokey" (Windows exe + Mac binary). -->
+    <InternalsVisibleTo Include="cryptokey" />
+    <InternalsVisibleTo Include="CryptoKey.Tests" />
+  </ItemGroup>
+
+</Project>

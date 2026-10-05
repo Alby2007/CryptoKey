@@ -14,14 +14,21 @@ internal static class KeyVerifier
 {
     public const string KeyFileName = ".cryptokey";
 
-    /// <summary>v2 envelope: magic || DPAPI(secret[64] || attest[32]).</summary>
+    /// <summary>v2 envelope: magic || ProtectedData(secret[64] || attest[32]).</summary>
     private static readonly byte[] Magic = "CKY2"u8.ToArray();
-    private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("CryptoKey.v2");
+    /// <summary>Protection-scope tag — DPAPI entropy on Windows, keychain
+    /// item discriminator on macOS. Same value everywhere; each
+    /// <see cref="IKeyProtector"/> maps it onto its own store.</summary>
+    internal static readonly byte[] ProtectorEntropy = Encoding.UTF8.GetBytes("CryptoKey.v2");
     private const int SecretLen = 64;
     private const int AttestLen = 32;
 
-    public static string KeyFilePath(string driveLetter)
-        => Path.Combine(driveLetter + "\\", KeyFileName);
+    /// <param name="volumePath">A mount point — "E:" on Windows,
+    /// "/Volumes/NAME" on macOS (trailing separator normalized).</param>
+    public static string KeyFilePath(string volumePath)
+        => Path.Combine(
+            volumePath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+            KeyFileName);
 
     /// <summary>
     /// True when the enrolled device is present AND its keyfile secret
@@ -33,7 +40,7 @@ internal static class KeyVerifier
         UsbDisk? disk;
         try
         {
-            disk = UsbMonitor.FindDisk(config.DeviceSerial);
+            disk = Platform.Services.Usb.FindDisk(config.DeviceSerial);
         }
         catch (Exception ex)
         {
@@ -57,16 +64,17 @@ internal static class KeyVerifier
     }
 
     /// <summary>
-    /// Wraps a secret into the v2 keyfile envelope: DPAPI-bound to this
-    /// user+machine, carrying the config attestation MAC inside the protected
-    /// blob so a copied file is dead weight off this machine.
+    /// Wraps a secret into the v2 keyfile envelope: bound to this
+    /// user+machine by the platform protector, carrying the config
+    /// attestation MAC inside the protected blob so a copied file is dead
+    /// weight off this machine.
     /// </summary>
     public static byte[] WrapKeyfile(byte[] secret, KeyConfig config)
     {
         byte[] plain = new byte[SecretLen + AttestLen];
         Buffer.BlockCopy(secret, 0, plain, 0, SecretLen);
         Buffer.BlockCopy(ConfigStore.ComputeAttest(secret, config), 0, plain, SecretLen, AttestLen);
-        byte[] blob = ProtectedData.Protect(plain, DpapiEntropy, DataProtectionScope.CurrentUser);
+        byte[] blob = Platform.Services.Protector.Protect(plain, ProtectorEntropy);
         byte[] file = new byte[Magic.Length + blob.Length];
         Buffer.BlockCopy(Magic, 0, file, 0, Magic.Length);
         Buffer.BlockCopy(blob, 0, file, Magic.Length, blob.Length);
@@ -74,9 +82,10 @@ internal static class KeyVerifier
     }
 
     /// <summary>
-    /// Parses a keyfile: v2 envelopes are DPAPI-unwrapped and attestation-
-    /// checked; legacy 64-byte raw secrets pass through as
-    /// <see cref="AttestState.Missing"/> (self-upgrading on next rotation).
+    /// Parses a keyfile: v2 envelopes are unwrapped by the platform
+    /// protector and attestation-checked; legacy 64-byte raw secrets pass
+    /// through as <see cref="AttestState.Missing"/> (self-upgrading on next
+    /// rotation).
     /// False when the file isn't a keyfile or the envelope can't be
     /// unwrapped (copied to another machine/user, or corrupt).
     /// </summary>
@@ -103,8 +112,8 @@ internal static class KeyVerifier
         byte[] plain;
         try
         {
-            plain = ProtectedData.Unprotect(file[Magic.Length..], DpapiEntropy,
-                DataProtectionScope.CurrentUser);
+            plain = Platform.Services.Protector.Unprotect(
+                file[Magic.Length..], ProtectorEntropy);
         }
         catch (CryptographicException)
         {
@@ -134,14 +143,14 @@ internal static class KeyVerifier
     }
 
     /// <summary>
-    /// Tri-state keyfile check across every mounted letter. A Current match on
-    /// any letter wins over Previous matches elsewhere — a stale file on one
-    /// partition can't shadow the current one on another. Attestation is
-    /// reported from the winning letter.
+    /// Tri-state keyfile check across every mounted volume. A Current match
+    /// on any volume wins over Previous matches elsewhere — a stale file on
+    /// one partition can't shadow the current one on another. Attestation
+    /// is reported from the winning volume.
     /// </summary>
     public static KeyfileCheck Check(KeyConfig config, UsbDisk disk)
     {
-        if (disk.DriveLetters.Count == 0)
+        if (disk.VolumePaths.Count == 0)
             return new KeyfileCheck(SecretMatch.None, "device has no mounted volume",
                 Array.Empty<string>(), AttestState.Missing);
 
@@ -149,9 +158,9 @@ internal static class KeyVerifier
         bool foundCurrent = false, foundPrevious = false;
         AttestState bestAttest = AttestState.Missing;
         string lastError = "no keyfile found";
-        foreach (string letter in disk.DriveLetters)
+        foreach (string volume in disk.VolumePaths)
         {
-            string path = KeyFilePath(letter);
+            string path = KeyFilePath(volume);
             byte[] file;
             try
             {
@@ -187,13 +196,13 @@ internal static class KeyVerifier
                     if (!foundCurrent)
                         bestAttest = attest;
                     foundCurrent = true;
-                    matched.Add(letter);
+                    matched.Add(volume);
                     break;
                 case SecretMatch.Previous:
                     if (!foundCurrent && !foundPrevious)
                         bestAttest = attest;
                     foundPrevious = true;
-                    matched.Add(letter);
+                    matched.Add(volume);
                     break;
                 default:
                     lastError = "keyfile secret mismatch";
@@ -221,37 +230,37 @@ internal static class KeyVerifier
     };
 
     /// <summary>
-    /// Writes a pre-wrapped v2 envelope to every letter that already has a
+    /// Writes a pre-wrapped v2 envelope to every volume that already has a
     /// keyfile — temp file, attributes, atomic move, then a byte-for-byte
-    /// read-back check. If the keyfile was wiped from every letter, re-arms
+    /// read-back check. If the keyfile was wiped from every volume, re-arms
     /// the first mounted one so the drive can't stay stale-forever. Pure
     /// file I/O — safe off the UI thread; nothing reads mutable config.
     /// </summary>
-    public static List<(string Letter, string? Error)> RotateKeyfiles(
+    public static List<(string Volume, string? Error)> RotateKeyfiles(
         UsbDisk disk, byte[] envelope)
     {
-        var targets = disk.DriveLetters.Where(l => File.Exists(KeyFilePath(l))).ToList();
+        var targets = disk.VolumePaths.Where(v => File.Exists(KeyFilePath(v))).ToList();
         if (targets.Count == 0)
-            targets = disk.DriveLetters.Take(1).ToList();
+            targets = disk.VolumePaths.Take(1).ToList();
 
-        var results = new List<(string Letter, string? Error)>();
-        foreach (string letter in targets)
+        var results = new List<(string Volume, string? Error)>();
+        foreach (string volume in targets)
         {
-            string path = KeyFilePath(letter);
+            string path = KeyFilePath(volume);
             try
             {
                 // Flushed to media before the rename — USB is usually FAT32/
                 // exFAT (no journal), so a mid-write yank must never leave a
                 // truncated keyfile at the final name.
                 AtomicFile.WriteAllBytes(path, envelope);
-                File.SetAttributes(path, FileAttributes.Hidden | FileAttributes.System);
+                Platform.Services.KeyfileAttrs.Hide(path);
                 byte[] back = File.ReadAllBytes(path);
-                results.Add((letter,
+                results.Add((volume,
                     back.AsSpan().SequenceEqual(envelope) ? null : "read-back mismatch"));
             }
             catch (Exception ex)
             {
-                results.Add((letter, ex.Message));
+                results.Add((volume, ex.Message));
             }
         }
         return results;

@@ -9,11 +9,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <NoWarn>$(NoWarn);WFO5001;WFO1000</NoWarn>
+    <!-- Lets CI/dev machines on macOS/Linux compile the Windows host (tests only need Core). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="CryptoKey.Tests" />
+    <ProjectReference Include="..\CryptoKey.Core\CryptoKey.Core.csproj" />
     <PackageReference Include="FlashCap" Version="1.12.0" />
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
     <PackageReference Include="System.Management" Version="10.0.12" />

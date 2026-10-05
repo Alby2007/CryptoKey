@@ -139,7 +139,7 @@ design while locked).
 ```console
 dotnet build
 dotnet test                    # xUnit suite — pure security invariants
-dotnet run --project src/CryptoKey -- enroll
+dotnet run --project src/CryptoKey.Win -- enroll
 ```
 
 Enroll **generates** your recovery phrase — 20 Crockford Base32 characters

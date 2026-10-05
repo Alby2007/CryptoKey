@@ -24,7 +24,7 @@ internal static class Enrollment
         List<UsbDisk> disks;
         try
         {
-            disks = UsbMonitor.EnumerateUsbDisks();
+            disks = Platform.Services.Usb.Enumerate();
         }
         catch (Exception ex)
         {
@@ -42,7 +42,7 @@ internal static class Enrollment
         for (int i = 0; i < disks.Count; i++)
         {
             UsbDisk d = disks[i];
-            string volumes = d.DriveLetters.Count > 0 ? string.Join(", ", d.DriveLetters) : "(no volume)";
+            string volumes = d.VolumePaths.Count > 0 ? string.Join(", ", d.VolumePaths) : "(no volume)";
             string serial = string.IsNullOrEmpty(d.SerialNumber) ? "(blank serial)" : d.SerialNumber;
             Console.WriteLine($"  [{i + 1}] {d.Model}  serial={serial}  volumes={volumes}");
         }
@@ -58,8 +58,8 @@ internal static class Enrollment
         if (string.IsNullOrEmpty(disk.SerialNumber))
             Console.WriteLine("WARNING: this drive reports a blank serial number; matching may be unreliable.");
 
-        string? letter = disk.DriveLetters.FirstOrDefault();
-        if (letter == null)
+        string? volume = disk.VolumePaths.FirstOrDefault();
+        if (volume == null)
         {
             Console.WriteLine("Selected drive has no mounted volume.");
             return 1;
@@ -85,14 +85,15 @@ internal static class Enrollment
         if (existing?.Guard != null)
             fresh.Guard = existing.Guard;
 
-        string keyPath = KeyVerifier.KeyFilePath(letter);
+        string keyPath = KeyVerifier.KeyFilePath(volume);
         try
         {
-            // v2 envelope: DPAPI-bound to this user/machine + attestation MAC.
-            // AtomicFile flushes to media before the rename — no truncated
-            // keyfile if the drive is pulled mid-write.
+            // v2 envelope: bound to this user/machine by the platform
+            // protector + attestation MAC. AtomicFile flushes to media
+            // before the rename — no truncated keyfile if the drive is
+            // pulled mid-write.
             AtomicFile.WriteAllBytes(keyPath, KeyVerifier.WrapKeyfile(secret, fresh));
-            File.SetAttributes(keyPath, FileAttributes.Hidden | FileAttributes.System);
+            Platform.Services.KeyfileAttrs.Hide(keyPath);
         }
         catch (Exception ex)
         {
@@ -112,21 +113,20 @@ internal static class Enrollment
             return 1;
         }
 
-        // A fresh enroll is when the app becomes real — drop the shell
-        // shortcuts now (also repoints them if the exe moved). Best-effort:
-        // a shortcut failure must never fail enrollment.
+        // A fresh enroll is when the app becomes real — the host does its
+        // post-enroll extras now (Windows drops the shell shortcuts; also
+        // repoints them if the exe moved). Best-effort: an extras failure
+        // must never fail enrollment.
         try
         {
-            ShortcutManager.SetEnabled(ShortcutTarget.StartMenu, true);
-            ShortcutManager.SetEnabled(ShortcutTarget.Desktop, true);
-            Console.WriteLine("Shortcuts created: Start Menu + Desktop.");
+            Platform.Services.EnrollmentExtras.AfterEnroll();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Shortcut creation skipped: {ex.Message}");
+            Console.WriteLine($"Post-enroll extras skipped: {ex.Message}");
         }
 
-        Console.WriteLine($"Enrolled {disk.Model} on {letter}. Keyfile written to {keyPath}");
+        Console.WriteLine($"Enrolled {disk.Model} on {volume}. Keyfile written to {keyPath}");
         Console.WriteLine($"Config saved to {ConfigStore.ConfigPath}");
         return 0;
     }

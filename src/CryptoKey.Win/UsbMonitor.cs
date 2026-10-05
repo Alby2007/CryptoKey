@@ -1,15 +1,12 @@
-using System.Management;
-
 namespace CryptoKey;
-
-internal sealed record UsbDisk(string DeviceId, string SerialNumber, string Model, List<string> DriveLetters);
 
 /// <summary>
 /// Hidden message window that watches for the enrolled USB device.
 /// Reacts to WM_DEVICECHANGE broadcasts and re-checks on a 1s poll as a
-/// fallback for missed events.
+/// fallback for missed events. Enumeration itself is the platform's
+/// <see cref="IUsbEnumerator"/> — this is the live-monitor half.
 /// </summary>
-internal sealed class UsbMonitor : Form
+internal sealed class UsbMonitor : Form, IKeyMonitor
 {
     /// <summary>Raised on the UI thread when target presence flips; arg = now present.</summary>
     public event Action<bool>? PresenceChanged;
@@ -62,7 +59,7 @@ internal sealed class UsbMonitor : Form
     {
         try
         {
-            return FindDisk(_targetSerial) != null;
+            return Platform.Services.Usb.FindDisk(_targetSerial) != null;
         }
         catch (Exception)
         {
@@ -94,7 +91,7 @@ internal sealed class UsbMonitor : Form
             Exception? error = null;
             try
             {
-                disk = FindDisk(_targetSerial);
+                disk = Platform.Services.Usb.FindDisk(_targetSerial);
             }
             catch (Exception ex)
             {
@@ -137,95 +134,6 @@ internal sealed class UsbMonitor : Form
             PresenceChanged?.Invoke(present);
         }
         PresenceChecked?.Invoke(disk);
-    }
-
-    public static UsbDisk? FindDisk(string serial)
-        => EnumerateUsbDisks().FirstOrDefault(d =>
-            string.Equals(d.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
-
-    public static List<UsbDisk> EnumerateUsbDisks()
-    {
-        var disks = new List<UsbDisk>();
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT DeviceID, SerialNumber, Model FROM Win32_DiskDrive " +
-            "WHERE InterfaceType='USB' OR MediaType LIKE 'Removable%' OR MediaType LIKE 'External%'");
-        using var results = searcher.Get();
-        foreach (ManagementObject drive in results)
-        {
-            using (drive)
-            {
-                string deviceId = (drive["DeviceID"] as string ?? "").Trim();
-                string serial = (drive["SerialNumber"] as string ?? "").Trim();
-                string model = (drive["Model"] as string ?? "").Trim();
-                disks.Add(new UsbDisk(deviceId, serial, model, DriveLettersForDisk(deviceId)));
-            }
-        }
-        return disks;
-    }
-
-    // Win32_DiskDrive ("\\.\PHYSICALDRIVE2")
-    //   -> Win32_DiskDriveToDiskPartition -> Win32_DiskPartition ("Disk #2, Partition #0")
-    //   -> Win32_LogicalDiskToPartition   -> Win32_LogicalDisk  ("E:")
-    private static List<string> DriveLettersForDisk(string deviceId)
-    {
-        var letters = new List<string>();
-        var partitionIds = new List<string>();
-
-        using (var searcher = new ManagementObjectSearcher(
-                   "SELECT Antecedent, Dependent FROM Win32_DiskDriveToDiskPartition"))
-        {
-            using var results = searcher.Get();
-            foreach (ManagementObject assoc in results)
-            {
-                using (assoc)
-                {
-                    string? diskId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
-                    if (string.Equals(diskId, deviceId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        string? partId = ExtractDeviceId(assoc["Dependent"]?.ToString());
-                        if (partId != null)
-                            partitionIds.Add(partId);
-                    }
-                }
-            }
-        }
-
-        using (var searcher = new ManagementObjectSearcher(
-                   "SELECT Antecedent, Dependent FROM Win32_LogicalDiskToPartition"))
-        {
-            using var results = searcher.Get();
-            foreach (ManagementObject assoc in results)
-            {
-                using (assoc)
-                {
-                    string? partId = ExtractDeviceId(assoc["Antecedent"]?.ToString());
-                    if (partId != null && partitionIds.Contains(partId, StringComparer.OrdinalIgnoreCase))
-                    {
-                        string? letter = ExtractDeviceId(assoc["Dependent"]?.ToString());
-                        if (letter != null)
-                            letters.Add(letter);
-                    }
-                }
-            }
-        }
-
-        return letters;
-    }
-
-    // Association paths look like:
-    //   \\HOST\root\cimv2:Win32_DiskDrive.DeviceID="\\\\.\\PHYSICALDRIVE2"
-    // The quoted DeviceID has each backslash doubled, so unescape before comparing.
-    private static string? ExtractDeviceId(string? assocPath)
-    {
-        if (assocPath == null)
-            return null;
-        const string marker = "DeviceID=\"";
-        int start = assocPath.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-        if (start < 0)
-            return null;
-        start += marker.Length;
-        int end = assocPath.IndexOf('"', start);
-        return end > start ? assocPath[start..end].Replace("\\\\", "\\") : null;
     }
 
     protected override void Dispose(bool disposing)

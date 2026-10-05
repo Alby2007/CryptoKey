@@ -111,7 +111,7 @@ internal sealed class InputLocker : IDisposable
     /// <summary>Zero the whole buffer — partial input never survives.</summary>
     private void WipeBuffer()
     {
-        CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_buffer));
+        CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_buffer.AsSpan()));
         _len = 0;
     }
 
@@ -186,7 +186,7 @@ internal sealed class InputLocker : IDisposable
                                 PassphraseLengthChanged?.Invoke(_len);
                             }
                             CryptographicOperations.ZeroMemory(
-                                MemoryMarshal.AsBytes(_scratch));
+                                MemoryMarshal.AsBytes(_scratch.AsSpan()));
                         }
                         break;
                 }
@@ -235,7 +235,7 @@ internal sealed class InputLocker : IDisposable
         {
             // Dead key — left pending inside ToUnicode to compose with the
             // next stroke; the accent char it echoed is wiped.
-            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch));
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch.AsSpan()));
             return 0;
         }
 
@@ -249,7 +249,7 @@ internal sealed class InputLocker : IDisposable
                 _scratch[useful++] = c;
         }
         if (useful == 0)
-            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch));
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch.AsSpan()));
         return useful;
     }
 

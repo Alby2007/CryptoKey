@@ -23,8 +23,10 @@ namespace CryptoKey;
 /// </summary>
 internal static class Watchdog
 {
-    internal const string MutexName = @"Local\CryptoKeyWatchdog";
-    internal const string StopEventName = @"Local\CryptoKeyWatchdogStop";
+    // Logical names — each platform maps them onto its own primitives
+    // (named Mutex/EventWaitHandle on Windows, flock + stop file on macOS).
+    internal const string MutexName = "CryptoKeyWatchdog";
+    internal const string StopEventName = "CryptoKeyWatchdogStop";
 
     private const int BeatMs = 750;
     private const int ReplyTimeoutMs = 500;
@@ -42,15 +44,15 @@ internal static class Watchdog
 
     public static int Run(int parentPid, bool devMode, bool forceClassic)
     {
-        using var mutex = new Mutex(true, MutexName, out bool createdNew);
-        if (!createdNew)
+        using IDisposable? mutex = Platform.Services.SingleInstance.Acquire(MutexName, false);
+        if (mutex == null)
             return 0; // single instance — a second spawner just exits
 
-        // NOTE: no stop.Reset() here — the Supervisor resets the event
+        // NOTE: no stop.Reset() here — the Supervisor resets the signal
         // right before spawning. Resetting on this side would clear a
-        // stand-down that lands between spawn and our first WaitOne and
+        // stand-down that lands between spawn and our first Wait and
         // respawn a guard that was explicitly quit.
-        using var stop = new EventWaitHandle(false, EventResetMode.ManualReset, StopEventName);
+        using var stop = Platform.Services.StopSignals.OpenWaiter();
 
         // Respawn the same guard we were launched beside — losing --dev
         // would strip the panic combo, losing --classic flips the lock mode.
@@ -69,7 +71,7 @@ internal static class Watchdog
 
         while (true)
         {
-            if (stop.WaitOne(BeatMs))
+            if (stop.Wait(BeatMs))
             {
                 Log("stand-down received — exiting.");
                 return 0;
@@ -113,9 +115,9 @@ internal static class Watchdog
             // (or its desktop) may outlive the process.
             if (newlyDead && wasLocked)
             {
-                Log("guard died while LOCKED — fail-closed: release desktop, lock workstation, respawn.");
-                ReleaseDesktop();
-                NativeMethods.LockWorkStation();
+                Log("guard died while LOCKED — fail-closed: release desktop, lock session, respawn.");
+                Platform.Services.SystemActions.ReleaseInputDesktop();
+                Platform.Services.SystemActions.LockScreen();
             }
             else if (newlyDead)
             {
@@ -150,8 +152,8 @@ internal static class Watchdog
 
             if (respawnFails >= MaxFastRespawnFails)
             {
-                Log("respawn failing — locking workstation; retrying every 30s.");
-                NativeMethods.LockWorkStation();
+                Log("respawn failing — locking the session; retrying every 30s.");
+                Platform.Services.SystemActions.LockScreen();
                 nextRespawnAt = DateTime.UtcNow.AddSeconds(30);
             }
         }
@@ -174,17 +176,18 @@ internal static class Watchdog
     private static bool TryRespawn(string args, out int pid)
     {
         pid = 0;
+        string? exe = Environment.ProcessPath;
+        if (exe == null)
+            return false;
         try
         {
             // `guard` = tray daemon. Inherits the watchdog's integrity level —
             // an elevated guard spawned an elevated watchdog, so respawns
             // stay elevated.
-            Process? p = Process.Start(new ProcessStartInfo(
-                Environment.ProcessPath ?? Application.ExecutablePath, args)
+            Process? p = Process.Start(new ProcessStartInfo(exe, args)
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
             });
             if (p == null)
                 return false;
@@ -197,23 +200,6 @@ internal static class Watchdog
             Log($"respawn failed: {ex.Message}");
             return false;
         }
-    }
-
-    /// <summary>Same rescue as --release-desktop — redundant with the per-engage lock watchdog by design.</summary>
-    private static void ReleaseDesktop()
-    {
-        try
-        {
-            IntPtr h = NativeMethods.OpenDesktop("Default", 0, false,
-                NativeMethods.DESKTOP_SWITCHDESKTOP);
-            if (h != IntPtr.Zero)
-            {
-                if (NativeMethods.SwitchDesktop(h))
-                    Log("input switched back to Default desktop.");
-                NativeMethods.CloseDesktop(h);
-            }
-        }
-        catch (Exception) { }
     }
 
     private static void Log(string message)
@@ -231,16 +217,16 @@ internal static class Watchdog
 }
 
 /// <summary>
-/// The guard's handle on its watchdog: probes the mutex for liveness,
-/// spawns `cryptokey watchdog --parent &lt;pid&gt;` when absent (≈5s cadence
-/// from GuardService), and sets the named stop event on every graceful exit
-/// so the watchdog stands down instead of respawning.
+/// The guard's handle on its watchdog: probes the single-instance lock for
+/// liveness, spawns `cryptokey watchdog --parent &lt;pid&gt;` when absent
+/// (≈5s cadence from GuardService), and raises the named stop signal on
+/// every graceful exit so the watchdog stands down instead of respawning.
 /// </summary>
 internal sealed class Supervisor
 {
     private readonly Action<string> _log;
     // Latched by Shutdown — a dying guard's tick must not respawn a watchdog
-    // in the gap between Stop() (mutex release) and process exit. Volatile:
+    // in the gap between Stop() (signal raise) and process exit. Volatile:
     // written on the UI thread, read on the SlowTick pool thread.
     private volatile bool _shutdown;
 
@@ -250,20 +236,12 @@ internal sealed class Supervisor
     {
         get
         {
-            try
-            {
-                if (Mutex.TryOpenExisting(Watchdog.MutexName, out Mutex? m))
-                {
-                    m.Dispose();
-                    return true;
-                }
-            }
-            catch (Exception) { }
-            return false;
+            try { return Platform.Services.SingleInstance.IsHeld(Watchdog.MutexName); }
+            catch (Exception) { return false; }
         }
     }
 
-    /// <summary>Spawn the watchdog if the mutex says none exists.</summary>
+    /// <summary>Spawn the watchdog if the instance lock says none exists.</summary>
     public void Ensure(int parentPid, bool devMode, bool forceClassic)
     {
         if (_shutdown || Alive)
@@ -271,25 +249,27 @@ internal sealed class Supervisor
         try
         {
             // Clear a stale stand-down before spawning — otherwise the new
-            // watchdog would open a SET event and exit on its first beat.
-            using var stop = new EventWaitHandle(false, EventResetMode.ManualReset,
-                Watchdog.StopEventName);
-            stop.Reset();
+            // watchdog would see a raised signal and exit on its first beat.
+            Platform.Services.StopSignals.Reset();
         }
         catch (Exception) { }
+        string? exe = Environment.ProcessPath;
+        if (exe == null)
+        {
+            _log("Watchdog spawn failed: no process path.");
+            return;
+        }
         try
         {
             // The watchdog forwards these flags to every respawned guard —
             // a respawn must come back with the same panic combo / lock mode.
-            Process? p = Process.Start(new ProcessStartInfo(
-                Environment.ProcessPath ?? Application.ExecutablePath,
+            Process? p = Process.Start(new ProcessStartInfo(exe,
                 $"watchdog --parent {parentPid}"
                     + (devMode ? " --dev" : "")
                     + (forceClassic ? " --classic" : ""))
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
             });
             if (p != null)
             {
@@ -310,11 +290,7 @@ internal sealed class Supervisor
     /// <summary>Stand the watchdog down — reversible (settings toggle).</summary>
     public void Stop()
     {
-        try
-        {
-            using var stop = EventWaitHandle.OpenExisting(Watchdog.StopEventName);
-            stop.Set();
-        }
+        try { Platform.Services.StopSignals.Signal(); }
         catch (Exception) { /* no watchdog — nothing to stop */ }
     }
 
