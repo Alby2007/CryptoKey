@@ -13,6 +13,8 @@ cryptokey lock                   # IPC: lock now
 cryptokey pause [mins]           # IPC: pause auto-lock (default 5; works while paused to extend)
 cryptokey resume                 # IPC: end a pause
 cryptokey quit                   # IPC: stop the guard (refused while locked)
+cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
+                                 # shortcuts + autostart at it; offers a live guard handoff
 cryptokey help                   # usage
 ```
 

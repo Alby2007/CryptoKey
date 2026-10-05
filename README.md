@@ -105,10 +105,17 @@ Double-clicking `cryptokey.exe` launches the dashboard (the console hides
 itself when there's no shell attached). Closing the window hides to the
 tray — the guard keeps running.
 
+Run `cryptokey install` to copy the app to `%LOCALAPPDATA%\CryptoKey` and
+repoint the Start Menu/Desktop shortcuts (and any armed autostart) at that
+fixed path — this is what makes the shortcuts and Start-with-Windows
+survive a `dotnet clean` of the build tree. If a guard is running it
+offers a live handoff: the installed copy spawns with `--takeover`, the
+old guard quits, and the new one claims the mutex with no unguarded gap.
+
 The Settings tab has a **Start with Windows** toggle that registers
 `cryptokey.exe guard` (tray-only, no window) in your per-user Run key —
-enable it from the exe you actually keep, since it stores the running
-exe's path. The **Launch as administrator** sub-toggle registers a
+it stores the running exe's path, so run it from the installed copy. The
+**Launch as administrator** sub-toggle registers a
 Scheduled Task with highest privileges instead (one UAC prompt when you
 enable it) so the lock covers elevated windows too; **Restart as admin**
 elevates the running instance in place. The Storage card can add/remove

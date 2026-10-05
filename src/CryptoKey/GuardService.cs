@@ -86,7 +86,7 @@ internal sealed class GuardService : IDisposable
         try { _surface.Disengage(); }
         catch (Exception) { }
         // Graceful exit — stand the watchdog down so it doesn't respawn us.
-        _supervisor.Stop();
+        _supervisor.Shutdown();
         Application.Exit();
     }
 
@@ -332,7 +332,7 @@ internal sealed class GuardService : IDisposable
         // Stand the watchdog down BEFORE the exit — quit is a clean death
         // and must not respawn. Defer the exit one pump turn so the IPC
         // reply gets written first.
-        _supervisor.Stop();
+        _supervisor.Shutdown();
         _monitor.BeginInvoke(() => Application.Exit());
         return true;
     }
@@ -929,8 +929,8 @@ internal sealed class GuardService : IDisposable
         // Every graceful exit funnels through Dispose — standing the
         // watchdog down here catches paths beyond quit/panic (window close,
         // takeover handoff). Ungraceful deaths never reach this — by design.
+        _supervisor.Shutdown();
         _watchdogTimer?.Dispose();
-        _supervisor.Stop();
         LockPolicies.Restore(Log);
         _surface.Dispose();
         _monitor.Dispose();

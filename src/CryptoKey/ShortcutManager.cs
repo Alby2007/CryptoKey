@@ -28,7 +28,9 @@ internal static class ShortcutManager
 
     public static bool Exists(ShortcutTarget target) => File.Exists(LinkPath(target));
 
-    public static void SetEnabled(ShortcutTarget target, bool enabled)
+    /// <param name="exePath">Exe the shortcut targets — the installer passes
+    /// the installed copy's path; default is the running process.</param>
+    public static void SetEnabled(ShortcutTarget target, bool enabled, string? exePath = null)
     {
         string link = LinkPath(target);
         if (!enabled)
@@ -38,7 +40,7 @@ internal static class ShortcutManager
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(link)!);
-        string exe = Application.ExecutablePath;
+        string exe = exePath ?? Application.ExecutablePath;
 
         Type shellType = Type.GetTypeFromProgID("WScript.Shell")
             ?? throw new InvalidOperationException("WScript.Shell unavailable");

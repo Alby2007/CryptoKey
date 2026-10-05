@@ -64,8 +64,11 @@ internal static class StartupManager
         return File.Exists(exe);
     }
 
-    public static void SetMode(StartupMode mode)
+    /// <param name="exePath">Exe the registration points at — the installer
+    /// passes the installed copy's path; default is the running process.</param>
+    public static void SetMode(StartupMode mode, string? exePath = null)
     {
+        string exe = exePath ?? Application.ExecutablePath;
         // Clear both registrations first — exactly one mechanism may own autostart.
         using (RegistryKey? key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true))
             key?.DeleteValue(ValueName, throwOnMissingValue: false);
@@ -75,11 +78,11 @@ internal static class StartupManager
         {
             case StartupMode.Normal:
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKeyPath))
-                    key.SetValue(ValueName, $"\"{Application.ExecutablePath}\" guard");
+                    key.SetValue(ValueName, $"\"{exe}\" guard");
                 break;
             case StartupMode.Elevated:
                 int rc = Schtasks($"/create /f /tn {TaskName} /sc onlogon /rl highest " +
-                    $"/tr \"\\\"{Application.ExecutablePath}\\\" guard\"", out _);
+                    $"/tr \"\\\"{exe}\\\" guard\"", out _);
                 if (rc != 0)
                     throw new InvalidOperationException($"schtasks /create failed (exit {rc})");
                 break;

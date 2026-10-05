@@ -239,6 +239,9 @@ internal static class Watchdog
 internal sealed class Supervisor
 {
     private readonly Action<string> _log;
+    // Latched by Shutdown — a dying guard's tick must not respawn a watchdog
+    // in the gap between Stop() (mutex release) and process exit.
+    private bool _shutdown;
 
     public Supervisor(Action<string> log) => _log = log;
 
@@ -262,7 +265,7 @@ internal sealed class Supervisor
     /// <summary>Spawn the watchdog if the mutex says none exists.</summary>
     public void Ensure(int parentPid, bool devMode, bool forceClassic)
     {
-        if (Alive)
+        if (_shutdown || Alive)
             return;
         try
         {
@@ -303,7 +306,7 @@ internal sealed class Supervisor
         }
     }
 
-    /// <summary>Stand the watchdog down — called on every graceful exit path.</summary>
+    /// <summary>Stand the watchdog down — reversible (settings toggle).</summary>
     public void Stop()
     {
         try
@@ -312,5 +315,16 @@ internal sealed class Supervisor
             stop.Set();
         }
         catch (Exception) { /* no watchdog — nothing to stop */ }
+    }
+
+    /// <summary>
+    /// Final shutdown — Stop() plus a latch so a late supervisor tick can't
+    /// respawn a watchdog after this process has asked it to die. Every
+    /// process-exit path calls this; only the settings toggle uses Stop().
+    /// </summary>
+    public void Shutdown()
+    {
+        _shutdown = true;
+        Stop();
     }
 }

@@ -77,6 +77,8 @@ internal static class Program
                 return SendIpc("resume");
             case "quit":
                 return SendIpc("quit");
+            case "install":
+                return Install(args);
             case "watchdog":
                 // Internal process role — spawned by the guard's Supervisor,
                 // not a user-facing command. --dev/--classic are forwarded
@@ -286,6 +288,173 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Self-install: copies the running payload into %LOCALAPPDATA%\CryptoKey
+    /// and repoints shortcuts + autostart at the installed exe — so the
+    /// desktop icon and Start-with-Windows survive a `dotnet clean` of the
+    /// build tree. Finally offers a live handoff: spawn the installed copy
+    /// with --takeover (it parks on the guard mutex), quit the old guard, and
+    /// the new one claims it with no unguarded gap.
+    /// </summary>
+    private static int Install(string[] args)
+    {
+        string targetDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CryptoKey");
+        string sourceDir = Path.GetFullPath(AppContext.BaseDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar);
+        string installedExe = Path.Combine(targetDir, "cryptokey.exe");
+
+        bool relaunchInstalled = false;
+        if (sourceDir.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"Already running from {targetDir} — skipping the copy.");
+        }
+        else
+        {
+            try
+            {
+                CopyTree(sourceDir, targetDir);
+                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}");
+            }
+            catch (Exception ex)
+            {
+                // A guard running from the install dir locks its own files —
+                // offer to quit it and retry rather than making the user
+                // discover the ordering themselves.
+                string? live0 = IpcClient.Send("status", 400);
+                if (live0 == null
+                    || live0.Contains("state=locked", StringComparison.OrdinalIgnoreCase)
+                    || !Ask("The installed guard is running — quit it and retry the copy?"))
+                {
+                    Console.WriteLine($"Install failed: {ex.Message}");
+                    Console.WriteLine(live0?.Contains("state=locked",
+                        StringComparison.OrdinalIgnoreCase) == true
+                        ? "(Unlock first — quit is refused while locked.)"
+                        : "(Quit the running guard first.)");
+                    return 1;
+                }
+                SendIpc("quit");
+                // Release takes a beat — hooks teardown, mutex drop, process exit.
+                for (int i = 0; i < 20; i++)
+                {
+                    Thread.Sleep(300);
+                    try
+                    {
+                        CopyTree(sourceDir, targetDir);
+                        relaunchInstalled = true;
+                        break;
+                    }
+                    catch (Exception) { }
+                }
+                if (!relaunchInstalled)
+                {
+                    Console.WriteLine("Copy still blocked after the guard quit — files stayed locked.");
+                    return 1;
+                }
+                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}");
+            }
+        }
+
+        // Shortcuts repoint at the installed exe — IconLocation rides along,
+        // so the embedded padlock survives the move.
+        try
+        {
+            ShortcutManager.SetEnabled(ShortcutTarget.StartMenu, true, installedExe);
+            ShortcutManager.SetEnabled(ShortcutTarget.Desktop, true, installedExe);
+            Console.WriteLine("Shortcuts repointed (Start Menu + Desktop).");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Shortcut repoint failed: {ex.Message}");
+        }
+
+        // Re-register autostart only if a mode is already armed — install
+        // never turns startup on by itself.
+        try
+        {
+            switch (StartupManager.GetMode())
+            {
+                case StartupMode.Normal:
+                    StartupManager.SetMode(StartupMode.Normal, installedExe);
+                    Console.WriteLine("Autostart (Run key) repointed to the installed exe.");
+                    break;
+                case StartupMode.Elevated:
+                    // The scheduled task needs admin to rewrite — spawn the
+                    // INSTALLED exe as the elevated helper, so what it
+                    // registers as its own ExecutablePath is the new path.
+                    Process.Start(new ProcessStartInfo(installedExe, "--set-startup elevated")
+                    { UseShellExecute = true, Verb = "runas" });
+                    Console.WriteLine("Autostart is elevated — approve the UAC prompt to repoint it.");
+                    break;
+                default:
+                    Console.WriteLine("Autostart: off — nothing to repoint.");
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Autostart repoint failed: {ex.Message}");
+        }
+
+        // The quit-to-refresh path killed the guard to free the files —
+        // put the freshly-installed copy back without another prompt.
+        if (relaunchInstalled)
+        {
+            Process.Start(new ProcessStartInfo(installedExe) { UseShellExecute = true });
+            Console.WriteLine("Relaunched the installed copy.");
+            return 0;
+        }
+
+        string? live = IpcClient.Send("status", 400);
+        if (live == null)
+        {
+            if (Ask("No guard running — launch the installed app now?"))
+                Process.Start(new ProcessStartInfo(installedExe) { UseShellExecute = true });
+            return 0;
+        }
+        if (live.Contains("state=locked", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("Guard is locked — install is in place; unlock and " +
+                "'cryptokey quit' to hand off to the installed copy.");
+            return 0;
+        }
+        if (!Ask("Hand the running guard over to the installed copy?"))
+        {
+            Console.WriteLine("Installed. The running guard still uses the old exe — " +
+                "quit + relaunch it when ready.");
+            return 0;
+        }
+
+        string takeArgs = "guard --takeover" +
+            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
+            (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
+        Process.Start(new ProcessStartInfo(installedExe, takeArgs)
+        { UseShellExecute = false, CreateNoWindow = true });
+        Console.WriteLine(SendIpc("quit") == 0
+            ? "Handed off — the installed guard is live."
+            : "Quit refused — the takeover guard claims the mutex when the old one exits.");
+        return 0;
+    }
+
+    /// <summary>[Y/n] prompt — a redirected/piped stdin counts as yes.</summary>
+    private static bool Ask(string question)
+    {
+        Console.Write($"{question} [Y/n] ");
+        string? ans = Console.ReadLine();
+        return ans == null || ans.Trim().Length == 0
+            || ans.Trim().Equals("y", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void CopyTree(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (string f in Directory.GetFiles(source))
+            File.Copy(f, Path.Combine(target, Path.GetFileName(f)), overwrite: true);
+        foreach (string d in Directory.GetDirectories(source))
+            CopyTree(d, Path.Combine(target, Path.GetFileName(d)));
+    }
+
     private static int SetStartupMode(StartupMode mode)
     {
         // runas gives this console-app helper a console nobody reads — hide it.
@@ -428,6 +597,8 @@ internal static class Program
         Console.WriteLine("  cryptokey pause [mins]  Pause auto-lock (default 5)");
         Console.WriteLine("  cryptokey resume        End a pause early");
         Console.WriteLine("  cryptokey quit          Stop the guard (refused while locked)");
+        Console.WriteLine("  cryptokey install       Copy the app to %LOCALAPPDATA%\\CryptoKey and");
+        Console.WriteLine("                          repoint shortcuts + autostart at it");
         Console.WriteLine();
         Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12");
         Console.WriteLine("  --classic          force the overlay lock (skip the private desktop)");
