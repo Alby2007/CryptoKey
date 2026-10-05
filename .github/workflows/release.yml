@@ -1,0 +1,49 @@
+name: release
+
+# Tag-driven: `git tag v0.9.1 && git push origin v0.9.1` builds, signs, and
+# publishes the release. The signing private key lives only in the
+# RELEASE_SIGNING_KEY repo secret (PEM) — never in the tree.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.x'
+
+      - name: Publish (framework-dependent win-x64)
+        run: dotnet publish src/CryptoKey.Win -c Release -r win-x64 --self-contained false -o publish
+
+      - name: Write signing key
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_SIGNING_KEY)) {
+            Write-Error 'RELEASE_SIGNING_KEY secret is not set — refusing to publish an unsigned release.'
+          }
+          Set-Content -Path key.pem -Value $env:RELEASE_SIGNING_KEY -Encoding ascii
+
+      - name: Sign release
+        run: ./publish/cryptokey.exe sign-release publish key.pem ${{ github.ref_name }}
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cryptokey-win-x64.zip
+            SHA256SUMS.txt
+            SHA256SUMS.sig
+
+      - name: Scrub key
+        if: always()
+        run: Remove-Item key.pem -Force -ErrorAction SilentlyContinue

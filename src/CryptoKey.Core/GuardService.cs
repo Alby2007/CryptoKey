@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
@@ -30,6 +31,9 @@ internal sealed class GuardService : IDisposable
     private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
     private bool _reattestPending;      // an in-app save changed a covered field
     private DateTime _lastReattestUtc = DateTime.MinValue;
+    private DateTime _lastUpdateCheckUtc = DateTime.MinValue;
+    private UpdateInfo? _pendingUpdate; // newer release found — apply is user-gated
+    private int _updateBusy;            // check/apply in flight
     private uint _lastIdleMs;           // last GetLastInputInfo reading (SlowTick)
     private uint _vaultFedGen;          // generation last handed to the vault
     private string? _tamperNote;
@@ -233,11 +237,124 @@ internal sealed class GuardService : IDisposable
         EmitSnapshot();
     }
 
-    /// <summary>Shared ~5s cadence: watchdog supervision + idle lock.</summary>
+    /// <summary>Shared ~5s cadence: watchdog supervision + idle lock + update check.</summary>
     private void SlowTick()
     {
         WatchdogTick();
         IdleTick();
+        UpdateTick();
+    }
+
+    /// <summary>A newer release found by the periodic check — apply is user-gated.</summary>
+    public UpdateInfo? PendingUpdate => _pendingUpdate;
+
+    /// <summary>
+    /// Update check — at startup + once a day, always off the pump. Only a
+    /// version edge balloons; failures stay log-quiet until the next day.
+    /// </summary>
+    private void UpdateTick()
+    {
+        if (!_config.Guard.UpdateCheckEnabled
+            || DateTime.UtcNow - _lastUpdateCheckUtc < TimeSpan.FromHours(24))
+            return;
+        _lastUpdateCheckUtc = DateTime.UtcNow;
+        _ = CheckForUpdateAsync();
+    }
+
+    private async Task CheckForUpdateAsync()
+    {
+        if (Interlocked.Exchange(ref _updateBusy, 1) == 1)
+            return;
+        try
+        {
+            UpdateInfo? info = await UpdateChecker.CheckAsync().ConfigureAwait(false);
+            if (info != null)
+            {
+                bool edge = _pendingUpdate?.TagName != info.TagName;
+                _pendingUpdate = info;
+                if (edge)
+                {
+                    Log($"Update available: {info.TagName} (this build {CryptoKeyCli.BuildStamp}).");
+                    Notification?.Invoke("CryptoKey",
+                        $"CryptoKey {info.TagName} is available — About tab → Install update.");
+                }
+            }
+            EmitSnapshot();
+        }
+        catch (Exception ex)
+        {
+            Log($"Update check failed ({ex.Message}).");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _updateBusy, 0);
+        }
+    }
+
+    /// <summary>
+    /// `update apply` — apply the pending release, or force a fresh check
+    /// when the daily tick hasn't seen one yet. Caller holds _updateBusy.
+    /// </summary>
+    private async Task CheckAndApplyAsync()
+    {
+        UpdateInfo? info;
+        try
+        {
+            info = _pendingUpdate
+                ?? await UpdateChecker.CheckAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _updateBusy, 0);
+            Log($"Update check failed ({ex.Message}).");
+            return;
+        }
+        if (info == null)
+        {
+            Interlocked.Exchange(ref _updateBusy, 0);
+            Log("Update: already current.");
+            Notification?.Invoke("CryptoKey", "CryptoKey is up to date.");
+            return;
+        }
+        _pendingUpdate = info;
+        await ApplyUpdateAsync(info); // its finally releases _updateBusy
+    }
+
+    /// <summary>
+    /// Apply the pending update: verify + stage the payload, then hand off
+    /// to the staged exe's `apply-update` — it quits this guard, copies
+    /// over the install dir (keeping a backup), and relaunches.
+    /// </summary>
+    private async Task ApplyUpdateAsync(UpdateInfo info)
+    {
+        try
+        {
+            // Staging is a SIBLING of the install dir — same volume for the
+            // renames, but outside the tree that gets moved aside.
+            string payload = await UpdateChecker.FetchVerifiedAsync(
+                info, CryptoKeyCli.InstallDir + "-staging",
+                Log).ConfigureAwait(false);
+            string stagedExe = Path.Combine(payload, "cryptokey.exe");
+            if (!File.Exists(stagedExe))
+            {
+                Log("Update aborted — staged payload is missing cryptokey.exe.");
+                return;
+            }
+            Process.Start(new ProcessStartInfo(stagedExe,
+                $"apply-update --target \"{CryptoKeyCli.InstallDir}\"" +
+                (_devMode ? " --dev" : "") + (_forceClassic ? " --classic" : ""))
+            { UseShellExecute = false, CreateNoWindow = true });
+            _pendingUpdate = null;
+        }
+        catch (Exception ex)
+        {
+            Log($"Update failed: {ex.Message}");
+            Notification?.Invoke("CryptoKey", $"Update failed — {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _updateBusy, 0);
+        }
     }
 
     private void WatchdogTick()
@@ -412,7 +529,8 @@ internal sealed class GuardService : IDisposable
             _pausedUntil, _tamperNote, _keyVerifiedNow, _supervisor.Alive,
             _vault.State is VaultState.Disabled or VaultState.NoImage
                 ? null
-                : new VaultStatus(_vault.State, _vault.MountPoint));
+                : new VaultStatus(_vault.State, _vault.MountPoint),
+            _pendingUpdate?.TagName);
 
     /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
     public string DispatchCommand(string line)
@@ -445,6 +563,8 @@ internal sealed class GuardService : IDisposable
                 return ReloadConfig();
             case "vault":
                 return DispatchVault(parts);
+            case "update":
+                return DispatchUpdate(parts);
             case "status":
                 StatusSnapshot s = Snapshot();
                 return $"ok state={s.State.ToString().ToLowerInvariant()} " +
@@ -459,7 +579,8 @@ internal sealed class GuardService : IDisposable
                        $"build={CryptoKeyCli.BuildStamp} " +
                        $"vault={(s.Vault == null ? "off" :
                            s.Vault.State.ToString().ToLowerInvariant() +
-                           (s.Vault.State == VaultState.Mounted ? $"@{s.Vault.MountPoint}" : ""))}";
+                           (s.Vault.State == VaultState.Mounted ? $"@{s.Vault.MountPoint}" : ""))} " +
+                       $"update={(s.PendingUpdate ?? "-")}";
             default:
                 return $"err unknown command '{parts[0]}'";
         }
@@ -471,6 +592,38 @@ internal sealed class GuardService : IDisposable
     /// instead of flagging a tamper event we caused ourselves.
     /// </summary>
     public void MarkConfigDirty() => _reattestPending = true;
+
+    /// <summary>`cryptokey update …` piped to a live guard.</summary>
+    private string DispatchUpdate(string[] parts)
+    {
+        switch (parts.Length > 1 ? parts[1].ToLowerInvariant() : "status")
+        {
+            case "status":
+                return _pendingUpdate != null
+                    ? $"ok update {_pendingUpdate.TagName} pending " +
+                      $"(published {_pendingUpdate.PublishedAt:yyyy-MM-dd})"
+                    : $"ok up to date ({CryptoKeyCli.BuildStamp})";
+            case "check":
+                _ = CheckForUpdateAsync();
+                return "ok checking";
+            case "apply":
+                if (State == GuardState.Locked)
+                    return "err locked — unlock before updating " +
+                        "(the guard has to quit to swap)";
+                if (Interlocked.Exchange(ref _updateBusy, 1) == 1)
+                    return "err an update is already in flight";
+                // Claims the busy flag — CheckAndApplyAsync releases it
+                // (directly, or via ApplyUpdateAsync's finally once an
+                // update is found).
+                _ = CheckAndApplyAsync();
+                return _pendingUpdate != null
+                    ? $"ok applying {_pendingUpdate.TagName} — guard quits " +
+                      "and restarts on the new build"
+                    : "ok checking — a verified update applies automatically";
+            default:
+                return $"err unknown update command '{parts[1]}'";
+        }
+    }
 
     /// <summary>`cryptokey vault …` piped to a live guard — mount/unmount/create/status.</summary>
     private string DispatchVault(string[] parts)

@@ -19,4 +19,5 @@ internal sealed record StatusSnapshot(
     string? TamperNote,
     bool KeyFactorArmed,
     bool WatchdogAlive,
-    VaultStatus? Vault = null);
+    VaultStatus? Vault = null,
+    string? PendingUpdate = null);

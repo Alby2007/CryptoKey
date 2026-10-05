@@ -17,6 +17,7 @@ internal sealed class SettingsPage : UserControl
     private readonly ToggleSwitch _startup;
     private readonly ToggleSwitch _startupAdmin;
     private readonly ToggleSwitch _watchdog;
+    private readonly ToggleSwitch _updateCheck;
     private readonly ToggleSwitch _lockPolicies;
     private readonly ToggleSwitch _strictTamper;
     private readonly ToggleSwitch _privateDesktop;
@@ -62,19 +63,19 @@ internal sealed class SettingsPage : UserControl
             Title = "Behavior",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 374,
+            Height = 416,
             Margin = new Padding(0, 0, 0, 10),
         };
         var beh = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 9,
+            RowCount = 10,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 9; i++)
-            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 9f));
+        for (int i = 0; i < 10; i++)
+            beh.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 10f));
 
         StartupMode startupMode = StartupManager.GetMode();
         _lockOnRemoval = Toggle("Auto-lock when the key is removed", _config.Guard.LockOnRemoval);
@@ -83,6 +84,8 @@ internal sealed class SettingsPage : UserControl
         _sounds = Toggle("Lock/unlock sound cues", _config.Guard.Sounds);
         _startup = Toggle("Start with Windows", startupMode != StartupMode.Off);
         _watchdog = Toggle("Watchdog process (auto-restart the guard)", _config.Guard.Watchdog);
+        _updateCheck = Toggle("Check for updates (notify, never auto-install)",
+            _config.Guard.UpdateCheckEnabled);
         _lockPolicies = Toggle("Restrict Task Manager, sign-out & power while locked",
             _config.Guard.LockPolicies);
         _startupAdmin = Toggle("Launch as administrator (stronger lock)",
@@ -163,6 +166,7 @@ internal sealed class SettingsPage : UserControl
         beh.Controls.Add(_sounds);
         beh.Controls.Add(_startup);
         beh.Controls.Add(_watchdog);
+        beh.Controls.Add(_updateCheck);
         beh.Controls.Add(_lockPolicies);
         beh.Controls.Add(adminRow);
         beh.Controls.Add(pollRow);
@@ -696,6 +700,7 @@ internal sealed class SettingsPage : UserControl
         _config.Guard.StrictTamper = _strictTamper.Checked;
         _config.Guard.LockMode = _privateDesktop.Checked ? "secure" : "overlay";
         _config.Guard.Watchdog = _watchdog.Checked;
+        _config.Guard.UpdateCheckEnabled = _updateCheck.Checked;
         _config.Guard.LockPolicies = _lockPolicies.Checked;
         _config.Guard.IdleLockMinutes = _idle.Value;
         _config.Guard.WebcamOnTamper = _webcam.Checked;

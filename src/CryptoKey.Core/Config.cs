@@ -109,6 +109,13 @@ internal sealed class GuardSettings
 
     /// <summary>Seal the vault (dismount + drop keys) after N idle minutes (0 = off).</summary>
     public int VaultIdleMinutes { get; set; } = 0;
+
+    /// <summary>
+    /// Check GitHub Releases for a newer version at startup + daily.
+    /// Lifecycle class — deliberately outside the attestation canon (like
+    /// the cosmetic fields): toggling it changes no lock behavior.
+    /// </summary>
+    public bool UpdateCheckEnabled { get; set; } = true;
 }
 
 internal static class ConfigStore

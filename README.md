@@ -87,6 +87,13 @@ your recovery phrase — to unlock.
   the recovery phrase is the hatch (`vault recover`), or `--strict` for
   no hatch at all. Vault tab → Create. Requires the Dokany driver; the app
   reports honestly when it's absent. (`cryptokey vault …` for the CLI verbs.)
+- **Signed auto-update** — checks GitHub Releases at startup + daily for a
+  newer build. Nothing installs itself: an update only applies when you
+  click Install (About tab) or run `cryptokey update --apply`, and never
+  while the session is locked. Releases carry an ECDSA-signed manifest
+  verified against a key pinned in the binary — a compromised repo alone
+  can't push a payload — and the swap keeps the previous install as
+  `CryptoKey.prev` for rollback.
 
 ## Usage
 
@@ -100,6 +107,7 @@ cryptokey lock          # ask the running guard to lock now
 cryptokey pause 10      # pause auto-lock for 10 minutes (default 5)
 cryptokey resume        # end a pause early
 cryptokey quit          # stop the running guard (refused while locked)
+cryptokey update        # check for a newer signed release; --apply installs it
 ```
 
 Flags:

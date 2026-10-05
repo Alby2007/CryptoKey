@@ -24,6 +24,11 @@ cryptokey vault tpm-unbind       # remove the machine binding (image opens anywh
 cryptokey vault recover          # unlock a TPM-locked vault with the recovery phrase
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
+cryptokey update                 # check GitHub Releases for a newer signed build
+cryptokey update --apply         # download + verify + install it (asks the live guard;
+                                 # refused while locked)
+cryptokey sign-release           # maintainer tooling: --gen-key <pem> |
+                                 # <publishDir> <key.pem> [tag] → zip + signed manifest
 cryptokey help                   # usage
 ```
 
@@ -37,6 +42,9 @@ cryptokey --release-desktop                     # SwitchDesktop → Default esca
                                                 # (while locked, the flap monitor yanks you back —
                                                 # 3 tries in 10s escalates to LockWorkStation)
 cryptokey --export-icon <path>                  # dev/internal: regenerate app.ico
+cryptokey apply-update --target <dir>           # spawned by update apply from the staged
+                                                # payload — quits the guard, swaps the
+                                                # install dir, relaunches
 ```
 
 Flags: `--dev` enables the panic exit combo `Ctrl+Alt+Shift+F12`;
@@ -61,7 +69,10 @@ read timeout ~5 s.
 | `resume` | `ok resumed` / `err not paused` | |
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
-| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… build=…` | `watchdog=alive/down` — supervisor liveness; `build` = running guard's version+commit |
+| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… build=… vault=… update=…` | `watchdog=alive/down` — supervisor liveness; `build` = running guard's version+commit; `update` = pending release tag or `-` |
+| `update` / `update status` | `ok update v… pending …` / `ok up to date …` | Last check's result |
+| `update check` | `ok checking` | Runs async — result lands on the next `status`/snapshot |
+| `update apply` | `ok update applying …` / `err locked — …` / `err no update pending` | Refused while Locked; stages the signed payload then hands off to it — the staged `apply-update` quits the guard, swaps the install dir, relaunches |
 | `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… tpm=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`/`tpmlocked`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq; `tpm` = `bound`/`-` |
 | `vault tpm-bind <phrase> [--strict]` | `ok vault bound to this machine` / `err …` | Wraps the pepper under the TPM + seals a phrase-recovery blob (omitted under `--strict`); needs the vault unsealed |
 | `vault tpm-unbind` | `ok vault unbound` / `err …` | Re-wraps slots pepperless + deletes the TPM key |
@@ -111,6 +122,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.VaultMountPoint` | Drive letter — default `V:\`; free letters offered in the Vault page |
 | `Guard.VaultSizeMb` | Image size used by `vault create` — default 256, range 64–8192 |
 | `Guard.VaultIdleMinutes` | Seal the vault after N minutes without input — `0` = off (default). A mounted vault dismounts and drops its keys; the verify feed stays suppressed while idle, so it remounts when input returns |
+| `Guard.UpdateCheckEnabled` | Check GitHub Releases at startup + daily for a newer signed build — default `true`. Notify-only: nothing installs without an explicit apply. Lifecycle class — outside the attestation canon |
 | `VaultEpoch` | Highest vault manifest seq the keyfile has attested — the rollback fence's trusted witness. Managed automatically (synced on open/close/reformat); hand-editing it trips attestation, and setting it past the image flags `rolledback` |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
@@ -159,6 +171,33 @@ The startup entries point at the exe path at registration time — moving
 the binary dead-ends them (re-toggle in Settings to repair). Same for the
 Start Menu `CryptoKey.lnk` shortcut.
 
+## Auto-update
+
+GitHub Releases is the update channel — three assets per release:
+`cryptokey-win-x64.zip` (payload), `SHA256SUMS.txt` (the signed manifest:
+`# release: <tag>` + `<sha256>  <zip>`), `SHA256SUMS.sig` (ECDSA-P256 P1363
+signature over the manifest bytes, maintainer key). The public key is
+pinned in `ReleaseSigning.cs`; the private key lives only in the
+`RELEASE_SIGNING_KEY` Actions secret / the maintainer's PEM — never in
+the tree.
+
+Chain of trust: HTTPS is transport only — acceptance requires (1) a
+strictly newer tag (`v…` — `+build`/`-rc` stripped), (2) a manifest whose
+signature verifies against the pinned key, (3) a `# release:` binding that
+matches the tag (an older signed payload can't be re-served as newer),
+(4) the zip's sha256 matching the manifest, (5) path-safe extraction.
+Checks run at guard start + daily (`Guard.UpdateCheckEnabled`); an update
+is notify-only — apply always needs an explicit click or
+`cryptokey update --apply`, and it's refused while the session is locked.
+Apply stages the payload under `CryptoKey-staging\`, spawns the staged
+`apply-update`, which quits the guard, moves the install to
+`CryptoKey.prev` (rollback net), moves the payload in, and relaunches.
+
+Releasing: `git tag vX.Y.Z && git push origin vX.Y.Z` → `release.yml`
+publishes, signs via `cryptokey sign-release` with the secret key, and
+uploads the three assets. Bump `<Version>` first so the tag and the build
+stamp agree.
+
 ## Files & named objects
 
 | Object | Identity |
@@ -174,6 +213,8 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Tamper captures | `%APPDATA%\CryptoKey\captures\` (newest 50 kept) |
 | Vault image | `%LOCALAPPDATA%\CryptoKey\vault.ckv` (default; `VaultImagePath` overrides) |
 | Vault TPM key | persisted CNG key `CryptoKeyVault` in `Microsoft Platform Crypto Provider`, user-scoped |
+| Update staging | `%LOCALAPPDATA%\CryptoKey-staging\update-<tag>\` (wiped per attempt) |
+| Previous install | `%LOCALAPPDATA%\CryptoKey.prev` — kept as the update rollback net |
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |

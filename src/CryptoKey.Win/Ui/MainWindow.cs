@@ -59,7 +59,7 @@ internal sealed class MainWindow : ChromeForm
                 1 => new SecurityPage(_config, _service, Notify),
                 2 => new VaultPage(_config, _service, Notify),
                 3 => new SettingsPage(_config, _service, Notify),
-                4 => new AboutPage(),
+                4 => new AboutPage(_service, Notify),
                 _ => new DashboardPage(_service, _config, _devMode),
             };
             page.Dock = DockStyle.Fill;

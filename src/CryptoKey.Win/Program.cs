@@ -71,6 +71,8 @@ internal static class Program
         {
             case "install":
                 return Install(args);
+            case "apply-update":
+                return ApplyUpdate(args);
             case "vault":
                 return Vault(args);
             case "help":
@@ -436,6 +438,105 @@ internal static class Program
     }
 
     /// <summary>
+    /// Runs from a STAGED update payload — spawned by the guard's update
+    /// apply (or `cryptokey update --apply` with no guard up). Quits the
+    /// live guard, moves the current install aside as a rollback net,
+    /// moves the staged payload into place, and relaunches. Staging sits
+    /// inside the install dir, so every move here is a same-volume rename.
+    /// Never user-facing — the human confirmation happens upstream.
+    /// </summary>
+    private static int ApplyUpdate(string[] args)
+    {
+        string targetDir = CryptoKeyCli.InstallDir;
+        for (int i = 1; i + 1 < args.Length; i++)
+            if (args[i].Equals("--target", StringComparison.OrdinalIgnoreCase))
+                targetDir = Path.GetFullPath(args[i + 1]);
+        targetDir = targetDir.TrimEnd(Path.DirectorySeparatorChar);
+        string stagedDir = Path.GetFullPath(AppContext.BaseDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar);
+        string backupDir = targetDir + ".prev";
+        string installedExe = Path.Combine(targetDir, "cryptokey.exe");
+        string modeFlags =
+            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
+            (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
+
+        Console.WriteLine($"CryptoKey {CryptoKeyCli.BuildStamp} — applying update to {targetDir}");
+
+        // A live guard owns its files — quit it first. Refused while
+        // locked: abort before touching anything (quit is refused anyway).
+        string? live = IpcClient.Send("status", 400);
+        if (live != null)
+        {
+            if (live.Contains("state=locked", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.WriteLine("Update aborted — the guard is locked. Unlock first.");
+                return 1;
+            }
+            CryptoKeyCli.SendIpc("quit");
+            for (int i = 0; i < 40 && IpcClient.Send("status", 200) != null; i++)
+                Thread.Sleep(250);
+            if (IpcClient.Send("status", 400) != null)
+            {
+                Console.WriteLine("Update aborted — the guard didn't quit in time.");
+                return 1;
+            }
+            Thread.Sleep(500); // handles release a beat after the pipe dies
+        }
+
+        try
+        {
+            if (Directory.Exists(backupDir))
+                Directory.Delete(backupDir, recursive: true);
+            if (Directory.Exists(targetDir))
+                Directory.Move(targetDir, backupDir);
+            Directory.Move(stagedDir, targetDir);
+            PruneRuntimePayload(targetDir); // drop any runtime files the payload carried
+            // Carry user files across — vault.ckv defaults to the install
+            // dir; a payload-only swap would orphan the vault (and logs,
+            // and anything else the dir collected that a release doesn't ship).
+            if (Directory.Exists(backupDir))
+                foreach (string f in Directory.GetFiles(backupDir))
+                {
+                    string dst = Path.Combine(targetDir, Path.GetFileName(f));
+                    if (!File.Exists(dst))
+                        File.Copy(f, dst);
+                }
+        }
+        catch (Exception ex)
+        {
+            // Roll back the swap if the payload never landed.
+            try
+            {
+                if (!Directory.Exists(targetDir) && Directory.Exists(backupDir))
+                    Directory.Move(backupDir, targetDir);
+            }
+            catch { }
+            Console.WriteLine($"Update failed: {ex.Message} — previous install is at {backupDir}");
+            return 1;
+        }
+
+        if (!VerifyInstalledExeRuns(installedExe))
+            Console.WriteLine("WARNING: the updated exe didn't answer a " +
+                $"status probe — the previous install is kept at {backupDir}.");
+
+        // Relaunch the GUI — a dashboard can't outlive its guard process
+        // anyway. No --takeover: the mutex is free by now.
+        try
+        {
+            string? stagingRoot = Path.GetDirectoryName(Path.GetDirectoryName(stagedDir));
+            if (stagingRoot != null)
+                Directory.Delete(stagingRoot, recursive: true);
+        }
+        catch { }
+
+        Process.Start(new ProcessStartInfo(installedExe, modeFlags.TrimStart())
+        { UseShellExecute = true });
+        Console.WriteLine($"Updated — {CryptoKeyCli.BuildStamp} is live. " +
+            $"Previous install kept at {backupDir}.");
+        return 0;
+    }
+
+    /// <summary>
     /// `cryptokey vault …` — power-user/testing verbs. Mount/unmount/create go
     /// to the live guard over IPC when one's running (that's where auto-mount
     /// lives); standalone paths exist for create/status and a foreground
@@ -780,6 +881,12 @@ internal static class Program
         }
         // The install dir keeps files between installs — prune poison that
         // landed from a polluted payload previously.
+        PruneRuntimePayload(target);
+    }
+
+    /// <summary>Delete runtime-payload poison from an install dir in place.</summary>
+    private static void PruneRuntimePayload(string target)
+    {
         foreach (string f in Directory.GetFiles(target))
             if (IsRuntimePayload(Path.GetFileName(f)))
                 try { File.Delete(f); } catch (Exception) { }
@@ -850,6 +957,8 @@ internal static class Program
         Console.WriteLine("                          repoint shortcuts + autostart at it");
         Console.WriteLine("  cryptokey vault …       Encrypted drive: create|status|mount|unmount|delete");
         Console.WriteLine("                          (needs the Dokany driver; create needs the key in)");
+        Console.WriteLine("  cryptokey update        Check for a newer signed release");
+        Console.WriteLine("  cryptokey update --apply  Download, verify + install it (asks the live guard)");
         Console.WriteLine();
         Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12");
         Console.WriteLine("  --classic          force the overlay lock (skip the private desktop)");

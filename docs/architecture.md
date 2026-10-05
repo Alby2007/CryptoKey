@@ -209,6 +209,8 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `Vault/VaultFormat.cs` | CKVAULT1 codecs — header page, KEK derivation, key-slot wrap/unwrap, chunk + manifest AES-GCM framing |
 | `Vault/VaultVolume.cs` | The sealed device: image create/open, case-insensitive dir tree, freelist allocator, chunked R/W, dual-slot manifest with torn-write fallback, `PinnedBuffer` key hygiene |
 | `Vault/VaultService.cs` | Lifecycle owner — consumes verified secrets from the guard, unseals/mounts on verify, force-dismounts on `KeyGone`, slides key slots on rotation |
+| `UpdateChecker.cs` | GitHub-Releases channel: `releases/latest` check, sha256sums manifest parse, signature + tag-binding + hash verification, `.part`-atomic download, safe extract to staging |
+| `ReleaseSigning.cs` | ECDSA-P256 release manifest signing — pinned public key, P1363 r‖s, gen-key/sign helpers for `sign-release` |
 
 ### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
 

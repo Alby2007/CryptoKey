@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.IO.Compression;
 using System.Reflection;
 
 namespace CryptoKey;
@@ -33,6 +35,14 @@ internal static class CryptoKeyCli
         }
     }
 
+    /// <summary>%LOCALAPPDATA%\CryptoKey — the self-install target.</summary>
+    public static string InstallDir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "CryptoKey");
+
+    /// <summary>The release tag this build would ship as: "v0.9.0+abc123".</summary>
+    public static string ReleaseTag => "v" + BuildStamp;
+
     public static int? Run(string[] args, IHostVerbs host)
     {
         if (args.Length == 0)
@@ -64,6 +74,10 @@ internal static class CryptoKeyCli
                 return SendIpc("resume");
             case "quit":
                 return SendIpc("quit");
+            case "update":
+                return Update(args);
+            case "sign-release":
+                return SignRelease(args);
             case "watchdog":
                 // Internal process role — spawned by the guard's Supervisor,
                 // not a user-facing command. --dev/--classic are forwarded
@@ -91,6 +105,125 @@ internal static class CryptoKeyCli
         }
         Console.WriteLine(reply);
         return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
+    }
+
+    /// <summary>
+    /// `cryptokey update [--apply]` — check GitHub for a newer signed
+    /// release. --apply hands the swap to the live guard (which stages,
+    /// quits, and lets the staged exe relaunch it); with no guard running
+    /// it stages + spawns the swap directly. Apply is always user-driven —
+    /// the app never self-replaces unprompted.
+    /// </summary>
+    private static int Update(string[] args)
+    {
+        bool apply = args.Contains("--apply", StringComparer.OrdinalIgnoreCase);
+        if (apply && IpcClient.Send("update apply", 2000) is string reply)
+        {
+            Console.WriteLine(reply);
+            return reply.StartsWith("ok") ? 0 : 1;
+        }
+        Console.WriteLine($"Checking github.com/{UpdateChecker.Repo} …");
+        UpdateInfo? info;
+        try
+        {
+            info = UpdateChecker.CheckAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Check failed: {ex.Message}");
+            return 1;
+        }
+        if (info == null)
+        {
+            Console.WriteLine($"Up to date — this build is {BuildStamp}.");
+            return 0;
+        }
+        Console.WriteLine($"Update: {info.TagName} " +
+            $"(published {info.PublishedAt:yyyy-MM-dd})");
+        if (!apply)
+        {
+            Console.WriteLine("Run 'cryptokey update --apply' to install it.");
+            return 0;
+        }
+        try
+        {
+            // Staging is a SIBLING of the install dir — same volume for the
+            // renames, but outside the tree that gets moved aside.
+            string payload = UpdateChecker.FetchVerifiedAsync(info,
+                InstallDir + "-staging",
+                Console.WriteLine).GetAwaiter().GetResult();
+            string stagedExe = Path.Combine(payload, "cryptokey.exe");
+            if (!File.Exists(stagedExe))
+            {
+                Console.WriteLine("Staged payload is missing cryptokey.exe — aborting.");
+                return 1;
+            }
+            Process.Start(new ProcessStartInfo(
+                stagedExe, $"apply-update --target \"{InstallDir}\"")
+            { UseShellExecute = true });
+            Console.WriteLine("Applying — the staged copy swaps the install and relaunches it.");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Update failed: {ex.Message}");
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// `cryptokey sign-release` — maintainer/release tooling, not a user verb.
+    /// `--gen-key <file.pem>` writes a fresh ECDSA-P256 private key and
+    /// prints the public key to pin in ReleaseSigning.cs.
+    /// `&lt;publishDir&gt; &lt;key.pem&gt;` builds cryptokey-win-x64.zip +
+    /// SHA256SUMS.txt + SHA256SUMS.sig beside the publish dir — attach all
+    /// three to the GitHub release. The private key never enters the repo.
+    /// </summary>
+    private static int SignRelease(string[] args)
+    {
+        if (args.Length >= 3
+            && args[1].Equals("--gen-key", StringComparison.OrdinalIgnoreCase))
+        {
+            (string newPem, string pub) = ReleaseSigning.GenerateKeyPem();
+            File.WriteAllText(args[2], newPem);
+            Console.WriteLine($"Wrote {args[2]} — keep it offline, never commit it.");
+            Console.WriteLine($"Pin this in ReleaseSigning.PinnedPubKeyB64:\n{pub}");
+            return 0;
+        }
+        if (args.Length < 3)
+        {
+            Console.WriteLine("usage: cryptokey sign-release --gen-key <key.pem>");
+            Console.WriteLine("       cryptokey sign-release <publishDir> <key.pem> [tag]");
+            return 1;
+        }
+        string publishDir = args[1], keyPath = args[2];
+        if (!File.Exists(Path.Combine(publishDir, "cryptokey.exe")))
+        {
+            Console.WriteLine($"{publishDir} has no cryptokey.exe — " +
+                "expected a `dotnet publish` output dir.");
+            return 1;
+        }
+        string pem = File.ReadAllText(keyPath);
+        string outDir = Directory.GetParent(Path.GetFullPath(publishDir))!.FullName;
+        string zipPath = Path.Combine(outDir, UpdateChecker.ZipName);
+        // The tag the manifest binds to must be the GitHub release tag —
+        // callers (CI) pass it explicitly; standalone defaults to this build.
+        string tag = args.Length > 3 ? args[3] : ReleaseTag;
+        ZipFile.CreateFromDirectory(
+            publishDir, zipPath, CompressionLevel.SmallestSize, includeBaseDirectory: false);
+        string manifest = $"# release: {tag}\n" +
+            $"{UpdateChecker.Sha256Hex(zipPath)}  {UpdateChecker.ZipName}\n";
+        string manifestPath = Path.Combine(outDir, UpdateChecker.ManifestName);
+        File.WriteAllText(manifestPath, manifest);
+        File.WriteAllBytes(Path.Combine(outDir, UpdateChecker.SigName),
+            ReleaseSigning.Sign(System.Text.Encoding.UTF8.GetBytes(manifest), pem));
+        Console.WriteLine($"Signed {tag}:");
+        Console.WriteLine($"  {zipPath}");
+        Console.WriteLine($"  {manifestPath}");
+        Console.WriteLine($"  {Path.Combine(outDir, UpdateChecker.SigName)}");
+        Console.WriteLine($"Attach all three to GitHub release {tag} — the " +
+            "manifest binds that tag; a different release tag gets refused.");
+        return 0;
     }
 
     /// <summary>Shared load + alert path — corrupt/no-config handling everywhere.</summary>
