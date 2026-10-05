@@ -305,10 +305,23 @@ internal static class Program
             .TrimEnd(Path.DirectorySeparatorChar);
         string installedExe = Path.Combine(targetDir, "cryptokey.exe");
 
+        // Flags the relaunch/handoff paths forward so a --dev guard doesn't
+        // silently lose its panic combo.
+        string modeFlags =
+            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
+            (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
+
         bool relaunchInstalled = false;
         if (sourceDir.Equals(targetDir, StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"Already running from {targetDir} — skipping the copy.");
+        }
+        else if (sourceDir.StartsWith(targetDir + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"Refusing: {sourceDir} is inside the install dir — " +
+                "the copy would recurse into itself.");
+            return 1;
         }
         else
         {
@@ -398,10 +411,12 @@ internal static class Program
         }
 
         // The quit-to-refresh path killed the guard to free the files —
-        // put the freshly-installed copy back without another prompt.
+        // put the freshly-installed copy back without another prompt,
+        // keeping its mode flags.
         if (relaunchInstalled)
         {
-            Process.Start(new ProcessStartInfo(installedExe) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(installedExe, modeFlags.TrimStart())
+            { UseShellExecute = true });
             Console.WriteLine("Relaunched the installed copy.");
             return 0;
         }
@@ -426,14 +441,18 @@ internal static class Program
             return 0;
         }
 
-        string takeArgs = "guard --takeover" +
-            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
-            (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
+        // Bare exe --takeover (not "guard --takeover") — a GUI guard should
+        // hand off to a GUI guard so the tray app survives the switch.
+        string takeArgs = "--takeover" + modeFlags;
         Process.Start(new ProcessStartInfo(installedExe, takeArgs)
         { UseShellExecute = false, CreateNoWindow = true });
-        Console.WriteLine(SendIpc("quit") == 0
-            ? "Handed off — the installed guard is live."
-            : "Quit refused — the takeover guard claims the mutex when the old one exits.");
+        if (SendIpc("quit") == 0)
+            Console.WriteLine("Handed off — the installed guard is live.");
+        else
+            // The takeover parks on the guard mutex with a 30s deadline —
+            // a refused quit means it dies there and nothing hands off.
+            Console.WriteLine("Quit refused — the takeover parks 30s then dies; " +
+                "unlock, quit, and relaunch the installed copy yourself.");
         return 0;
     }
 

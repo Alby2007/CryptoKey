@@ -108,7 +108,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 
 | File | Role |
 |---|---|
-| `Program.cs` | argv dispatch, mutex/takeover, watchdog + release modes, `status`, `install` — self-install to `%LOCALAPPDATA%\CryptoKey` (copy tree, repoint shortcuts/autostart, live handoff via `guard --takeover`) |
+| `Program.cs` | argv dispatch, mutex/takeover, watchdog + release modes, `status`, `install` — self-install to `%LOCALAPPDATA%\CryptoKey` (copy tree, repoint shortcuts/autostart, live handoff via bare `--takeover` so a GUI guard hands off to a GUI guard) |
 | `GuardService.cs` | State machine, unlock policy, backoff, ratchet orchestration, IPC dispatch, config reload |
 | `UsbMonitor.cs` | WMI polling, presence events, error logging |
 | `KeyVerifier.cs` | v2 envelope wrap/unwrap, legacy keyfile compat, `RotateKeyfiles` |

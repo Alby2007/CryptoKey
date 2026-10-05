@@ -240,8 +240,9 @@ internal sealed class Supervisor
 {
     private readonly Action<string> _log;
     // Latched by Shutdown — a dying guard's tick must not respawn a watchdog
-    // in the gap between Stop() (mutex release) and process exit.
-    private bool _shutdown;
+    // in the gap between Stop() (mutex release) and process exit. Volatile:
+    // written on the UI thread, read on the SlowTick pool thread.
+    private volatile bool _shutdown;
 
     public Supervisor(Action<string> log) => _log = log;
 
