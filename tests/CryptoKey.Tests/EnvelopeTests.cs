@@ -175,6 +175,53 @@ public class EnvelopeTests
     }
 
     [Fact]
+    public void No_epoch_canon_still_verifies()
+    {
+        // Tier-1 keyfiles carry the canon without `vaultepoch` — the
+        // three-candidate check must accept them, then the next write
+        // silently upgrades to the epoch-included form.
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig config = TestDisk.NewConfig(secret);
+        byte[] attest = ConfigStore.ComputeAttestNoEpoch(secret, config);
+        byte[] plain = new byte[64 + 32];
+        Buffer.BlockCopy(secret, 0, plain, 0, 64);
+        Buffer.BlockCopy(attest, 0, plain, 64, 32);
+        byte[] blob = Platform.Services.Protector.Protect(
+            plain, KeyVerifier.ProtectorEntropy);
+        byte[] file = new byte[4 + blob.Length];
+        "CKY2"u8.ToArray().CopyTo(file, 0);
+        Buffer.BlockCopy(blob, 0, file, 4, blob.Length);
+
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out byte[]? back, out AttestState attestState, out _));
+        Assert.Equal(secret, back);
+        Assert.Equal(AttestState.Ok, attestState);
+    }
+
+    [Fact]
+    public void Epoch_in_canon_trips_mismatch()
+    {
+        // VaultEpoch is canon-covered: a config whose epoch moved on from
+        // the wrap-time value (e.g. replaced with an older copy) must
+        // mismatch — that's what lets the vault catch a rolled-back image.
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig config = TestDisk.NewConfig(secret);
+        config.VaultEpoch = 5;
+        byte[] file = KeyVerifier.WrapKeyfile(secret, config);
+
+        config.VaultEpoch = 6; // rolled back / diverged after the wrap
+        // Still returns true — the caller needs the secret to re-attest.
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out _, out AttestState attest, out _));
+        Assert.Equal(AttestState.Mismatch, attest);
+
+        config.VaultEpoch = 5; // restored — verifies again
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out _, out attest, out _));
+        Assert.Equal(AttestState.Ok, attest);
+    }
+
+    [Fact]
     public void Canon_is_deterministic_and_covering()
     {
         byte[] secret = TestDisk.RandomSecret();

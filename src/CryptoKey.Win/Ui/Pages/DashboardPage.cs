@@ -383,6 +383,7 @@ internal sealed class DashboardPage : UserControl
                 VaultState.Unsealed => ("vault unsealed", Theme.AccentAmber),
                 VaultState.NeedsDriver => ("vault needs driver", Theme.AccentAmber),
                 VaultState.SealedDead => ("vault dead", Theme.AccentRed),
+                VaultState.RolledBack => ("vault rolled back", Theme.AccentRed),
                 VaultState.Corrupt => ("vault corrupt", Theme.AccentRed),
                 _ => ("vault sealed", Theme.TextDim),
             };

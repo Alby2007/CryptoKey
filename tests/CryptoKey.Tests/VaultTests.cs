@@ -710,4 +710,331 @@ public class VaultTests : IDisposable
         // Synchronous — a rejected peek never reaches the async open.
         Assert.Equal(VaultState.Corrupt, vault.State);
     }
+
+    // ------------------------------------------------------- crash orphans
+
+    private static void BumpHighWater(VaultVolume vol, int plus)
+    {
+        // Simulate allocations the manifest forgot — the exact inconsistency
+        // RebuildFreeList reclaims (reachable via reflection only: the real
+        // writer never persists a self-inconsistent manifest).
+        var f = typeof(VaultVolume).GetField("_highWater",
+            System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance)!;
+        f.SetValue(vol, (int)f.GetValue(vol)! + plus);
+    }
+
+    [Fact]
+    public void Crash_discards_unflushed_allocations_cleanly()
+    {
+        // Write-through chunks land immediately; a crash before Flush leaves
+        // them allocated-but-unreferenced. The persisted manifest's high-
+        // water never covered them, so reopen stays consistent (no heal) and
+        // the dead chunks recycle through the watermark naturally.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var vol = VaultVolume.Create(path, 16, secret, 1);
+        vol.CreateFile("\\work.bin", out _);
+        vol.Write("\\work.bin", 0,
+            new byte[VaultFormat.ChunkPayload * 2], out _);
+        vol.SimulateCrash(); // die before Flush — the manifest never saw the file
+
+        using (var v2 = Open(path, secret))
+        {
+            Assert.Equal(0, v2.LastHealOrphans); // manifest was consistent
+            Assert.False(v2.TryGet("\\work.bin", out _)); // node unflushed — gone
+            // Recycled chunks are allocatable again — write + read back.
+            v2.CreateFile("\\new.bin", out _);
+            v2.Write("\\new.bin", 0, "recovered"u8.ToArray(), out _);
+            byte[] buf = new byte[16];
+            Assert.Equal(9, v2.Read("\\new.bin", 0, buf));
+            Assert.Equal("recovered"u8.ToArray(), buf[..9]);
+        }
+    }
+
+    [Fact]
+    public void Heal_recovers_orphans_and_ignores_sparse_holes()
+    {
+        // Persist a manifest whose high-water accounts for chunks that are
+        // neither referenced nor free — RebuildFreeList must reclaim them.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\b.bin", out _);
+            // Sparse: write at offset 2 chunks in — chunk table carries a
+            // -1 hole; chunks 0 and 1 land referenced.
+            vol.Write("\\b.bin", 2L * VaultFormat.ChunkPayload,
+                new byte[VaultFormat.ChunkPayload], out _);
+            BumpHighWater(vol, 3); // three phantom allocations below hw
+        } // Dispose flushes the inconsistent manifest
+
+        using var v2 = Open(path, secret);
+        Assert.Equal(3, v2.LastHealOrphans);
+        (int alloc, int highWater, int freed) = v2.DebugChunkStats();
+        Assert.Equal(1, alloc);      // b.bin's one real chunk (holes skipped)
+        Assert.Equal(4, highWater);  // persisted 1 + the 3 phantoms
+        Assert.Equal(3, freed);      // all phantoms reclaimed
+    }
+
+    [Fact]
+    public void Duplicate_chunk_reference_fails_open_as_corrupt()
+    {
+        // A manifest that double-references a chunk would double-free and
+        // double-alloc it — real corruption, fail loud instead of healing.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\dup.bin", out _);
+            vol.Write("\\dup.bin", 0, new byte[VaultFormat.ChunkPayload], out _);
+            Assert.True(vol.TryGet("\\dup.bin", out VaultNode n));
+            n.Chunks.Add(n.Chunks[0]); // same physical chunk referenced twice
+            vol.Flush();
+        }
+        byte[] kek = KekFor(path, secret);
+        Assert.False(VaultVolume.TryOpen(path, kek, out _,
+            out VaultOpenError err, out _));
+        Assert.Equal(VaultOpenError.Corrupt, err);
+        CryptographicOperations.ZeroMemory(kek);
+    }
+
+    [Fact]
+    public void Garbage_free_entries_are_clamped_on_open()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            // Inject a garbage freelist entry (past the high-water) — only
+            // reachable via reflection; it lands in the flushed manifest.
+            var free = (SortedSet<int>)typeof(VaultVolume)
+                .GetField("_free", System.Reflection.BindingFlags.NonPublic
+                    | System.Reflection.BindingFlags.Instance)!
+                .GetValue(vol)!;
+            free.Add(vol.ChunkCount + 5); // past the region — impossible id
+            vol.CreateFile("\\touch.txt", out _); // marks the manifest dirty
+        } // Dispose flushes the tampered freelist
+
+        using var v2 = Open(path, secret); // clamped on load — open succeeds
+        (int alloc, int highWater, int freed) = v2.DebugChunkStats();
+        Assert.Equal(0, alloc);
+        Assert.Equal(0, freed); // nothing referenced, nothing orphaned
+    }
+
+    [Fact]
+    public void Clean_open_reports_no_heal_and_stays_clean()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        using (var vol = Open(path, secret))
+        {
+            Assert.Equal(0, vol.LastHealOrphans);
+            Assert.Equal(1ul, vol.ManifestSeq);
+        }
+        // A clean open never dirtied the manifest — seq must not advance.
+        using (var vol = Open(path, secret))
+            Assert.Equal(1ul, vol.ManifestSeq);
+    }
+
+    [Fact]
+    public void Healed_freelist_persists_across_reopen()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\keep.bin", out _); // empty node — forces dirty
+            BumpHighWater(vol, 1);             // one phantom alloc
+        }
+
+        using (var v2 = Open(path, secret))
+            Assert.Equal(1, v2.LastHealOrphans); // heal ran + marked dirty
+        // Dispose flushed the repaired freelist — next open is clean.
+        using (var v3 = Open(path, secret))
+            Assert.Equal(0, v3.LastHealOrphans);
+    }
+
+    // ------------------------------------------------------ epoch / rollback
+
+    [Fact]
+    public void Open_adopts_epoch_forward_and_flags_reattest()
+    {
+        // Image ahead of config (crash between flush and epoch save, or the
+        // config came from an older backup) — the epoch adopts forward.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\f.txt", out _);
+            vol.Write("\\f.txt", 0, "x"u8.ToArray(), out _);
+            vol.Flush(); // seq 2 — past the create-time seq 1
+        }
+        KeyConfig c = VaultConfig(path); // VaultEpoch = 0
+        int mutated = 0;
+        var mounter = new TestMounter();
+        using var vault = new VaultService(c, mounter, _ => { },
+            () => mutated++);
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+        Assert.Equal(2ul, c.VaultEpoch);   // adopted the image's seq
+        Assert.Equal(1, mutated);          // re-attest flagged
+    }
+
+    [Fact]
+    public void Rolled_back_image_flags_and_holds()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\f.txt", out _);
+            vol.Flush(); // seq 2
+        }
+        KeyConfig c = VaultConfig(path);
+        c.VaultEpoch = 10; // attested beyond the image — it looks rolled back
+        var mounter = new TestMounter();
+        var logs = new List<string>();
+        using var vault = new VaultService(c, mounter, logs.Add);
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.RolledBack, vault.State);
+        Assert.Equal(0, mounter.MountCount); // never mounts a stale image
+        Assert.Contains(logs, l => l.Contains("predates attested epoch"));
+
+        // Same-gen re-verify is a no-op; a fresh edge re-detects (one log
+        // per key cycle — no flap loop, Mount stays at zero throughout).
+        vault.KeyVerified(secret.ToArray(), 1);
+        vault.KeyVerified(secret.ToArray(), 2);
+        Assert.Equal(VaultState.RolledBack, vault.State);
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 3);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.RolledBack, vault.State);
+        Assert.Equal(0, mounter.MountCount);
+    }
+
+    [Fact]
+    public void AcceptRollback_recovers_the_image()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (var vol = VaultVolume.Create(path, 16, secret, 1))
+        {
+            vol.CreateFile("\\f.txt", out _);
+            vol.Flush();
+        }
+        KeyConfig c = VaultConfig(path);
+        c.VaultEpoch = 10;
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.RolledBack, vault.State);
+
+        Assert.True(vault.AcceptRollback(out string err), err);
+        Assert.Equal(2ul, c.VaultEpoch);   // epoch moved DOWN to the image's seq
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State); // re-opened + auto-mounted
+    }
+
+    [Fact]
+    public void AcceptRollback_refuses_without_pending_rollback()
+    {
+        KeyConfig c = VaultConfig(Img()); // no image, nothing pending
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+        Assert.False(vault.AcceptRollback(out string err));
+        Assert.NotEmpty(err);
+    }
+
+    [Fact]
+    public void Reformat_resets_the_epoch()
+    {
+        // A reformatted image is seq 1 again — without the reset it would
+        // read as rolled-back against the old high epoch forever.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        c.VaultEpoch = 42; // as if a long-lived vault had attested high
+        var mounter = new TestMounter();
+        using var vault = new VaultService(c, mounter, _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(1ul, c.VaultEpoch);  // reset to the fresh image's seq
+        Assert.Equal(VaultState.Mounted, vault.State); // not RolledBack
+
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State); // opens cleanly
+    }
+
+    [Fact]
+    public void Sealed_through_rotation_recovers_under_prev_secret()
+    {
+        // Regression: a rotation landing while the vault was closed left
+        // slots wrapping only the old generation — the new keyfile's KEK
+        // unwrapped nothing and the image went SealedDead forever. The
+        // service retains the displaced secret one cycle and falls back to
+        // it, then re-wraps the slots into the current window.
+        string path = Img();
+        byte[] genA = TestDisk.RandomSecret();
+        byte[] genB = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        var mounter = new TestMounter();
+        var logs = new List<string>();
+        using var vault = new VaultService(c, mounter, logs.Add);
+
+        // Feed gen 1 with no image yet — the service holds A as current.
+        vault.KeyVerified(genA.ToArray(), 1);
+        Assert.Equal(VaultState.NoImage, vault.State);
+
+        // The image appears out-of-band, wrapped under gen 1 — the service
+        // hasn't opened it, and the drive has since rotated to gen 2.
+        using (VaultVolume.Create(path, 16, genA, 1)) { }
+        vault.KeyVerified(genB.ToArray(), 2); // cur=2; prev=A retained
+        Assert.True(vault.WaitForPendingOps());
+
+        // Current gen fails the stale slots; the fallback must rescue it.
+        Assert.Equal(VaultState.Mounted, vault.State);
+        Assert.Contains(logs,
+            l => l.Contains("opened under the previous secret"));
+        // Slots re-wrapped on adopt — the image now opens under gen 2.
+        VaultHeader peeked = VaultVolume.PeekHeader(path)!;
+        Assert.Equal((2u, 1u),
+            (peeked.KeySlots[0].RotationGen, peeked.KeySlots[1].RotationGen));
+        vault.KeyGone(); // release the service's handle before probing
+        using (Open(path, genB)) { } // opens under the current secret alone
+    }
+
+    [Fact]
+    public void Close_checkpoints_the_epoch()
+    {
+        // A mounted session flushes on teardown — the attested epoch must
+        // follow so the same image doesn't read as rolled-back next open.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(1ul, c.VaultEpoch);
+
+        // Dirty the live volume so KeyGone's dispose-flush bumps seq to 2.
+        var live = (VaultVolume)typeof(VaultService)
+            .GetField("_vol", System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Instance)!
+            .GetValue(vault)!;
+        live.CreateFile("\\late.txt", out _);
+        vault.KeyGone();
+
+        Assert.Equal(2ul, c.VaultEpoch); // checkpoint followed the late flush
+    }
 }

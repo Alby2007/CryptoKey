@@ -24,6 +24,7 @@ for the rest.
 | `SwitchDesktop`-away attack | Flap monitor — while the secure desktop is engaged it polls `OpenInputDesktop` every ~300ms inside `_engageSync`; a foreign input desktop gets re-switched instantly, ≥3 in 10s escalates to `LockWorkStation` + alert + snap (the attacker lands on real OS auth). Legit paths — `Winlogon` by name, or an `OpenInputDesktop` failure (the SAS ACL-deny tell) — are skipped, not counted |
 | Stolen machine / copied `vault.ckv` | The vault image holds only an AES-GCM-wrapped volume key — the KEK derives from the **device secret**, which lives nowhere but the USB key. No key, no mount; filenames are ciphertext too |
 | Vault visible to another logged-in user | The Dokan mount is session-scoped (no MountManager registration) and the reported ACL names only the owning SID — other sessions can't see the letter |
+| Swapped-in older `vault.ckv` (rollback) | The manifest `seq` is monotonic; `VaultEpoch` — inside the keyfile's attestation MAC — remembers the highest seq attested. An older image never mounts: it gates at `RolledBack` until an explicit `accept-rollback` ratifies it. **Honest bound:** the fence can't tell "attacker restored an old copy" from "your backup is legitimately behind" — it stops the world and asks; the judgment call stays the user's |
 
 | Does **not** defend against | Why |
 |---|---|
@@ -87,7 +88,9 @@ stronger proof than the credential anyway.
   deterministic canon of the security-relevant Guard fields (`UnlockPolicy`,
   `StrictTamper`, `LockMode`, `LockOnRemoval`, `Watchdog`, `LockPolicies`,
   `IdleLockMinutes`, `WebcamOnTamper`, `AlertUrl`, `VaultEnabled`,
-  `VaultAutoMount`, `VaultIdleMinutes`, `PollIntervalMs`) — an off-app edit
+  `VaultAutoMount`, `VaultIdleMinutes`, `PollIntervalMs`) plus `VaultEpoch`
+  — the vault image's manifest-seq witness (see the rollback fence below)
+  — an off-app edit
   that silently downgrades security trips the wire. Cosmetic/layout fields
   (Sounds, BalloonTips, Animations, mount letter, image path, size) are
   deliberately outside it. Semantics are **announce, then ratify**: a
@@ -98,7 +101,9 @@ stronger proof than the credential anyway.
   dismisses the flag still wins; the defense is the noise it makes.
 - **Legacy 64-byte files** (pre-v2 raw secret) verify as `AttestState.Missing`
   — "pre-attestation" — and self-upgrade on the next rotation. They log
-  once; they don't raise the clone alarm.
+  once; they don't raise the clone alarm. Reads accept three attestation
+  forms fixed-time — epoch canon, pre-epoch canon, legacy serial+phrase —
+  while writes always emit the newest form.
 - Envelope parsing is strict: bad magic, DPAPI unwrap failure, short
   plaintext, or a fixed-time attestation mismatch all classify cleanly —
   unwrap failures are treated as "not ours" and fail closed.
@@ -144,10 +149,19 @@ Every rotation edge the vault service witnesses rewrites both slots
 (`{cur, prev}` slides forward), so a copied `.cryptokey` opens the vault
 only inside the same one-generation window it can unlock the PC in. A
 cloned drive stopped being useful the moment the real key rotated twice;
-so does a vault it could once unseal. The other edge of the knife: an
-image that misses two consecutive rotations (vault created, key rotated
-twice without the vault ever mounting) is sealed **permanently** — the
-volume key exists nowhere else, by design.
+so does a vault it could once unseal. The service also retains the
+displaced generation in memory for one feed as an open-fallback, so an
+image sealed through a rotation still unseals and re-wraps forward. The
+other edge of the knife: an image that misses the feed window entirely —
+two consecutive rotations, or a rotation while no verified session holds
+either secret — is sealed **permanently** — the volume key exists nowhere
+else, by design.
+
+Independently of the key window, `VaultEpoch` rides inside the attestation
+canon as the vault's monotonic witness: the service checkpoints the
+manifest seq at every open/close/reformat boundary, so an image swapped
+for an older copy fails the fence rather than silently serving stale
+files — and editing the epoch by hand trips attestation itself.
 
 ## Unlock policies
 

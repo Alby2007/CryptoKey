@@ -22,6 +22,11 @@ internal enum VaultState
     Unsealed,
     /// <summary>Mounted at a drive letter.</summary>
     Mounted,
+    /// <summary>The image's manifest seq predates the config's attested
+    /// epoch — a rolled-back copy (or a restored older backup). Every tag
+    /// verifies; it's just OLD. Holds until the user accepts via
+    /// <see cref="AcceptRollback"/> or restores the newer image.</summary>
+    RolledBack,
 }
 
 /// <summary>
@@ -39,12 +44,16 @@ internal sealed class VaultService : IDisposable
     private readonly KeyConfig _config;
     private readonly IVaultMounter _mounter;
     private readonly Action<string> _log;
+    private readonly Action? _configMutated;
 
     private PinnedBuffer? _secret;     // newest verified device secret
     private uint _secretGen;
+    private PinnedBuffer? _prevSecret; // displaced generation — open-path fallback
+    private uint _prevGen;             // so a sealed-through-rotation image still opens
     private VaultVolume? _vol;         // open image — volKey lives inside
     private IVaultMount? _mount;
     private VaultState _state = VaultState.Disabled;
+    private ulong _rejectedSeq;        // manifest seq of a detected rollback — persists until accepted
     private int _opSeq;                // bumped on every lifecycle event; stale async commits drop
     private int _unmountSeq;           // bumped on TryUnmount — a mount issued before it drops
     private Task? _pendingOps;         // in-flight unseal/auto-mount chain (for CLI/test waits)
@@ -53,11 +62,17 @@ internal sealed class VaultService : IDisposable
     /// <summary>Raised (on the caller's thread) whenever <see cref="State"/> changes.</summary>
     public event Action? StatusChanged;
 
-    public VaultService(KeyConfig config, IVaultMounter mounter, Action<string> log)
+    /// <param name="configMutated">Invoked after a <see cref="KeyConfig.VaultEpoch"/>
+    /// write — the guard passes its re-attest flag so the keyfile catches up
+    /// on the next verify. CLI callers pass null (a CLI-driven epoch bump
+    /// desyncs attestation until the guard's next verify announces+heals).</param>
+    public VaultService(KeyConfig config, IVaultMounter mounter,
+        Action<string> log, Action? configMutated = null)
     {
         _config = config;
         _mounter = mounter;
         _log = log;
+        _configMutated = configMutated;
         _state = InitialState();
     }
 
@@ -178,28 +193,19 @@ internal sealed class VaultService : IDisposable
             {
                 SetState(VaultState.NoImage);
             }
-            else if (_vol == null && ImageExists)
+            else if (_vol == null && ImageExists && _state != VaultState.RolledBack)
             {
                 // Sealed image — unwrap under the verified secret. The heavy
                 // part (two 4 MiB manifest slots + JSON) runs off the
                 // caller's thread so the guard's UI pump doesn't stall.
-                VaultHeader? peek = VaultVolume.PeekHeader(ImagePath,
-                    out VaultOpenError peekErr);
-                if (peek == null)
+                // RolledBack is excluded: a detected rollback holds until the
+                // user accepts it — no paced-retry flap while awaiting that.
+                if (!QueueOpenLocked(held, prevHeld, seq))
                 {
-                    // NoImage = transient/missing → stay Sealed, paced retry.
-                    // BadFormat = both pages rejected (e.g. a v1 image or
-                    // genuine header corruption) — Corrupt, which retries too.
-                    SetState(peekErr == VaultOpenError.NoImage
-                        ? (ImageExists ? VaultState.Sealed : VaultState.NoImage)
-                        : VaultState.Corrupt);
                     if (!retryOpen)
-                        prevHeld?.Dispose(); // held swapped in — old secret dies here
+                        RetainPrev(prevHeld, prevGen);
                     return;
                 }
-                _lastOpenAttempt = Environment.TickCount64;
-                byte[] kek = VaultFormat.DeriveKek(held.Bytes, peek.Salt);
-                _pendingOps = Task.Run(() => OpenThenMount(kek, seq));
             }
             else if (_vol != null && !retryOpen)
             {
@@ -228,10 +234,83 @@ internal sealed class VaultService : IDisposable
             }
 
             if (!retryOpen)
-                prevHeld?.Dispose(); // old generation's secret — fully replaced
+                RetainPrev(prevHeld, prevGen); // displaced gen — open-path fallback
             if (_vol != null)
                 KickAutoMount(seq); // heal-mount after a rewrap edge
         }
+    }
+
+    /// <summary>
+    /// Retain the just-displaced secret for one generation as the open
+    /// path's fallback: an image sealed through a rotation still has its
+    /// slots wrapped under the older secret — <see cref="OpenThenMount"/>
+    /// tries this KEK when the current one unwraps nothing. KeyGone drops
+    /// it with everything else; the next feed rotates it out.
+    /// </summary>
+    private void RetainPrev(PinnedBuffer? prev, uint gen)
+    {
+        if (prev == null || ReferenceEquals(prev, _secret))
+            return; // retryOpen reuses the live buffer — never self-alias
+        _prevSecret?.Dispose();
+        _prevSecret = prev;
+        _prevGen = gen;
+    }
+
+    /// <summary>
+    /// Queue the heavy unseal on a pool thread — the header peek is the
+    /// cheap pre-flight under the lock; the manifest load runs in
+    /// <see cref="OpenThenMount"/>. Shared by KeyVerified's open branch and
+    /// <see cref="AcceptRollback"/>'s re-open. <paramref name="prev"/> is the
+    /// displaced generation (open-path fallback for images sealed through a
+    /// rotation).
+    /// </summary>
+    private bool QueueOpenLocked(PinnedBuffer held, PinnedBuffer? prev, int seq)
+    {
+        VaultHeader? peek = VaultVolume.PeekHeader(ImagePath,
+            out VaultOpenError peekErr);
+        if (peek == null)
+        {
+            // NoImage = transient/missing → stay Sealed, paced retry.
+            // BadFormat = both pages rejected (e.g. a v1 image or
+            // genuine header corruption) — Corrupt, which retries too.
+            SetState(peekErr == VaultOpenError.NoImage
+                ? (ImageExists ? VaultState.Sealed : VaultState.NoImage)
+                : VaultState.Corrupt);
+            return false;
+        }
+        _lastOpenAttempt = Environment.TickCount64;
+        byte[] kek = VaultFormat.DeriveKek(held.Bytes, peek.Salt);
+        // One slot may lag the newest generation — the prev-secret KEK is
+        // the fallback that rescues an image sealed through a rotation.
+        byte[]? kekPrev = prev != null && !ReferenceEquals(prev, held)
+            ? VaultFormat.DeriveKek(prev.Bytes, peek.Salt)
+            : null;
+        _pendingOps = Task.Run(() => OpenThenMount(kek, kekPrev, seq));
+        return true;
+    }
+
+    /// <summary>
+    /// Checkpoint <see cref="KeyConfig.VaultEpoch"/> to the volume's current
+    /// manifest seq — the trusted-store side of the rollback tripwire.
+    /// Forward-only unless <paramref name="force"/> (create/reformat reset,
+    /// accepted rollback — the only legit downward moves). Config-save
+    /// failure leaves the in-memory epoch low: the next open adopts forward.
+    /// </summary>
+    private void SyncEpoch(VaultVolume vol, bool force = false)
+    {
+        ulong seq = vol.ManifestSeq;
+        if (seq == _config.VaultEpoch || (!force && seq < _config.VaultEpoch))
+            return;
+        _config.VaultEpoch = seq;
+        try
+        {
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex)
+        {
+            _log($"Vault epoch save failed ({ex.Message}) — the next open re-syncs.");
+        }
+        _configMutated?.Invoke(); // re-attest covers the new epoch on next verify
     }
 
     /// <summary>
@@ -239,14 +318,23 @@ internal sealed class VaultService : IDisposable
     /// the lock only if this secret is still the live one (a KeyGone or
     /// newer verify bumps <see cref="_opSeq"/> and drops the result).
     /// </summary>
-    private void OpenThenMount(byte[] kek, int seq)
+    private void OpenThenMount(byte[] kek, byte[]? kekPrev, int seq)
     {
         VaultVolume? vol = null;
         VaultOpenError err = VaultOpenError.None;
         int slot = -1;
+        bool usedPrev = false;
         try
         {
             VaultVolume.TryOpen(ImagePath, kek, out vol, out err, out slot);
+            if (vol == null && err == VaultOpenError.Sealed && kekPrev != null)
+            {
+                // Slots lag the keyfile (image sealed through a rotation) —
+                // the previous generation's secret still unwraps slot B.
+                VaultVolume.TryOpen(ImagePath, kekPrev,
+                    out vol, out err, out slot);
+                usedPrev = vol != null;
+            }
         }
         catch (Exception ex)
         {
@@ -254,22 +342,59 @@ internal sealed class VaultService : IDisposable
             err = VaultOpenError.Corrupt;
             _log($"Vault open error: {ex.Message}");
         }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(kek);
-        }
 
         bool adopted = false;
         bool autoMount = false;
         int useq = 0;
+        try
+        {
         lock (this)
         {
             bool alive = seq == _opSeq && _vol == null;
+            if (vol != null && alive
+                && vol.ManifestSeq < _config.VaultEpoch)
+            {
+                // Rolled-back image: every tag verifies (it IS authentic) —
+                // it's just older than the epoch this config attested. The
+                // trusted copy lives under the keyfile MAC; a forged or
+                // replayed older image can't out-vote it. Hold for the
+                // user's decision — no mount, no paced re-open.
+                _rejectedSeq = vol.ManifestSeq;
+                vol.Dispose();
+                SetState(VaultState.RolledBack);
+                _log($"Vault image predates attested epoch (img {_rejectedSeq} " +
+                    $"< attested {_config.VaultEpoch}) — rolled-back copy?");
+                return;
+            }
             if (vol != null && alive)
             {
                 _vol = vol;
                 adopted = true;
+                if (vol.ManifestSeq > _config.VaultEpoch)
+                {
+                    // Config is the stale side — a crash between flush and
+                    // epoch save, or config restored from an older backup.
+                    SyncEpoch(vol);
+                }
                 _log($"Vault unsealed (key slot {slot}, wrapped at gen {PeekSlotGen(vol, slot)}).");
+                if (usedPrev && kekPrev != null)
+                {
+                    // Opened under the displaced generation — the slots lag
+                    // the keyfile. Re-wrap {cur, prev} now so the next open
+                    // doesn't need the fallback again.
+                    try
+                    {
+                        vol.ReWrapKeys(kek, kekPrev, _secretGen, _prevGen);
+                        _log("Vault opened under the previous secret — " +
+                            "key slots re-wrapped to the current window.");
+                    }
+                    catch (Exception ex)
+                    {
+                        _log($"Slot re-wrap after fallback open failed ({ex.Message}).");
+                    }
+                }
+                if (vol.LastHealOrphans > 0)
+                    _log($"Vault self-heal: {vol.LastHealOrphans} orphaned chunks reclaimed.");
                 if (!_mounter.DriverPresent)
                     SetState(VaultState.NeedsDriver);
                 else if (!_config.Guard.VaultAutoMount)
@@ -296,6 +421,13 @@ internal sealed class VaultService : IDisposable
         // Same pool task runs the mount — _pendingOps covers the whole chain.
         if (adopted && autoMount)
             MountBody(vol!, seq, useq);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+            if (kekPrev != null)
+                CryptographicOperations.ZeroMemory(kekPrev);
+        }
     }
 
     /// <summary>
@@ -428,6 +560,9 @@ internal sealed class VaultService : IDisposable
             _secret?.Dispose();
             _secret = null;
             _secretGen = 0;
+            _prevSecret?.Dispose(); // the fallback dies with the session too
+            _prevSecret = null;
+            _prevGen = 0;
             if (_state == VaultState.Disabled)
                 return;
             SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
@@ -458,6 +593,10 @@ internal sealed class VaultService : IDisposable
             try
             {
                 _vol = VaultVolume.Create(ImagePath, sizeMb, _secret.Bytes, _secretGen);
+                // A fresh image starts at seq 1 — the epoch must follow the
+                // image, not the other way around (else the next open reads
+                // it as rolled-back).
+                SyncEpoch(_vol, force: true);
                 _log($"Vault image created ({sizeMb} MB) — wrapped at gen {_secretGen}.");
             }
             catch (Exception ex)
@@ -489,6 +628,7 @@ internal sealed class VaultService : IDisposable
                 if (File.Exists(ImagePath))
                     File.Delete(ImagePath);
                 _vol = VaultVolume.Create(ImagePath, sizeMb, _secret.Bytes, _secretGen);
+                SyncEpoch(_vol, force: true); // fresh seq=1 — reset the epoch
                 _log($"Vault reformatted ({sizeMb} MB) — all previous contents destroyed.");
             }
             catch (Exception ex)
@@ -575,6 +715,48 @@ internal sealed class VaultService : IDisposable
         }
     }
 
+    /// <summary>
+    /// The user accepted a rolled-back image: ratchet the attested epoch
+    /// DOWN to the image's seq (the only downward move — user-gated), then
+    /// re-open under the held secret. Requires the verified key in memory.
+    /// </summary>
+    public bool AcceptRollback(out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_state != VaultState.RolledBack)
+            {
+                error = "no rolled-back image pending";
+                return false;
+            }
+            if (_secret == null)
+            {
+                error = "insert your key to accept";
+                return false;
+            }
+            _config.VaultEpoch = _rejectedSeq;
+            try
+            {
+                ConfigStore.Save(_config);
+            }
+            catch (Exception ex)
+            {
+                error = $"epoch save failed: {ex.Message}";
+                return false;
+            }
+            _configMutated?.Invoke();
+            _rejectedSeq = 0;
+            SetState(VaultState.Sealed);
+            // Re-open now — the seq-compare passes, so the image adopts and
+            // auto-mount resumes. A failed peek lands on the normal
+            // retry cadence from here.
+            QueueOpenLocked(_secret, _prevSecret, _opSeq);
+            _log("Rolled-back vault state accepted — re-opening.");
+            return true;
+        }
+    }
+
     /// <summary>Repoint the mount letter for the next mount.</summary>
     public void ApplyMountPoint(string letter)
         => _config.Guard.VaultMountPoint = letter;
@@ -591,15 +773,19 @@ internal sealed class VaultService : IDisposable
         m.Detached -= OnMountDetached;
         try { m.Dispose(); }
         catch (Exception) { }
+        if (_vol != null)
+            SyncEpoch(_vol); // Dokan teardown may have flushed a newer seq
     }
 
     private void CloseVolumeLocked()
     {
         if (_vol == null)
             return;
-        try { _vol.Dispose(); } // flushes the manifest on the way out
-        catch (Exception) { }
+        VaultVolume v = _vol;
         _vol = null;
+        try { v.Dispose(); } // flushes the manifest on the way out
+        catch (Exception) { }
+        SyncEpoch(v); // Dispose auto-flushed — checkpoint the new seq
     }
 
     private void OnMountDetached()
@@ -630,9 +816,9 @@ internal sealed class VaultService : IDisposable
             }
             if (_state == VaultState.Disabled)
                 SetState(InitialState());
-            else if (_vol == null)
+            else if (_vol == null && _state != VaultState.RolledBack)
                 SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
-            else if (_mount == null)
+            else if (_mount == null && _state != VaultState.RolledBack)
                 SetState(VaultState.Unsealed);
         }
     }

@@ -51,8 +51,9 @@ internal sealed class VaultNode
 ///
 /// Chunks encrypt+write on every mutation (write-through); the manifest —
 /// the tree + freelist — flushes on <see cref="Flush"/> (close/dismount).
-/// A crash between the two orphans allocated chunks until reformat — the
-/// documented v1 trade.
+/// A crash between the two loses only the manifest update: chunks the
+/// persisted high-water never covered recycle naturally, and the open
+/// path's freelist rebuild reconciles whatever the manifest did record.
 /// </summary>
 internal sealed class VaultVolume : IDisposable
 {
@@ -78,6 +79,17 @@ internal sealed class VaultVolume : IDisposable
     public string ImagePath => _img.Name;
     public byte[] Salt => _header.Salt;
     public int ChunkCount => (int)_header.ChunkCount;
+
+    /// <summary>
+    /// The authenticated manifest sequence — monotonic, sealed inside the
+    /// GCM manifest blob. The service attests the highest seen so a
+    /// whole-image rollback is detectable. In-memory only — safe to read
+    /// after Dispose (the final flush has already landed).
+    /// </summary>
+    public ulong ManifestSeq { get { lock (_gate) return _manifestSeq; } }
+
+    /// <summary>Chunks the open-time freelist rebuild reclaimed (0 on a clean open).</summary>
+    internal int LastHealOrphans { get; private set; }
 
     // ------------------------------------------------------------ create/open
 
@@ -831,7 +843,52 @@ internal sealed class VaultVolume : IDisposable
         foreach (int id in dto.Free)
             _free.Add(id);
         _highWater = dto.HighWater;
-        _dirty = false;
+        RebuildFreeList();
+        _dirty = LastHealOrphans > 0; // a healed freelist persists on the next flush
+    }
+
+    /// <summary>
+    /// Reconcile the persisted freelist against the node tree at open:
+    /// unreferenced chunks the manifest's own high-water accounts for are
+    /// reclaimed, garbage free entries clamp, and a chunk that is both
+    /// referenced and free keeps its reference (data wins). Structural
+    /// lies stay loud: an out-of-range or doubly-referenced chunk is real
+    /// corruption, not an orphan. In-memory scan only — no chunk I/O.
+    /// </summary>
+    private void RebuildFreeList()
+    {
+        LastHealOrphans = 0;
+        var referenced = new HashSet<int>();
+        foreach (VaultNode n in _nodes.Values)
+        {
+            foreach (int c in n.Chunks)
+            {
+                if (c < 0)
+                    continue; // sparse hole — not a reference
+                if (c >= ChunkCount)
+                    throw new VaultIntegrityException(
+                        $"manifest references chunk {c} out of range");
+                if (!referenced.Add(c))
+                    throw new VaultIntegrityException(
+                        $"chunk {c} referenced twice — corrupt manifest");
+            }
+        }
+        if (_highWater < 0 || _highWater > ChunkCount)
+            throw new VaultIntegrityException(
+                $"manifest high-water {_highWater} out of range");
+
+        // Garbage free entries (negative or past the high-water) get clamped;
+        // every unreferenced allocated chunk returns to the freelist.
+        int clamped = _free.RemoveWhere(id => id < 0 || id >= _highWater);
+        for (int i = 0; i < _highWater; i++)
+            if (!referenced.Contains(i) && _free.Add(i))
+                LastHealOrphans++;
+        // A chunk listed as both referenced and free is a conflict — the
+        // reference wins (keep the data), the free entry drops.
+        int conflicts = _free.RemoveWhere(referenced.Contains);
+        LastHealOrphans += conflicts;
+        if (clamped > 0)
+            _dirty = true;
     }
 
     /// <summary>Sum of every node's chunk list — structural self-check for tests.</summary>
@@ -840,6 +897,21 @@ internal sealed class VaultVolume : IDisposable
         lock (_gate)
             return (_nodes.Values.Sum(n => n.Chunks.Count(c => c >= 0)),
                     _highWater, _free.Count);
+    }
+
+    /// <summary>
+    /// Test hook: die mid-session — release the image handle and key
+    /// WITHOUT the dirty-flush, exactly like a process crash after a
+    /// write-through chunk landed but before the manifest sealed.
+    /// </summary>
+    internal void SimulateCrash()
+    {
+        lock (_gate)
+        {
+            _disposed = true;
+            _volKey.Dispose();
+            _img.Dispose();
+        }
     }
 
     public void Dispose()

@@ -103,7 +103,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
 | `captures\*.cap` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — DPAPI-sealed per user+machine, newest 50 kept |
-| `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — dual header pages (checksummed) + dual manifest slots + AES-GCM chunks; session-scoped Dokan mount only while the key verifies |
+| `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — dual header pages (checksummed) + dual manifest slots + AES-GCM chunks; session-scoped Dokan mount only while the key verifies. Manifest seq fences against the attested `VaultEpoch` — an older image gates at `RolledBack` until explicitly ratified |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
 ## Vault format — `CKVAULT1`
@@ -136,7 +136,10 @@ chunk region (fills the rest of the image)
 - **Manifest** = JSON tree (paths → metadata + chunk ids + freelist),
   sealed with `(slot, seq)` AAD. Filenames are ciphertext — a stolen
   image reveals nothing. Flush alternates slots and bumps `seq`; a torn
-  write falls back to the older decrypting epoch.
+  write falls back to the older decrypting epoch. On open the freelist
+  is rebuilt from the node tree — allocated chunks the manifest forgot
+  reclaim, garbage free entries clamp, and a doubly-referenced chunk
+  fails the open as Corrupt instead of double-freeing.
 - **Chunks** are write-through, independently framed; chunk index is AAD.
   Reads on tag failure raise an I/O error (`CrcError` at the Dokan seam),
   never plaintext.
@@ -150,8 +153,13 @@ chunk region (fills the rest of the image)
   mount call run on a pool thread with a generation counter dropping stale
   commits, so a key-pull mid-flight can't hold the pump or adopt a dead
   session's mount.
-- Known gap: a crash mid-write can orphan allocated chunks (space leaks,
-  no corruption); journaling is a future item. No ADS/hardlinks.
+- **Rollback fence**: the manifest `seq` is monotonic; `config.VaultEpoch`
+  — inside the keyfile's attestation MAC — is the trusted witness. An
+  image that opens older than the attested epoch lands in `RolledBack`:
+  unmounted, logged, and gated behind an explicit `vault accept-rollback`
+  (the call moves the epoch *down* to the image — never silently). An
+  image *ahead* of the epoch adopts forward and flags a re-attest.
+- No ADS/hardlinks.
 
 ## Module inventory
 

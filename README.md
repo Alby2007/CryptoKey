@@ -79,9 +79,11 @@ your recovery phrase — to unlock.
   passphrase — the device secret is the only factor, and its two key
   slots ride the rotation ratchet so a cloned keyfile unseals it for at
   most one generation. An optional idle seal (`VaultIdleMinutes`) dismounts
-  it when the session goes idle and remounts when you're back. Vault tab →
-  Create. Requires the Dokany driver; the app reports honestly when it's
-  absent. (`cryptokey vault …` for the CLI verbs.)
+  it when the session goes idle and remounts when you're back, and a
+  monotonic manifest epoch fences against a swapped-in older image —
+  anything stale waits for your explicit `vault accept-rollback`. Vault
+  tab → Create. Requires the Dokany driver; the app reports honestly
+  when it's absent. (`cryptokey vault …` for the CLI verbs.)
 
 ## Usage
 

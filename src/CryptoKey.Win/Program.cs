@@ -445,7 +445,8 @@ internal static class Program
 
         // A running guard owns the vault lifecycle — forward through the pipe.
         bool live = IpcClient.Send("status", 400) != null;
-        if (live && sub is "mount" or "unmount" or "create" or "status" or "delete")
+        if (live && sub is "mount" or "unmount" or "create" or "status" or "delete"
+                or "accept-rollback")
         {
             string cmd = $"vault {sub}";
             if (sub == "create" && args.Length > 2)
@@ -460,6 +461,7 @@ internal static class Program
             "mount" => VaultMountStandalone(config),
             "unmount" => VaultUnmount(config),
             "delete" => VaultDelete(config),
+            "accept-rollback" => VaultAcceptRollback(config),
             _ => VaultUsage(),
         };
     }
@@ -532,6 +534,7 @@ internal static class Program
         Console.WriteLine($"Enabled:       {config.Guard.VaultEnabled}");
         Console.WriteLine($"Auto-mount:    {config.Guard.VaultAutoMount}");
         Console.WriteLine($"Idle seal:     {(config.Guard.VaultIdleMinutes == 0 ? "off" : $"{config.Guard.VaultIdleMinutes} min")}");
+        Console.WriteLine($"Attest epoch:  {config.VaultEpoch}");
         Console.WriteLine($"Mount point:   {vault.ConfiguredMountPoint}");
         Console.WriteLine($"Driver:        {(vault.DriverPresent ? "present" : "MISSING — " + vault.DriverHint)}");
         if (!vault.ImageExists)
@@ -594,9 +597,33 @@ internal static class Program
             : Fail(err);
     }
 
+    /// <summary>
+    /// Accept a rolled-back image — standalone form. The epoch write desyncs
+    /// keyfile attestation until the running guard's next verify re-wraps it
+    /// (announces once, then heals) — the guard's own pipe path marks the
+    /// flag directly instead.
+    /// </summary>
+    private static int VaultAcceptRollback(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine);
+        // The service must SEE the rollback first — feed the secret so the
+        // open path detects img-seq < attested epoch and parks on RolledBack.
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        vault.WaitForPendingOps();
+        if (vault.State != VaultState.RolledBack)
+            return Fail($"no rolled-back image pending (state: {vault.State.ToString().ToLowerInvariant()})");
+        if (!vault.AcceptRollback(out string err))
+            return Fail(err);
+        vault.WaitForPendingOps();
+        return OkSay("Rollback accepted — vault re-opened at state " +
+            vault.State.ToString().ToLowerInvariant());
+    }
+
     private static int VaultUsage()
     {
-        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete");
+        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete|accept-rollback");
         return 1;
     }
 

@@ -24,6 +24,16 @@ internal sealed class KeyConfig
     /// verifying until the next phrase regeneration upgrades them.
     /// </summary>
     public int PassphraseIterations { get; set; } = 100_000;
+
+    /// <summary>
+    /// Highest vault manifest seq this config has ever attested — the trusted
+    /// witness for image freshness (the on-disk seq can't witness itself).
+    /// Only moves forward through code paths; the one downward move is the
+    /// user-gated <see cref="VaultService.AcceptRollback"/>. Covered by the
+    /// keyfile attestation MAC.
+    /// </summary>
+    public ulong VaultEpoch { get; set; }
+
     public GuardSettings Guard { get; set; } = new();
 }
 
@@ -222,18 +232,25 @@ internal static class ConfigStore
         return config;
     }
 
+    /// <summary>Serializes saves process-wide — the fixed tmp path can't
+    /// take two writers, and a torn interleave must never reach disk.</summary>
+    private static readonly object SaveLock = new();
+
     public static void Save(KeyConfig config)
     {
-        Directory.CreateDirectory(ConfigDir);
-        string json = JsonSerializer.Serialize(config, JsonOptions);
-        AtomicFile.WriteAllText(ConfigPath, json);
-        // The backup is written durably too — a torn .bak is no better
-        // than none when it's the file that covers a torn primary.
-        AtomicFile.WriteAllText(BackupPath, json);
-        // Third copy into the platform store — best-effort; a denied write
-        // must not fail the save.
-        try { Platform.Services.ConfigBackup.Write(json); }
-        catch (Exception) { }
+        lock (SaveLock)
+        {
+            Directory.CreateDirectory(ConfigDir);
+            string json = JsonSerializer.Serialize(config, JsonOptions);
+            AtomicFile.WriteAllText(ConfigPath, json);
+            // The backup is written durably too — a torn .bak is no better
+            // than none when it's the file that covers a torn primary.
+            AtomicFile.WriteAllText(BackupPath, json);
+            // Third copy into the platform store — best-effort; a denied write
+            // must not fail the save.
+            try { Platform.Services.ConfigBackup.Write(json); }
+            catch (Exception) { }
+        }
     }
 
     public static KeyConfig CreateNew(string serial, byte[] secret, string recoveryPhrase)
@@ -356,29 +373,41 @@ internal static class ConfigStore
     /// produce one.
     /// </summary>
     public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
+        => ComputeAttest(secret, config, includeEpoch: true);
+
+    /// <summary>Pre-epoch canon (Tier-1 keyfiles) — reads only; test-visible.</summary>
+    internal static byte[] ComputeAttestNoEpoch(byte[] secret, KeyConfig config)
+        => ComputeAttest(secret, config, includeEpoch: false);
+
+    private static byte[] ComputeAttest(byte[] secret, KeyConfig config,
+        bool includeEpoch)
     {
         byte[] data = Encoding.UTF8.GetBytes(
             "CKY-ATTEST2" + config.DeviceSerial + config.PassphraseHash
-            + GuardCanonical(config));
+            + GuardCanonical(config, includeEpoch));
         return HMACSHA256.HashData(secret, data);
     }
 
     /// <summary>
-    /// Fixed-time compare against BOTH attestation forms: the extended
-    /// canon (everything written now) and the legacy
-    /// CKY-ATTEST‖serial‖phraseHash form (pre-canon keyfiles keep
-    /// verifying — the next envelope write upgrades them silently).
+    /// Fixed-time compare against every accepted attestation form — all
+    /// candidates are computed regardless of an early hit, so no timing
+    /// side-channel tells a prober which form the file carries:
+    /// 1. canon incl. vaultepoch (everything written now)
+    /// 2. canon without it (pre-epoch Tier-1 keyfiles)
+    /// 3. CKY-ATTEST‖serial‖phraseHash (pre-canon)
+    /// Each canon addition costs one more accepted form; the next envelope
+    /// write upgrades the file to the newest form silently.
     /// </summary>
     public static bool AttestMatches(byte[] secret, KeyConfig config,
         ReadOnlySpan<byte> stored)
     {
-        // Compute both — a || short-circuit would time-leak which form
-        // matched.
-        bool current = CryptographicOperations.FixedTimeEquals(stored,
+        bool ok = CryptographicOperations.FixedTimeEquals(stored,
             ComputeAttest(secret, config));
-        bool legacy = CryptographicOperations.FixedTimeEquals(stored,
+        ok |= CryptographicOperations.FixedTimeEquals(stored,
+            ComputeAttest(secret, config, includeEpoch: false));
+        ok |= CryptographicOperations.FixedTimeEquals(stored,
             LegacyAttest(secret, config));
-        return current || legacy;
+        return ok;
     }
 
     /// <summary>The pre-canon attestation input — kept for reads only.</summary>
@@ -401,7 +430,7 @@ internal static class ConfigStore
     /// (VaultMountPoint/SizeMb/ImagePath) are deliberately absent: changing
     /// them must not force a re-attest. The hash-chain fields self-verify.
     /// </summary>
-    private static string GuardCanonical(KeyConfig config)
+    private static string GuardCanonical(KeyConfig config, bool includeEpoch)
     {
         GuardSettings g = config.Guard;
         static string B(bool v) => v ? "true" : "false";
@@ -417,7 +446,8 @@ internal static class ConfigStore
             + "|vaultenabled=" + B(g.VaultEnabled)
             + "|vaultautomount=" + B(g.VaultAutoMount)
             + "|vaultidleminutes=" + g.VaultIdleMinutes
-            + "|pollintervalms=" + g.PollIntervalMs;
+            + "|pollintervalms=" + g.PollIntervalMs
+            + (includeEpoch ? "|vaultepoch=" + config.VaultEpoch : "");
     }
 
     // The on-disk secret is 64 random bytes — high entropy, so a single

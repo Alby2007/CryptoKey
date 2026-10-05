@@ -48,7 +48,8 @@ internal sealed class GuardService : IDisposable
         _ui = handle.Ui;
         _surface = CreateSurface(config, devMode, forceClassic);
         _supervisor = new Supervisor(msg => Log(msg));
-        _vault = new VaultService(config, Platform.Services.VaultMounts, Log);
+        _vault = new VaultService(config, Platform.Services.VaultMounts, Log,
+            MarkConfigDirty);
         _vault.StatusChanged += OnVaultStatusChanged;
 
         _monitor.PresenceChanged += OnPresenceChanged;
@@ -166,8 +167,16 @@ internal sealed class GuardService : IDisposable
     /// <summary>Vault state transitions fold into the snapshot stream + balloon on mount.</summary>
     private void OnVaultStatusChanged()
     {
-        if (_vault.State == VaultState.Mounted && _config.Guard.BalloonTips)
-            Notification?.Invoke("CryptoKey", $"Vault mounted at {_vault.MountPoint}");
+        if (_config.Guard.BalloonTips)
+        {
+            if (_vault.State == VaultState.Mounted)
+                Notification?.Invoke("CryptoKey",
+                    $"Vault mounted at {_vault.MountPoint}");
+            else if (_vault.State == VaultState.RolledBack)
+                Notification?.Invoke("CryptoKey",
+                    "Vault image is older than the attested state — " +
+                    "rolled-back copy? Vault tab → Accept or restore.");
+        }
         EmitSnapshot();
     }
 
@@ -356,6 +365,7 @@ internal sealed class GuardService : IDisposable
             _config.PrevSecretHash = fresh.PrevSecretHash;
             _config.RotationCount = fresh.RotationCount;
             _config.LastRotationUtc = fresh.LastRotationUtc;
+            _config.VaultEpoch = fresh.VaultEpoch;
             _config.Guard = fresh.Guard;
             _monitor.SetTargetSerial(fresh.DeviceSerial); // also triggers a re-check
             _monitor.SetPollInterval(fresh.Guard.PollIntervalMs);
@@ -475,6 +485,7 @@ internal sealed class GuardService : IDisposable
                        $"driver={(_vault.DriverPresent ? "present" : "missing")} " +
                        $"mount={(_vault.State == VaultState.Mounted ? _vault.MountPoint : "-")} " +
                        $"idlemin={_config.Guard.VaultIdleMinutes} " +
+                       $"epoch={_config.VaultEpoch} " +
                        $"slots={slots} " +
                        $"used={(usage?.Used ?? 0)} total={(usage?.Total ?? 0)}";
             case "mount":
@@ -494,6 +505,10 @@ internal sealed class GuardService : IDisposable
             case "delete":
                 return _vault.TryDeleteImage(out string dErr)
                     ? "ok vault deleted" : $"err {dErr}";
+            case "accept-rollback":
+                return _vault.AcceptRollback(out string aErr)
+                    ? "ok rollback accepted — re-opening"
+                    : $"err {aErr}";
             default:
                 return $"err unknown vault command '{parts[1]}'";
         }
@@ -587,11 +602,15 @@ internal sealed class GuardService : IDisposable
             bool idleSuppressed = gen == _vaultFedGen
                 && VaultIdleGate.ShouldSuppressFeed(
                     _config.Guard.VaultIdleMinutes, _lastIdleMs, _vault.State);
-            // The vault consumes the verified secret for its key slots —
-            // a stale secret counts only when it counts for the lock, and
-            // an attestation mismatch seals the vault even though the
-            // secret itself checked out (config tamper is vault tamper).
-            if (_keyVerifiedNow && check.Attest != AttestState.Mismatch && !idleSuppressed)
+            // The vault consumes the verified secret for its key slots — a
+            // stale secret counts only when it counts for the lock. An
+            // attestation mismatch still feeds: the secret itself verified,
+            // the vault is bound to the device (not config.json), and the
+            // announce+heal above already rotates — dropping the open
+            // volume here would strand the slots a generation behind and
+            // permanently seal the image (the old secret is gone by the
+            // time the new keyfile verifies).
+            if (_keyVerifiedNow && !idleSuppressed)
             {
                 _vault.KeyVerified(check.Secret!, gen);
                 _vaultFedGen = gen;

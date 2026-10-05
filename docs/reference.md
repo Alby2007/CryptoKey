@@ -18,6 +18,7 @@ cryptokey vault status           # image state, key-slot generations, driver pre
 cryptokey vault mount            # IPC: mount now (guard running); standalone: foreground mount, Enter dismounts
 cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
 cryptokey vault delete           # delete the image entirely (IPC when a guard runs; destructive)
+cryptokey vault accept-rollback  # ratify a vault image that reads older than the attested epoch
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
 cryptokey help                   # usage
@@ -56,8 +57,9 @@ read timeout ~5 s.
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
 | `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
-| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… slots=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`; `idlemin` = `VaultIdleMinutes` |
+| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
+| `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 
@@ -101,6 +103,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.VaultMountPoint` | Drive letter — default `V:\`; free letters offered in the Vault page |
 | `Guard.VaultSizeMb` | Image size used by `vault create` — default 256, range 64–8192 |
 | `Guard.VaultIdleMinutes` | Seal the vault after N minutes without input — `0` = off (default). A mounted vault dismounts and drops its keys; the verify feed stays suppressed while idle, so it remounts when input returns |
+| `VaultEpoch` | Highest vault manifest seq the keyfile has attested — the rollback fence's trusted witness. Managed automatically (synced on open/close/reformat); hand-editing it trips attestation, and setting it past the image flags `rolledback` |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
 on every save — a third copy on a different kill surface. Load chain:
@@ -119,8 +122,9 @@ v1:  secret 64B  (legacy — verifies as pre-attestation, upgrades on rotation)
 attestation = HMAC-SHA256(secret, "CKY-ATTEST2" ‖ serial ‖ PassphraseHash ‖ canon)
   canon = security Guard fields only — unlock policy, strict-tamper, lock
   mode, removal/watchdog/policies/idle-lock, webcam, alert URL, vault
-  enabled/automount/idle, poll interval (cosmetic + layout fields excluded;
-  legacy "CKY-ATTEST" MACs still verify)
+  enabled/automount/idle, poll interval, vault epoch (cosmetic + layout
+  fields excluded; pre-epoch canon and legacy "CKY-ATTEST" MACs still
+  verify — reads accept all three forms, writes always emit the newest)
 ```
 
 ## Logs — `%APPDATA%\CryptoKey\guard.log` + `watchdog.log`

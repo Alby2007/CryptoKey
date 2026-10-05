@@ -521,6 +521,19 @@ internal sealed class VaultPage : UserControl
     private void ToggleMount()
     {
         VaultService v = _service.Vault;
+        if (v.State == VaultState.RolledBack)
+        {
+            // Ratifying a stale image is irreversible — two-step like the
+            // other destructive buttons.
+            if (!ArmDestructive(_mountBtn, "Accept — click again to confirm"))
+                return;
+            if (v.AcceptRollback(out string aErr))
+                _notify?.Invoke("Rollback accepted — vault re-opening.", false);
+            else
+                _notify?.Invoke(aErr, true);
+            Refresh();
+            return;
+        }
         if (v.State == VaultState.Mounted)
         {
             v.TryUnmount(out _);
@@ -656,6 +669,13 @@ internal sealed class VaultPage : UserControl
                 "reformat if it persists.");
             ShowMounted(false);
         }
+        else if (v.State == VaultState.RolledBack)
+        {
+            SetState("ROLLED BACK", Theme.AccentRed, "Image rolled back",
+                "Older than the last attested state — a rolled-back copy or a " +
+                "restored backup. Accept it, or put the newer image back.");
+            ShowMounted(true); // the row hosts the accept button
+        }
         else if (v.State == VaultState.Mounted)
         {
             SetState("MOUNTED", Theme.AccentGreen, $"Mounted at {v.MountPoint}",
@@ -697,9 +717,14 @@ internal sealed class VaultPage : UserControl
         _usage.Visible = v.State == VaultState.Mounted;
         _usageText.Visible = v.State == VaultState.Mounted;
 
-        _mountBtn.Text = v.State == VaultState.Mounted ? "Dismount" : "Mount";
+        _mountBtn.Text = v.State switch
+        {
+            VaultState.Mounted => "Dismount",
+            VaultState.RolledBack => "Accept rolled-back state",
+            _ => "Mount",
+        };
         _mountBtn.Enabled = v.State is VaultState.Unsealed or VaultState.Mounted
-            or VaultState.NeedsDriver;
+            or VaultState.NeedsDriver or VaultState.RolledBack;
         _openBtn.Enabled = v.State == VaultState.Mounted;
         _reformatBtn.Enabled = keyVerified;
         _deleteBtn.Enabled = imageExists;
