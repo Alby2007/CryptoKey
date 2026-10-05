@@ -80,7 +80,7 @@ internal sealed class GuardService : IDisposable
         if (kind.EndsWith("-storm", StringComparison.Ordinal))
         {
             if (_config.Guard.Sounds)
-                Sounds.Alarm();
+                Platform.Services.Cues.Alarm();
             Snap("desktop-flap");
             Alert("Desktop flap storm", "repeated foreign-desktop switches while locked — workstation locked at OS level");
         }
@@ -830,7 +830,7 @@ internal sealed class GuardService : IDisposable
         SetState(GuardState.Locked);
         Alert("Locked", $"locked — {reason}");
         if (_config.Guard.Sounds)
-            Sounds.Lock();
+            Platform.Services.Cues.Lock();
         // Policies apply even if both surfaces fail — the user is still
         // locked (degraded, screen-only) and shouldn't get Task Manager back.
         if (_config.Guard.LockPolicies)
@@ -891,7 +891,7 @@ internal sealed class GuardService : IDisposable
         SetState(GuardState.Unlocked);
         Alert("Unlocked", "session unlocked");
         if (_config.Guard.Sounds)
-            Sounds.Unlock();
+            Platform.Services.Cues.Unlock();
     }
 
     private void SetState(GuardState state)

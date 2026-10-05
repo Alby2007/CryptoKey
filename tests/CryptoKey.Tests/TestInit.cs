@@ -72,6 +72,7 @@ internal static class TestPlatform
         Surfaces = new TestLockSurfaceFactory(),
         EnrollmentExtras = new NoopEnrollmentExtras(),
         UserAlerts = new ConsoleUserAlerts(),
+        Cues = new NullCues(),
     };
 
     private sealed class TestPaths : IPlatformPaths

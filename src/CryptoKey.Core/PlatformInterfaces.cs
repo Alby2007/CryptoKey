@@ -178,3 +178,16 @@ internal interface IUserAlerts
     /// <summary>A modal warning for paths with no console reader (autostart launches).</summary>
     void Warn(string message);
 }
+
+/// <summary>Audible cues — synthesized WAVs on Windows; silent where unimplemented.</summary>
+internal interface ICues
+{
+    /// <summary>Low thunk — the lock dropping into place.</summary>
+    void Lock();
+
+    /// <summary>Short two-note chime — session unlocked.</summary>
+    void Unlock();
+
+    /// <summary>Harsh triple blip — tamper/flap-storm events.</summary>
+    void Alarm();
+}

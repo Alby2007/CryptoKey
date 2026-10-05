@@ -52,6 +52,9 @@ internal static class MacPlatform
             Surfaces = new MacLockSurfaceFactory(lockUi),
             EnrollmentExtras = new MacEnrollmentExtras(),
             UserAlerts = new MacUserAlerts(),
+            // afplay /System/Library/Sounds/*.aiff is the natural impl —
+            // silent until the Mac host picks it up.
+            Cues = new NullCues(),
         };
 }
 

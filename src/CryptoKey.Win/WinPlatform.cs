@@ -33,6 +33,7 @@ internal static class WinPlatform
         Surfaces = new WinLockSurfaceFactory(),
         EnrollmentExtras = new WinEnrollmentExtras(),
         UserAlerts = new WinUserAlerts(),
+        Cues = new WinCues(),
     };
 }
 
@@ -383,4 +384,12 @@ internal sealed class WinUserAlerts : IUserAlerts
     public void Warn(string message)
         => MessageBox.Show(message, "CryptoKey",
             MessageBoxButtons.OK, MessageBoxIcon.Warning);
+}
+
+/// <summary>Synthesized WAV cues — the SoundPlayer lives in the Windows host.</summary>
+internal sealed class WinCues : ICues
+{
+    public void Lock() => Sounds.Lock();
+    public void Unlock() => Sounds.Unlock();
+    public void Alarm() => Sounds.Alarm();
 }

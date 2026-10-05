@@ -55,6 +55,9 @@ internal sealed class PlatformServices
 
     /// <summary>Modal warning presenter for headless/config-failure paths.</summary>
     public required IUserAlerts UserAlerts { get; init; }
+
+    /// <summary>Audible lock/unlock/alarm cues — null impl where unsupported.</summary>
+    public required ICues Cues { get; init; }
 }
 
 /// <summary>

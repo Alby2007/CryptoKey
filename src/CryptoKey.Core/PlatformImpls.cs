@@ -43,6 +43,13 @@ internal sealed class NullCaptureService : ICaptureService
     public void Snap(string reason, Action<string>? log = null) { }
 }
 
+internal sealed class NullCues : ICues
+{
+    public void Lock() { }
+    public void Unlock() { }
+    public void Alarm() { }
+}
+
 /// <summary>Dotfile names are already hidden — macOS keyfile attrs.</summary>
 internal sealed class NoopKeyfileAttrs : IKeyfileAttrs
 {
