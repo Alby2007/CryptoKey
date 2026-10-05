@@ -485,4 +485,28 @@ internal static class ConfigStore
 
     private static byte[] HashPassphrase(ReadOnlySpan<char> phrase, byte[] salt, int iterations)
         => Rfc2898DeriveBytes.Pbkdf2(phrase, salt, iterations, HashAlgorithmName.SHA256, 32);
+
+    private static readonly byte[] VaultRecLabel = "CKV-REC"u8.ToArray();
+
+    /// <summary>
+    /// Vault recovery-blob KEK: PBKDF2 over the normalized phrase with
+    /// salt = "CKV-REC"‖headerSalt, at the iteration count frozen in the
+    /// image header at bind time. Distinct from the phrase-hash check so
+    /// the blob never shares a key with the config store.
+    /// </summary>
+    internal static byte[] DeriveRecoveryKek(
+        ReadOnlySpan<char> phrase, ReadOnlySpan<byte> headerSalt, int iterations)
+    {
+        byte[] salt = new byte[VaultRecLabel.Length + headerSalt.Length];
+        VaultRecLabel.CopyTo(salt, 0);
+        headerSalt.CopyTo(salt.AsSpan(VaultRecLabel.Length));
+        try
+        {
+            return HashNormalized(phrase, salt, iterations);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(salt);
+        }
+    }
 }

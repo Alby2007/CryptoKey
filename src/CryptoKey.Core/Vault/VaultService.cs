@@ -27,6 +27,11 @@ internal enum VaultState
     /// verifies; it's just OLD. Holds until the user accepts via
     /// <see cref="AcceptRollback"/> or restores the newer image.</summary>
     RolledBack,
+    /// <summary>Image is TPM-bound and the pepper can't be unwrapped —
+    /// this isn't the machine it was bound to (TPM cleared/replaced, or a
+    /// copied image+keyfile). Recovers via <see cref="UnlockWithPhrase"/>
+    /// when a recovery blob exists.</summary>
+    TpmLocked,
 }
 
 /// <summary>
@@ -43,6 +48,7 @@ internal sealed class VaultService : IDisposable
 {
     private readonly KeyConfig _config;
     private readonly IVaultMounter _mounter;
+    private readonly IVaultTpm _tpm;
     private readonly Action<string> _log;
     private readonly Action? _configMutated;
 
@@ -50,6 +56,7 @@ internal sealed class VaultService : IDisposable
     private uint _secretGen;
     private PinnedBuffer? _prevSecret; // displaced generation — open-path fallback
     private uint _prevGen;             // so a sealed-through-rotation image still opens
+    private PinnedBuffer? _pepper;     // TPM-unwrapped/phrase-recovered machine pepper
     private VaultVolume? _vol;         // open image — volKey lives inside
     private IVaultMount? _mount;
     private VaultState _state = VaultState.Disabled;
@@ -67,12 +74,13 @@ internal sealed class VaultService : IDisposable
     /// on the next verify. CLI callers pass null (a CLI-driven epoch bump
     /// desyncs attestation until the guard's next verify announces+heals).</param>
     public VaultService(KeyConfig config, IVaultMounter mounter,
-        Action<string> log, Action? configMutated = null)
+        Action<string> log, Action? configMutated = null, IVaultTpm? tpm = null)
     {
         _config = config;
         _mounter = mounter;
         _log = log;
         _configMutated = configMutated;
+        _tpm = tpm ?? NullVaultTpm.Shared;
         _state = InitialState();
     }
 
@@ -162,6 +170,7 @@ internal sealed class VaultService : IDisposable
                 // re-read every poll.
                 retryOpen = _vol == null && ImageExists
                     && _state is VaultState.Sealed or VaultState.Corrupt
+                        or VaultState.TpmLocked
                     && (_pendingOps?.IsCompleted ?? true)
                     && Environment.TickCount64 - _lastOpenAttempt > 5000;
                 if (!retryOpen)
@@ -213,9 +222,10 @@ internal sealed class VaultService : IDisposable
                 // stays openable under current + previous secrets. KEKs are
                 // scoped arrays — zero them once the wrap lands. Note the
                 // PREVIOUS secret prevHeld feeds slot B, not the new one.
-                byte[] kekCur = VaultFormat.DeriveKek(held.Bytes, _vol.Salt);
+                byte[] kekCur = VaultFormat.DeriveKek(
+                    held.Bytes, _vol.Salt, _pepper?.Bytes);
                 byte[]? kekPrev = prevHeld != null
-                    ? VaultFormat.DeriveKek(prevHeld.Bytes, _vol.Salt)
+                    ? VaultFormat.DeriveKek(prevHeld.Bytes, _vol.Salt, _pepper?.Bytes)
                     : null;
                 try
                 {
@@ -258,11 +268,11 @@ internal sealed class VaultService : IDisposable
 
     /// <summary>
     /// Queue the heavy unseal on a pool thread — the header peek is the
-    /// cheap pre-flight under the lock; the manifest load runs in
-    /// <see cref="OpenThenMount"/>. Shared by KeyVerified's open branch and
-    /// <see cref="AcceptRollback"/>'s re-open. <paramref name="prev"/> is the
-    /// displaced generation (open-path fallback for images sealed through a
-    /// rotation).
+    /// cheap pre-flight under the lock; the pepper unwrap and manifest load
+    /// run in <see cref="OpenThenMount"/>. Shared by KeyVerified's open
+    /// branch and <see cref="AcceptRollback"/>'s re-open.
+    /// <paramref name="prev"/> is the displaced generation (open-path
+    /// fallback for images sealed through a rotation).
     /// </summary>
     private bool QueueOpenLocked(PinnedBuffer held, PinnedBuffer? prev, int seq)
     {
@@ -279,13 +289,19 @@ internal sealed class VaultService : IDisposable
             return false;
         }
         _lastOpenAttempt = Environment.TickCount64;
-        byte[] kek = VaultFormat.DeriveKek(held.Bytes, peek.Salt);
-        // One slot may lag the newest generation — the prev-secret KEK is
-        // the fallback that rescues an image sealed through a rotation.
-        byte[]? kekPrev = prev != null && !ReferenceEquals(prev, held)
-            ? VaultFormat.DeriveKek(prev.Bytes, peek.Salt)
+        // Bytes are copied for the task — a KeyGone disposing the pinned
+        // buffers mid-open would otherwise hand it zeroed material. The
+        // copies die in OpenThenMount's finally.
+        byte[] secret = held.Bytes.ToArray();
+        byte[]? prevSecret = prev != null && !ReferenceEquals(prev, held)
+            ? prev.Bytes.ToArray()
             : null;
-        _pendingOps = Task.Run(() => OpenThenMount(kek, kekPrev, seq));
+        // A held pepper (phrase-recovered, or carried from a prior bound
+        // open) skips the TPM call entirely — the image is already proven
+        // openable on this session.
+        PinnedBuffer? heldPepper = peek.TpmBound ? _pepper : null;
+        _pendingOps = Task.Run(() =>
+            OpenThenMount(peek, secret, prevSecret, heldPepper, seq));
         return true;
     }
 
@@ -314,26 +330,52 @@ internal sealed class VaultService : IDisposable
     }
 
     /// <summary>
-    /// Pool-thread unseal: TryOpen is the heavy read; adoption happens under
-    /// the lock only if this secret is still the live one (a KeyGone or
-    /// newer verify bumps <see cref="_opSeq"/> and drops the result).
+    /// Pool-thread unseal: the pepper unwrap (TPM) and manifest load are the
+    /// heavy parts; adoption happens under the lock only if this secret is
+    /// still the live one (a KeyGone or newer verify bumps
+    /// <see cref="_opSeq"/> and drops the result).
     /// </summary>
-    private void OpenThenMount(byte[] kek, byte[]? kekPrev, int seq)
+    private void OpenThenMount(VaultHeader peek, byte[] secret, byte[]? prevSecret,
+        PinnedBuffer? heldPepper, int seq)
     {
         VaultVolume? vol = null;
         VaultOpenError err = VaultOpenError.None;
         int slot = -1;
         bool usedPrev = false;
+        byte[]? pepper = null;
+        byte[]? kek = null;
+        byte[]? kekPrev = null;
         try
         {
-            VaultVolume.TryOpen(ImagePath, kek, out vol, out err, out slot);
-            if (vol == null && err == VaultOpenError.Sealed && kekPrev != null)
+            if (peek.TpmBound)
             {
-                // Slots lag the keyfile (image sealed through a rotation) —
-                // the previous generation's secret still unwraps slot B.
-                VaultVolume.TryOpen(ImagePath, kekPrev,
-                    out vol, out err, out slot);
-                usedPrev = vol != null;
+                // Bound image — the pepper comes from a held (phrase-
+                // recovered) buffer, else the TPM unwraps the header blob.
+                // Null = not this machine / TPM cleared → TpmLocked.
+                pepper = heldPepper?.Bytes.ToArray()
+                    ?? _tpm.UnwrapPepper(peek.TpmBlob);
+                if (pepper == null)
+                    err = VaultOpenError.TpmUnavailable;
+            }
+            if (err == VaultOpenError.None)
+            {
+                kek = VaultFormat.DeriveKek(secret, peek.Salt, pepper);
+                // One slot may lag the newest generation — the prev-secret
+                // KEK is the fallback that rescues an image sealed through
+                // a rotation.
+                kekPrev = prevSecret != null
+                    ? VaultFormat.DeriveKek(prevSecret, peek.Salt, pepper)
+                    : null;
+                VaultVolume.TryOpen(ImagePath, kek, out vol, out err, out slot);
+                if (vol == null && err == VaultOpenError.Sealed && kekPrev != null)
+                {
+                    // Slots lag the keyfile (image sealed through a
+                    // rotation) — the previous generation's secret still
+                    // unwraps slot B.
+                    VaultVolume.TryOpen(ImagePath, kekPrev,
+                        out vol, out err, out slot);
+                    usedPrev = vol != null;
+                }
             }
         }
         catch (Exception ex)
@@ -370,6 +412,13 @@ internal sealed class VaultService : IDisposable
             {
                 _vol = vol;
                 adopted = true;
+                if (pepper != null)
+                {
+                    // Bound image proven openable — hold the pepper for
+                    // session re-wraps so later verifies don't hit the TPM.
+                    _pepper?.Dispose();
+                    _pepper = new PinnedBuffer(pepper);
+                }
                 if (vol.ManifestSeq > _config.VaultEpoch)
                 {
                     // Config is the stale side — a crash between flush and
@@ -384,7 +433,9 @@ internal sealed class VaultService : IDisposable
                     // doesn't need the fallback again.
                     try
                     {
-                        vol.ReWrapKeys(kek, kekPrev, _secretGen, _prevGen);
+                        // kek is non-null whenever vol opened — TryOpen only
+                        // ran after the KEKs derived.
+                        vol.ReWrapKeys(kek!, kekPrev, _secretGen, _prevGen);
                         _log("Vault opened under the previous secret — " +
                             "key slots re-wrapped to the current window.");
                     }
@@ -414,6 +465,10 @@ internal sealed class VaultService : IDisposable
                     {
                         VaultOpenError.NoImage => VaultState.NoImage,
                         VaultOpenError.Sealed => VaultState.SealedDead,
+                        // A bound image whose pepper won't unwrap isn't
+                        // corrupt — it's on the wrong machine (or the TPM
+                        // was cleared). Recovers via the phrase hatch.
+                        VaultOpenError.TpmUnavailable => VaultState.TpmLocked,
                         _ => VaultState.Corrupt, // BadFormat/IO — maybe transient
                     });
             }
@@ -424,9 +479,15 @@ internal sealed class VaultService : IDisposable
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(kek);
+            if (kek != null)
+                CryptographicOperations.ZeroMemory(kek);
             if (kekPrev != null)
                 CryptographicOperations.ZeroMemory(kekPrev);
+            if (pepper != null)
+                CryptographicOperations.ZeroMemory(pepper);
+            CryptographicOperations.ZeroMemory(secret);
+            if (prevSecret != null)
+                CryptographicOperations.ZeroMemory(prevSecret);
         }
     }
 
@@ -563,6 +624,9 @@ internal sealed class VaultService : IDisposable
             _prevSecret?.Dispose(); // the fallback dies with the session too
             _prevSecret = null;
             _prevGen = 0;
+            _pepper?.Dispose();     // machine pepper dies with the session too
+            _pepper = null;
+            NeedsRebind = false;
             if (_state == VaultState.Disabled)
                 return;
             SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
@@ -590,6 +654,8 @@ internal sealed class VaultService : IDisposable
                 return false;
             }
             ++_opSeq; // any pending open against a prior image is stale now
+            _pepper?.Dispose(); // a fresh image is never bound — stale pepper out
+            _pepper = null;
             try
             {
                 _vol = VaultVolume.Create(ImagePath, sizeMb, _secret.Bytes, _secretGen);
@@ -623,6 +689,8 @@ internal sealed class VaultService : IDisposable
             DismountLocked();
             CloseVolumeLocked();
             ++_opSeq;
+            _pepper?.Dispose(); // same: the new image starts unbound
+            _pepper = null;
             try
             {
                 if (File.Exists(ImagePath))
@@ -651,6 +719,11 @@ internal sealed class VaultService : IDisposable
             DismountLocked();
             CloseVolumeLocked();
             ++_opSeq;
+            // CloseVolumeLocked clears the pepper only when a volume was
+            // open — a phrase-recovered pepper outlives _vol == null, and it
+            // must never reach a different image's open path.
+            _pepper?.Dispose();
+            _pepper = null;
             try
             {
                 if (File.Exists(ImagePath))
@@ -757,6 +830,234 @@ internal sealed class VaultService : IDisposable
         }
     }
 
+    // ------------------------------------------------------------- TPM binding
+
+    /// <summary>A TPM answers on this machine — the Bind action is meaningful.</summary>
+    public bool TpmAvailable => _tpm.Available;
+
+    /// <summary>The image carries the TPM-bound flag (peeks the header when sealed).</summary>
+    public bool ImageTpmBound
+        => _vol?.TpmBound
+           ?? VaultVolume.PeekHeader(ImagePath)?.TpmBound == true;
+
+    /// <summary>The image has a phrase recovery hatch (bound, non-strict).</summary>
+    public bool ImageHasRecovery
+        => VaultVolume.PeekHeader(ImagePath)?.HasRecovery == true;
+
+    /// <summary>
+    /// Set when the vault was opened via phrase recovery while the TPM was
+    /// unreachable — the UI offers a re-bind banner until
+    /// <see cref="BindTpm"/> refreshes the header blob under a live TPM.
+    /// </summary>
+    public bool NeedsRebind { get; private set; }
+
+    /// <summary>
+    /// Bind the image to this machine's TPM. Fresh bind: verifies the
+    /// recovery phrase (a security-sensitive action deserves a credential),
+    /// generates a pepper, wraps it under the TPM key, and re-wraps the key
+    /// slots under the peppered KEK. When already bound it re-wraps the
+    /// held pepper under a (new) TPM key — the slots stay untouched.
+    /// <paramref name="strict"/> skips the recovery blob: TPM clear then
+    /// means reformat.
+    /// </summary>
+    public bool BindTpm(ReadOnlySpan<char> phrase, bool strict, out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_vol == null || _secret == null)
+            {
+                error = "unlock the vault first";
+                return false;
+            }
+            if (!_tpm.Available)
+            {
+                error = "no TPM on this machine";
+                return false;
+            }
+            byte[]? pepper = null;
+            byte[]? phraseKek = null;
+            byte[]? kek = null;
+            try
+            {
+                if (_vol.TpmBound)
+                {
+                    // Re-bind — the pepper must already be in hand (a prior
+                    // bound open or a phrase recovery put it there).
+                    if (_pepper == null)
+                    {
+                        error = "pepper not held — unlock with the recovery phrase first";
+                        return false;
+                    }
+                    pepper = _pepper.Bytes.ToArray();
+                }
+                else
+                {
+                    if (!ConfigStore.VerifyPassphrase(_config, phrase))
+                    {
+                        error = "recovery phrase doesn't match";
+                        return false;
+                    }
+                    pepper = RandomNumberGenerator.GetBytes(VaultFormat.PepperLen);
+                }
+                byte[]? tpmBlob = _tpm.WrapPepper(pepper);
+                if (tpmBlob == null || tpmBlob.Length != VaultFormat.TpmBlobLen)
+                {
+                    error = "the TPM refused the pepper wrap";
+                    return false;
+                }
+                if (_vol.TpmBound)
+                {
+                    _vol.RebindTpmBlob(tpmBlob);
+                    NeedsRebind = false;
+                    _log("Vault re-bound to this machine's TPM.");
+                    return true;
+                }
+                byte[] recBlob = new byte[VaultFormat.RecBlobLen];
+                uint recIters = 0;
+                if (!strict)
+                {
+                    recIters = (uint)_config.PassphraseIterations;
+                    phraseKek = ConfigStore.DeriveRecoveryKek(
+                        phrase, _vol.Salt, _config.PassphraseIterations);
+                    recBlob = VaultFormat.SealRecoveryPepper(phraseKek, pepper);
+                }
+                kek = VaultFormat.DeriveKek(_secret.Bytes, _vol.Salt, pepper);
+                _vol.BindTpm(tpmBlob, recBlob, recIters, kek, _secretGen);
+                _pepper?.Dispose();
+                _pepper = new PinnedBuffer(pepper);
+                NeedsRebind = false;
+                _log(strict
+                    ? "Vault bound to this machine (TPM) — strict: no phrase recovery."
+                    : "Vault bound to this machine (TPM); phrase recovery enabled.");
+                return true;
+            }
+            finally
+            {
+                if (pepper != null)
+                    CryptographicOperations.ZeroMemory(pepper);
+                if (phraseKek != null)
+                    CryptographicOperations.ZeroMemory(phraseKek);
+                if (kek != null)
+                    CryptographicOperations.ZeroMemory(kek);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Remove the machine binding: slots re-wrap under the unpeppered KEK,
+    /// blobs and flag clear, the TPM key deletes best-effort.
+    /// </summary>
+    public bool UnbindTpm(out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_vol == null || _secret == null)
+            {
+                error = "unlock the vault first";
+                return false;
+            }
+            if (!_vol.TpmBound)
+            {
+                error = "vault isn't machine-bound";
+                return false;
+            }
+            byte[]? kek = null;
+            byte[]? kekPrev = null;
+            try
+            {
+                kek = VaultFormat.DeriveKek(_secret.Bytes, _vol.Salt);
+                kekPrev = _prevSecret != null
+                    ? VaultFormat.DeriveKek(_prevSecret.Bytes, _vol.Salt)
+                    : null;
+                _vol.UnbindTpm(kek, kekPrev, _secretGen, _prevGen);
+            }
+            finally
+            {
+                if (kek != null)
+                    CryptographicOperations.ZeroMemory(kek);
+                if (kekPrev != null)
+                    CryptographicOperations.ZeroMemory(kekPrev);
+            }
+            _pepper?.Dispose();
+            _pepper = null;
+            NeedsRebind = false;
+            try { _tpm.DeleteKey(); }
+            catch (Exception) { } // best-effort — the blob is gone either way
+            _log("Vault unbound — machine binding removed.");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The phrase hatch for a <see cref="VaultState.TpmLocked"/> vault:
+    /// unseal the header's recovery blob to recover the pepper, then open
+    /// under it. Strict-bound images carry no blob and refuse here.
+    /// Succeeds even with the TPM still absent — the UI then offers re-bind.
+    /// </summary>
+    public bool UnlockWithPhrase(ReadOnlySpan<char> phrase, out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_secret == null)
+            {
+                error = "insert your key first";
+                return false;
+            }
+            if (_vol != null)
+            {
+                error = "vault is already open";
+                return false;
+            }
+            VaultHeader? hdr = VaultVolume.PeekHeader(ImagePath);
+            if (hdr == null || !ImageExists)
+            {
+                error = "no vault image";
+                return false;
+            }
+            if (!hdr.TpmBound)
+            {
+                error = "vault isn't machine-bound";
+                return false;
+            }
+            if (!hdr.HasRecovery)
+            {
+                error = "strict-bound vault — no recovery blob; reformat is the only path";
+                return false;
+            }
+            byte[]? phraseKek = null;
+            byte[]? pepper = null;
+            try
+            {
+                phraseKek = ConfigStore.DeriveRecoveryKek(
+                    phrase, hdr.Salt, (int)hdr.RecIters);
+                pepper = VaultFormat.TryOpenRecoveryPepper(phraseKek, hdr.RecBlob);
+            }
+            finally
+            {
+                if (phraseKek != null)
+                    CryptographicOperations.ZeroMemory(phraseKek);
+            }
+            if (pepper == null)
+            {
+                error = "recovery phrase didn't unlock the vault";
+                return false;
+            }
+            _pepper?.Dispose();
+            _pepper = new PinnedBuffer(pepper);
+            CryptographicOperations.ZeroMemory(pepper);
+            // The pepper is now held — the queued open skips the TPM call.
+            NeedsRebind = true;
+            SetState(VaultState.Sealed); // honest mid-state; the open lands next
+            QueueOpenLocked(_secret, _prevSecret, _opSeq);
+            _log("Vault unlocked via recovery phrase — re-bind to this " +
+                "machine's TPM is recommended.");
+            return true;
+        }
+    }
+
     /// <summary>Repoint the mount letter for the next mount.</summary>
     public void ApplyMountPoint(string letter)
         => _config.Guard.VaultMountPoint = letter;
@@ -786,6 +1087,8 @@ internal sealed class VaultService : IDisposable
         try { v.Dispose(); } // flushes the manifest on the way out
         catch (Exception) { }
         SyncEpoch(v); // Dispose auto-flushed — checkpoint the new seq
+        _pepper?.Dispose(); // the pepper belongs to THAT image — a fresh
+        _pepper = null;     // (unbound) image must never see it in a rewrap
     }
 
     private void OnMountDetached()

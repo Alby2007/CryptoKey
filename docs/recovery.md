@@ -39,15 +39,18 @@ flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
 | Failure | What happens | Rescue |
 |---|---|---|
 | Key pulled while vault is mounted | `KeyGone` → force-dismount + every secret buffer zeroed | Reinsert the key — slot A (or B inside the heal window) unseals and auto-mount returns the drive |
-| Recovery-phrase unlock | The vault **stays sealed** — it has no passphrase factor by design | Insert the physical key; a stolen image is inert without it |
+| Recovery-phrase unlock | The vault **stays sealed** — it has no passphrase factor by design | Insert the physical key; a stolen image is inert without it. (Exception: a TPM-bound vault accepts the phrase to unseal its recovery blob — see below) |
 | Image left unopened through two rotations | Both key slots slid past — `SEALED — DEAD`, permanent | **None.** The volume key exists nowhere else. Vault page → Reformat to start over |
 | Dokany driver not installed | `NEEDS DRIVER` — image unseals in memory but can't mount | Install Dokany (the Vault page says so); the image itself is untouched |
 | Torn manifest write (power loss mid-flush) | Newest slot rejects → falls back to the older epoch | Automatic — the last pre-crash tree returns; the torn epoch's writes are rolled back |
 | Chunk ciphertext corrupted | GCM tag reject → `CrcError` surfaces to the app that touched it | That file's block is dead; the rest of the volume is unaffected |
-| Crash mid-write | Allocated chunks can be orphaned (space leaks, not corruption) | Reformat reclaims them — v1 has no journaling |
+| Crash mid-write | Allocated chunks the manifest forgot reclaim automatically on the next open | Automatic — the freelist rebuilds from the node tree and logs the reclaimed count |
 | `vault.ckv` copied/stolen | Wrapped volume key only — useless without the device secret | Nothing to rescue; nothing to fear |
 | v1 image after the format bump | `unsupported vault format v1` → `CORRUPT` state | Vault page → Reformat (the bump was deliberate — v2 adds the shadowed header page) |
 | One header page torn | `header checksum mismatch` on that page → opens from the shadow copy | Automatic — the surviving page carries the open; the next write re-syncs both |
+| Bound vault on a cleared/replaced TPM | `TPM LOCKED` — the pepper blob can't unwrap here | Vault page → "Unlock with phrase" (or `vault recover`) — the sealed recovery blob yields the pepper; re-bind once a TPM answers. **Strict-bound (`--strict`) images have no blob — reformat is the only path** |
+| Bound vault copied to another machine | Same `TPM LOCKED` — that's the feature working | Move the physical vault back, or use the recovery phrase on the new machine and re-bind |
+| v2 image (pre-TPM format) | Opens normally — unbound | The next header write upgrades it to v3 in place; `vault tpm-bind` then marks it bound |
 
 ## Config failures
 

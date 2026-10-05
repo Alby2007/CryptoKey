@@ -219,3 +219,29 @@ internal interface IVaultMount : IDisposable
     /// <summary>Raised when the filesystem detaches on its own (external unmount, driver loss).</summary>
     event Action? Detached;
 }
+
+/// <summary>
+/// TPM-bound pepper protector for the vault's machine binding. Implementations
+/// wrap/unwrap a 32B pepper under a hardware-anchored key so a copied image +
+/// cloned keyfile can't open on another machine. All failures are soft —
+/// null/false, never throw — so TPM absence downgrades the vault to
+/// phrase-recovery, never to a crash.
+/// </summary>
+internal interface IVaultTpm
+{
+    /// <summary>The TPM provider answers. Doesn't imply a pepper key exists.</summary>
+    bool Available { get; }
+
+    /// <summary>
+    /// Wrap <paramref name="pepper"/> (32B) under the persistent TPM key,
+    /// creating the key if needed. Returns the blob for the header's
+    /// <c>tpmPepperBlob</c> field; null when the TPM refuses.
+    /// </summary>
+    byte[]? WrapPepper(byte[] pepper);
+
+    /// <summary>Unwrap a stored pepper blob; null when the TPM refuses/absent.</summary>
+    byte[]? UnwrapPepper(byte[] blob);
+
+    /// <summary>Delete the persisted pepper key — best-effort, never throws.</summary>
+    void DeleteKey();
+}

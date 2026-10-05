@@ -118,16 +118,21 @@ header page (4 KiB) ×2 — primary at 0, identical shadow at 4096
   magic "CKVAULT\x01" | version u32 | flags u32 | salt 16B
   keySlot[2]:  { rotationGen u32 | nonce 12B | wrappedVolKey 48B }
   manifestSeq[2] u64 | chunkCount u32 | chunkRegionBase u64
-  headerCheck 8B — truncated SHA-256 of the page; a torn-but-plausible
-                   primary rejects and the shadow carries the open
+  v3 extension (starts at the old @192 checksum offset):
+    extLen u16 | tpmPepperBlob 256B | recPepperBlob 64B | recIters u32
+    headerCheck 8B — truncated SHA-256 of page[0..518); a torn-but-plausible
+                     primary rejects and the shadow carries the open
+  (v2 images keep the @192 check and no extension — reads accept both;
+   the next header write upgrades to v3 in place)
 manifest slot A + slot B (4 MiB each, fixed)
   magic u32 | seq u64 | plainLen u32 | nonce 12B | tag 16B | ct
 chunk region (fills the rest of the image)
   chunk i = nonce 12B | tag 16B | ct 4096B     (4124 B per 4 KiB chunk)
 ```
 
-- **KEK** = `HMAC-SHA256(deviceSecret, "CryptoKeyVaultKEK" ‖ salt)` —
-  derived on demand, never stored, zeroed after use.
+- **KEK** = `HMAC-SHA256(deviceSecret, "CryptoKeyVaultKEK" ‖ salt ‖ pepper)` —
+  derived on demand, never stored, zeroed after use; an empty pepper is
+  byte-identical to the v2 derivation.
 - **Key slots** ride the keyfile ratchet: slot A wraps under the current
   generation, slot B under the previous — a stale-but-legit keyfile still
   unseals the vault inside the heal window. Each rotation edge rewraps
@@ -159,6 +164,19 @@ chunk region (fills the rest of the image)
   unmounted, logged, and gated behind an explicit `vault accept-rollback`
   (the call moves the epoch *down* to the image — never silently). An
   image *ahead* of the epoch adopts forward and flags a re-attest.
+- **TPM machine binding** (`vault tpm-bind`, format flag `TpmBound`): a
+  32-byte *pepper* is generated and RSA-OAEP-SHA256-wrapped under a
+  persisted user-scoped CNG key in the Microsoft Platform Crypto Provider
+  (`tpmPepperBlob`). Bound KEKs fold the pepper into the HMAC input, so a
+  copied image + cloned keyfile opens nowhere else. A non-strict bind also
+  seals the pepper under the recovery phrase (`recPepperBlob`, AES-GCM
+  under PBKDF2(phrase, "CKV-REC"‖headerSalt, `recIters`)) — the portable
+  hatch when the TPM is cleared/replaced: `UnlockWithPhrase` recovers it,
+  opens, and flags `NeedsRebind` until a live TPM re-wraps the blob.
+  `--strict` skips the blob entirely (TPM clear ⇒ reformat). A bound image
+  that can't unwrap reports `TpmLocked` — distinct from corruption and
+  from the ratchet's `SealedDead`. Unbinding re-wraps the slots pepperless
+  and deletes the CNG key best-effort.
 - No ADS/hardlinks.
 
 ## Module inventory

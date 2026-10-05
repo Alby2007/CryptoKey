@@ -19,6 +19,9 @@ cryptokey vault mount            # IPC: mount now (guard running); standalone: f
 cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
 cryptokey vault delete           # delete the image entirely (IPC when a guard runs; destructive)
 cryptokey vault accept-rollback  # ratify a vault image that reads older than the attested epoch
+cryptokey vault tpm-bind [--strict]  # bind the image to this machine's TPM (prompts for the recovery phrase)
+cryptokey vault tpm-unbind       # remove the machine binding (image opens anywhere again)
+cryptokey vault recover          # unlock a TPM-locked vault with the recovery phrase
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
 cryptokey help                   # usage
@@ -57,7 +60,10 @@ read timeout ~5 s.
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
 | `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
-| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq |
+| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… tpm=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`/`tpmlocked`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq; `tpm` = `bound`/`-` |
+| `vault tpm-bind <phrase> [--strict]` | `ok vault bound to this machine` / `err …` | Wraps the pepper under the TPM + seals a phrase-recovery blob (omitted under `--strict`); needs the vault unsealed |
+| `vault tpm-unbind` | `ok vault unbound` / `err …` | Re-wraps slots pepperless + deletes the TPM key |
+| `vault recover <phrase>` | `ok vault unlocked via recovery phrase` / `err …` | Opens a `tpmlocked` vault via the sealed recovery blob |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
 | `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
@@ -165,6 +171,7 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Registry config backup | `HKCU\Software\CryptoKey\Config` (REG_SZ, same JSON) |
 | Tamper captures | `%APPDATA%\CryptoKey\captures\` (newest 50 kept) |
 | Vault image | `%LOCALAPPDATA%\CryptoKey\vault.ckv` (default; `VaultImagePath` overrides) |
+| Vault TPM key | persisted CNG key `CryptoKeyVault` in `Microsoft Platform Crypto Provider`, user-scoped |
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |

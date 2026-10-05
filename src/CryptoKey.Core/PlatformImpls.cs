@@ -80,3 +80,16 @@ internal sealed class NullVaultMounter : IVaultMounter
         return null;
     }
 }
+
+/// <summary>
+/// No TPM — vault binding is unavailable. Unwrap always fails, so a bound
+/// image on a TPM-less machine can only be opened via its recovery blob.
+/// </summary>
+internal sealed class NullVaultTpm : IVaultTpm
+{
+    public static readonly NullVaultTpm Shared = new();
+    public bool Available => false;
+    public byte[]? WrapPepper(byte[] pepper) => null;
+    public byte[]? UnwrapPepper(byte[] blob) => null;
+    public void DeleteKey() { }
+}

@@ -81,9 +81,12 @@ your recovery phrase — to unlock.
   most one generation. An optional idle seal (`VaultIdleMinutes`) dismounts
   it when the session goes idle and remounts when you're back, and a
   monotonic manifest epoch fences against a swapped-in older image —
-  anything stale waits for your explicit `vault accept-rollback`. Vault
-  tab → Create. Requires the Dokany driver; the app reports honestly
-  when it's absent. (`cryptokey vault …` for the CLI verbs.)
+  anything stale waits for your explicit `vault accept-rollback`. Optional
+  **TPM binding** (`vault tpm-bind`) wraps a machine pepper under the TPM
+  so a copied image + cloned keyfile won't open on any other machine —
+  the recovery phrase is the hatch (`vault recover`), or `--strict` for
+  no hatch at all. Vault tab → Create. Requires the Dokany driver; the app
+  reports honestly when it's absent. (`cryptokey vault …` for the CLI verbs.)
 
 ## Usage
 

@@ -34,6 +34,12 @@ internal sealed class VaultPage : UserControl
     private readonly System.Windows.Forms.Timer _idleSealSave = new() { Interval = 500 };
     private readonly ComboBox _letter;
     private readonly Label _imagePath;
+    private readonly TableLayoutPanel _tpmRowA;
+    private readonly TableLayoutPanel _tpmRowB;
+    private readonly TextField _tpmPhrase;
+    private readonly ToggleSwitch _tpmStrict;
+    private readonly AppButton _tpmBtn;
+    private readonly AppButton _tpmUnbind;
     private readonly AppButton _reformatBtn;
     private readonly AppButton _deleteBtn;
     private AppButton? _armedBtn; // the destructively-armed button (null = none)
@@ -239,18 +245,18 @@ internal sealed class VaultPage : UserControl
             Title = "Vault settings",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 250,
+            Height = 335,
         };
         var sInner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 8,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 6; i++)
-            sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 6f));
+        for (int i = 0; i < 8; i++)
+            sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 8f));
 
         _autoMount = new ToggleSwitch
         {
@@ -394,6 +400,71 @@ internal sealed class VaultPage : UserControl
         idleSealRow.Controls.Add(_idleSealValue, 2, 0);
         sInner.Controls.Add(idleSealRow, 0, 3);
 
+        // Machine binding — the TPM gates the image to this machine + user.
+        // Row A: label | phrase field | primary action (bind/recover/re-bind).
+        _tpmRowA = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        _tpmRowA.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34f));
+        _tpmRowA.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40f));
+        _tpmRowA.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 26f));
+        _tpmPhrase = new TextField
+        {
+            PlaceholderText = "recovery phrase",
+            Password = true,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 3, 0, 3),
+        };
+        _tpmBtn = new AppButton
+        {
+            Text = "Bind to this machine (TPM)",
+            Glyph = Glyphs.Vault,
+            Variant = ButtonVariant.Primary,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(8, 4, 0, 4),
+        };
+        _tpmBtn.Click += (_, _) => TpmPrimary();
+        _tpmRowA.Controls.Add(MidLabel("Machine binding"), 0, 0);
+        _tpmRowA.Controls.Add(_tpmPhrase, 1, 0);
+        _tpmRowA.Controls.Add(_tpmBtn, 2, 0);
+        sInner.Controls.Add(_tpmRowA, 0, 4);
+
+        // Row B: strict toggle | unbind button.
+        _tpmRowB = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        _tpmRowB.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34f));
+        _tpmRowB.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40f));
+        _tpmRowB.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 26f));
+        _tpmStrict = new ToggleSwitch
+        {
+            Text = "Strict — TPM clear means reformat",
+            Dock = DockStyle.Fill,
+        };
+        _tpmUnbind = new AppButton
+        {
+            Text = "Unbind",
+            Glyph = Glyphs.Close,
+            Variant = ButtonVariant.Danger,
+            Dock = DockStyle.Fill,
+            Margin = new Padding(8, 4, 0, 4),
+        };
+        _tpmUnbind.Click += (_, _) => UnbindTpm();
+        _tpmRowB.Controls.Add(new Panel(), 0, 0); // spacer under the label
+        _tpmRowB.Controls.Add(_tpmStrict, 1, 0);
+        _tpmRowB.Controls.Add(_tpmUnbind, 2, 0);
+        sInner.Controls.Add(_tpmRowB, 0, 5);
+
         var dangerRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -426,19 +497,20 @@ internal sealed class VaultPage : UserControl
         dangerRow.Controls.Add(MidLabel("Danger zone"), 0, 0);
         dangerRow.Controls.Add(_reformatBtn, 1, 0);
         dangerRow.Controls.Add(_deleteBtn, 2, 0);
-        sInner.Controls.Add(dangerRow, 0, 4);
+        sInner.Controls.Add(dangerRow, 0, 6);
 
         var vaultNote = new Label
         {
             Text = "The vault only exists while your key is in — pull the key or lock " +
                    "the session and the drive force-dismounts. Two missed secret " +
-                   "rotations seal it permanently (same dead window as the keyfile).",
+                   "rotations seal it permanently (same dead window as the keyfile). " +
+                   "TPM binding ties it to this machine — a copied image won't open elsewhere.",
             Font = Theme.UIFont(8f),
             ForeColor = Theme.TextDim,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
         };
-        sInner.Controls.Add(vaultNote, 0, 5);
+        sInner.Controls.Add(vaultNote, 0, 7);
         setCard.Controls.Add(sInner);
 
         layout.Controls.Add(vaultCard, 0, 0);
@@ -586,6 +658,58 @@ internal sealed class VaultPage : UserControl
     }
 
     /// <summary>
+    /// The TPM row's context action: phrase-unlock while TpmLocked, re-bind
+    /// while a phrase-recovered pepper waits for a live TPM, else fresh bind
+    /// (the phrase authorizes it and seals the recovery blob).
+    /// </summary>
+    private void TpmPrimary()
+    {
+        VaultService v = _service.Vault;
+        string phrase = _tpmPhrase.Text;
+        bool ok;
+        string err;
+        if (v.State == VaultState.TpmLocked)
+        {
+            ok = v.UnlockWithPhrase(phrase.AsSpan(), out err);
+            if (ok)
+                _notify?.Invoke("Recovery phrase accepted — vault opening. Re-bind below.", false);
+        }
+        else if (v.ImageTpmBound)
+        {
+            // Bound: pepper is already held (bound open or recovery) — the
+            // phrase isn't consulted; the blob re-wraps under a live TPM key.
+            ok = v.BindTpm(ReadOnlySpan<char>.Empty, strict: false, out err);
+            if (ok)
+                _notify?.Invoke("Vault re-bound to this machine's TPM.", false);
+        }
+        else
+        {
+            ok = v.BindTpm(phrase.AsSpan(), _tpmStrict.Checked, out err);
+            if (ok)
+                _notify?.Invoke(_tpmStrict.Checked
+                    ? "Vault bound — strict: a TPM clear means reformat."
+                    : "Vault bound to this machine (TPM).", false);
+        }
+        _tpmPhrase.HasError = !ok;
+        if (!ok)
+            _notify?.Invoke(err, true);
+        else
+            _tpmPhrase.ClearText(); // the phrase never lingers in the field
+        Refresh();
+    }
+
+    private void UnbindTpm()
+    {
+        if (!ArmDestructive(_tpmUnbind, "Unbind — click again"))
+            return;
+        if (_service.Vault.UnbindTpm(out string err))
+            _notify?.Invoke("Vault unbound — the image opens on any machine now.", false);
+        else
+            _notify?.Invoke(err, true);
+        Refresh();
+    }
+
+    /// <summary>
     /// Two-step destructive confirm, per button: first click arms THAT button
     /// (4s), second click on the same button executes. Clicking the other
     /// button just moves the arm — it never executes unconfirmed.
@@ -676,6 +800,15 @@ internal sealed class VaultPage : UserControl
                 "restored backup. Accept it, or put the newer image back.");
             ShowMounted(true); // the row hosts the accept button
         }
+        else if (v.State == VaultState.TpmLocked)
+        {
+            SetState("TPM LOCKED", Theme.AccentRed, "Bound to another machine",
+                v.ImageHasRecovery
+                    ? "This machine's TPM can't unwrap the vault — enter the " +
+                      "recovery phrase below, or reformat."
+                    : "Strict-bound and the TPM won't answer — reformat is the only path.");
+            ShowMounted(false);
+        }
         else if (v.State == VaultState.Mounted)
         {
             SetState("MOUNTED", Theme.AccentGreen, $"Mounted at {v.MountPoint}",
@@ -729,6 +862,56 @@ internal sealed class VaultPage : UserControl
         _reformatBtn.Enabled = keyVerified;
         _deleteBtn.Enabled = imageExists;
         _autoMount.Enabled = _config.Guard.VaultEnabled;
+
+        // Machine-binding rows — live only with an image + the feature on.
+        bool tpmShown = _config.Guard.VaultEnabled && imageExists;
+        _tpmRowA.Visible = _tpmRowB.Visible = tpmShown;
+        if (tpmShown)
+        {
+            bool open = v.State is VaultState.Unsealed or VaultState.Mounted
+                or VaultState.NeedsDriver;
+            bool bound = v.ImageTpmBound;
+            if (v.State == VaultState.TpmLocked)
+            {
+                _tpmPhrase.Visible = v.ImageHasRecovery;
+                _tpmStrict.Visible = false;
+                _tpmBtn.Text = "Unlock with phrase";
+                _tpmBtn.Enabled = v.ImageHasRecovery;
+                _tpmUnbind.Visible = false;
+            }
+            else if (v.NeedsRebind)
+            {
+                // Opened via the phrase while the TPM was unreachable —
+                // offer the re-bind so a live TPM re-wraps the pepper.
+                _tpmPhrase.Visible = false;
+                _tpmStrict.Visible = false;
+                _tpmBtn.Text = "Re-bind to this machine (TPM)";
+                _tpmBtn.Enabled = v.TpmAvailable;
+                _tpmUnbind.Visible = true;
+                _tpmUnbind.Enabled = open;
+            }
+            else if (bound)
+            {
+                _tpmPhrase.Visible = false;
+                _tpmStrict.Visible = false;
+                _tpmBtn.Text = "Bound to this machine";
+                _tpmBtn.Enabled = false;
+                _tpmUnbind.Visible = true;
+                _tpmUnbind.Enabled = open;
+            }
+            else
+            {
+                bool canBind = v.TpmAvailable && open && keyVerified;
+                _tpmPhrase.Visible = true;
+                _tpmPhrase.Enabled = canBind;
+                _tpmStrict.Visible = true;
+                _tpmBtn.Text = v.TpmAvailable
+                    ? "Bind to this machine (TPM)"
+                    : "No TPM on this machine";
+                _tpmBtn.Enabled = canBind;
+                _tpmUnbind.Visible = false;
+            }
+        }
     }
 
     private void SetState(string badge, Color color, string status, string detail)

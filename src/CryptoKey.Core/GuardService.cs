@@ -49,7 +49,7 @@ internal sealed class GuardService : IDisposable
         _surface = CreateSurface(config, devMode, forceClassic);
         _supervisor = new Supervisor(msg => Log(msg));
         _vault = new VaultService(config, Platform.Services.VaultMounts, Log,
-            MarkConfigDirty);
+            MarkConfigDirty, Platform.Services.VaultTpm);
         _vault.StatusChanged += OnVaultStatusChanged;
 
         _monitor.PresenceChanged += OnPresenceChanged;
@@ -176,6 +176,10 @@ internal sealed class GuardService : IDisposable
                 Notification?.Invoke("CryptoKey",
                     "Vault image is older than the attested state — " +
                     "rolled-back copy? Vault tab → Accept or restore.");
+            else if (_vault.State == VaultState.TpmLocked)
+                Notification?.Invoke("CryptoKey",
+                    "Vault is bound to another machine's TPM — " +
+                    "Vault tab → recovery phrase, or reformat.");
         }
         EmitSnapshot();
     }
@@ -487,6 +491,7 @@ internal sealed class GuardService : IDisposable
                        $"idlemin={_config.Guard.VaultIdleMinutes} " +
                        $"epoch={_config.VaultEpoch} " +
                        $"slots={slots} " +
+                       $"tpm={(hdr?.TpmBound == true ? "bound" : "-")} " +
                        $"used={(usage?.Used ?? 0)} total={(usage?.Total ?? 0)}";
             case "mount":
                 return _vault.TryMount(out string mErr)
@@ -509,6 +514,26 @@ internal sealed class GuardService : IDisposable
                 return _vault.AcceptRollback(out string aErr)
                     ? "ok rollback accepted — re-opening"
                     : $"err {aErr}";
+            case "tpm-bind":
+            {
+                bool strict = parts.Skip(2).Any(
+                    p => p.Equals("--strict", StringComparison.OrdinalIgnoreCase));
+                string phrase = string.Join(' ',
+                    parts.Skip(2).Where(p => !p.StartsWith("--")));
+                return _vault.BindTpm(phrase, strict, out string bErr)
+                    ? "ok vault bound to this machine"
+                    : $"err {bErr}";
+            }
+            case "tpm-unbind":
+                return _vault.UnbindTpm(out string uErr)
+                    ? "ok vault unbound" : $"err {uErr}";
+            case "recover":
+            {
+                string phrase = string.Join(' ', parts.Skip(2));
+                return _vault.UnlockWithPhrase(phrase, out string rErr)
+                    ? "ok vault unlocked via recovery phrase"
+                    : $"err {rErr}";
+            }
             default:
                 return $"err unknown vault command '{parts[1]}'";
         }

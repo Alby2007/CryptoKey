@@ -57,6 +57,7 @@ internal static class MacPlatform
             Cues = new NullCues(),
             // macFUSE is the eventual mount engine — vault stays image-only for now.
             VaultMounts = new NullVaultMounter(),
+            VaultTpm = NullVaultTpm.Shared,
         };
 }
 

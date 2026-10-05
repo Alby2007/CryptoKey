@@ -446,11 +446,11 @@ internal static class Program
         // A running guard owns the vault lifecycle — forward through the pipe.
         bool live = IpcClient.Send("status", 400) != null;
         if (live && sub is "mount" or "unmount" or "create" or "status" or "delete"
-                or "accept-rollback")
+                or "accept-rollback" or "tpm-bind" or "tpm-unbind" or "recover")
         {
             string cmd = $"vault {sub}";
-            if (sub == "create" && args.Length > 2)
-                cmd += " " + args[2];
+            for (int i = 2; i < args.Length; i++)
+                cmd += " " + args[i]; // create size / tpm-bind phrase+flags
             return CryptoKeyCli.SendIpc(cmd);
         }
 
@@ -462,6 +462,9 @@ internal static class Program
             "unmount" => VaultUnmount(config),
             "delete" => VaultDelete(config),
             "accept-rollback" => VaultAcceptRollback(config),
+            "tpm-bind" => VaultTpmBind(config, args),
+            "tpm-unbind" => VaultTpmUnbind(config),
+            "recover" => VaultRecover(config),
             _ => VaultUsage(),
         };
     }
@@ -516,7 +519,7 @@ internal static class Program
         int mb = args.Length > 2 && int.TryParse(args[2], out int m)
             ? m : config.Guard.VaultSizeMb;
         using var vault = new VaultService(config, Platform.Services.VaultMounts,
-            Console.WriteLine);
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
         if (!FeedVerifiedSecret(config, vault))
             return 1;
         if (!vault.TryCreate(mb, out string err))
@@ -529,7 +532,8 @@ internal static class Program
 
     private static int VaultStatus(KeyConfig config)
     {
-        var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { });
+        var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { },
+            tpm: Platform.Services.VaultTpm);
         Console.WriteLine($"Vault image:   {vault.ImagePath}");
         Console.WriteLine($"Enabled:       {config.Guard.VaultEnabled}");
         Console.WriteLine($"Auto-mount:    {config.Guard.VaultAutoMount}");
@@ -552,6 +556,7 @@ internal static class Program
             $"{header.ChunkCount} chunks ~ " +
             $"{(header.ChunkCount * (long)VaultFormat.ChunkSize + VaultFormat.DataOffset) / (1024 * 1024)} MB)");
         Console.WriteLine($"Key slots:     gen {header.KeySlots[0].RotationGen} / {header.KeySlots[1].RotationGen}");
+        Console.WriteLine($"TPM-bound:     {(header.TpmBound ? $"yes{(header.HasRecovery ? " (phrase recovery)" : " (strict)")}" : "no")}");
         return 0;
     }
 
@@ -559,7 +564,7 @@ internal static class Program
     private static int VaultMountStandalone(KeyConfig config)
     {
         using var vault = new VaultService(config, Platform.Services.VaultMounts,
-            Console.WriteLine);
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
         if (!FeedVerifiedSecret(config, vault))
             return 1;
         vault.WaitForPendingOps(); // the async unseal must land first
@@ -591,7 +596,8 @@ internal static class Program
 
     private static int VaultDelete(KeyConfig config)
     {
-        using var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { });
+        using var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { },
+            tpm: Platform.Services.VaultTpm);
         return vault.TryDeleteImage(out string err)
             ? OkSay("Vault image deleted.")
             : Fail(err);
@@ -606,7 +612,7 @@ internal static class Program
     private static int VaultAcceptRollback(KeyConfig config)
     {
         using var vault = new VaultService(config, Platform.Services.VaultMounts,
-            Console.WriteLine);
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
         // The service must SEE the rollback first — feed the secret so the
         // open path detects img-seq < attested epoch and parks on RolledBack.
         if (!FeedVerifiedSecret(config, vault))
@@ -621,9 +627,66 @@ internal static class Program
             vault.State.ToString().ToLowerInvariant());
     }
 
+    /// <summary>Bind the vault to this machine's TPM — standalone form.</summary>
+    private static int VaultTpmBind(KeyConfig config, string[] args)
+    {
+        bool strict = args.Skip(2).Any(
+            a => a.Equals("--strict", StringComparison.OrdinalIgnoreCase));
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        vault.WaitForPendingOps(); // the vault must be open to re-wrap
+        if (vault.State is VaultState.TpmLocked)
+            return Fail("vault is TPM-locked — 'cryptokey vault recover' first");
+        if (vault.SlotGens == null)
+            return Fail("vault didn't unseal — check 'vault status'");
+        Console.Write("Recovery phrase (authorizes the bind" +
+            (strict ? ", strict — no recovery hatch" : " + seals the recovery blob") + "): ");
+        string? phrase = Console.ReadLine();
+        return vault.BindTpm(phrase.AsSpan(), strict, out string err)
+            ? OkSay(strict
+                ? "Vault bound — TPM-clear means reformat (strict, no recovery)."
+                : "Vault bound — this machine's TPM now gates the image.")
+            : Fail(err);
+    }
+
+    /// <summary>Remove the machine binding — standalone form.</summary>
+    private static int VaultTpmUnbind(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        vault.WaitForPendingOps();
+        return vault.UnbindTpm(out string err)
+            ? OkSay("Vault unbound — the image opens on any machine again.")
+            : Fail(err);
+    }
+
+    /// <summary>Unlock a TPM-locked vault via the recovery phrase — standalone.</summary>
+    private static int VaultRecover(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        vault.WaitForPendingOps();
+        if (vault.State != VaultState.TpmLocked && !vault.ImageTpmBound)
+            return Fail("vault isn't machine-bound — nothing to recover");
+        Console.Write("Recovery phrase: ");
+        string? phrase = Console.ReadLine();
+        if (!vault.UnlockWithPhrase(phrase.AsSpan(), out string err))
+            return Fail(err);
+        vault.WaitForPendingOps();
+        return OkSay("Recovery phrase accepted — vault opened. " +
+            "Re-bind recommended: 'cryptokey vault tpm-bind'.");
+    }
+
     private static int VaultUsage()
     {
-        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete|accept-rollback");
+        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete|accept-rollback|" +
+            "tpm-bind [--strict]|tpm-unbind|recover");
         return 1;
     }
 

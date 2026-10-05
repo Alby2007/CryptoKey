@@ -35,6 +35,7 @@ internal static class WinPlatform
         UserAlerts = new WinUserAlerts(),
         Cues = new WinCues(),
         VaultMounts = new DokanVaultMounter(),
+        VaultTpm = new WinVaultTpm(),
     };
 }
 

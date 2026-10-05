@@ -28,6 +28,9 @@ internal enum VaultOpenError
     Sealed,
     /// <summary>Both manifest slots rejected — unrecoverable corruption.</summary>
     Corrupt,
+    /// <summary>The image is TPM-bound and the pepper couldn't be recovered —
+    /// TPM absent/cleared and no phrase recovery in hand. Not corruption.</summary>
+    TpmUnavailable,
 }
 
 /// <summary>One directory-tree entry. <see cref="Name"/> keeps creation casing.</summary>
@@ -298,6 +301,68 @@ internal sealed class VaultVolume : IDisposable
     public (uint A, uint B) SlotGens
     {
         get { lock (_gate) return (_header.KeySlots[0].RotationGen, _header.KeySlots[1].RotationGen); }
+    }
+
+    /// <summary>Image carries the TPM-bound flag — opens need the pepper.</summary>
+    public bool TpmBound { get { lock (_gate) return _header.TpmBound; } }
+
+    /// <summary>
+    /// Turn machine binding ON: both key slots re-wrap under the peppered
+    /// KEK (the previous-generation window deliberately ends — an enrolled
+    /// vault answers only to the current keyfile + this machine), blobs and
+    /// flag land in the ext region, header persists. Volume key and
+    /// manifest are untouched — the binding is header-scoped.
+    /// </summary>
+    public void BindTpm(byte[] tpmBlob, byte[] recBlob, uint recIters,
+        byte[] kekCur, uint gen)
+    {
+        lock (_gate)
+        {
+            _header.KeySlots[0] =
+                VaultFormat.WrapVolumeKey(kekCur, _volKey.Bytes, gen, 0);
+            _header.KeySlots[1] =
+                VaultFormat.WrapVolumeKey(kekCur, _volKey.Bytes, gen, 1);
+            _header.Flags |= VaultFormat.FlagTpmBound;
+            _header.TpmBlob = tpmBlob;
+            _header.RecBlob = recBlob;
+            _header.RecIters = recIters;
+            WriteHeader();
+        }
+    }
+
+    /// <summary>
+    /// Re-bind the same pepper to a fresh TPM key — blob swap only; the
+    /// slots already wrap the same pepper so they're untouched.
+    /// </summary>
+    public void RebindTpmBlob(byte[] tpmBlob)
+    {
+        lock (_gate)
+        {
+            _header.TpmBlob = tpmBlob;
+            WriteHeader();
+        }
+    }
+
+    /// <summary>
+    /// Turn machine binding OFF: slots re-wrap under the unpeppered KEKs
+    /// (the ratchet window is restored when a previous secret is in hand),
+    /// flag + blobs + iters zeroed, header persists.
+    /// </summary>
+    public void UnbindTpm(byte[] kekCur, byte[]? kekPrev, uint genCur, uint genPrev)
+    {
+        lock (_gate)
+        {
+            _header.KeySlots[0] =
+                VaultFormat.WrapVolumeKey(kekCur, _volKey.Bytes, genCur, 0);
+            _header.KeySlots[1] = kekPrev != null
+                ? VaultFormat.WrapVolumeKey(kekPrev, _volKey.Bytes, genPrev, 1)
+                : VaultFormat.WrapVolumeKey(kekCur, _volKey.Bytes, genCur, 1);
+            _header.Flags &= ~VaultFormat.FlagTpmBound;
+            _header.TpmBlob = new byte[VaultFormat.TpmBlobLen];
+            _header.RecBlob = new byte[VaultFormat.RecBlobLen];
+            _header.RecIters = 0;
+            WriteHeader();
+        }
     }
 
     // --------------------------------------------------------------- path API

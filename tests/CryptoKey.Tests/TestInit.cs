@@ -74,6 +74,7 @@ internal static class TestPlatform
         UserAlerts = new ConsoleUserAlerts(),
         Cues = new NullCues(),
         VaultMounts = new TestVaultMounter(),
+        VaultTpm = NullVaultTpm.Shared,
     };
 
     private sealed class TestPaths : IPlatformPaths

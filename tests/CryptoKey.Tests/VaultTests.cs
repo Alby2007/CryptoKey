@@ -1066,4 +1066,306 @@ public class VaultTests : IDisposable
 
         Assert.Equal(2ul, c.VaultEpoch); // checkpoint followed the late flush
     }
+
+    // ---------------------------------------------------------- format v3
+
+    [Fact]
+    public void New_images_write_v3_with_empty_ext()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        VaultHeader h = VaultVolume.PeekHeader(path)!;
+        Assert.Equal(VaultFormat.FormatVersion, h.Version); // 3
+        Assert.False(h.TpmBound);
+        Assert.False(h.HasRecovery);
+        Assert.Equal(0u, h.RecIters);
+        Assert.All(h.TpmBlob, b => Assert.Equal(0, b));
+        Assert.All(h.RecBlob, b => Assert.Equal(0, b));
+    }
+
+    [Fact]
+    public void Ext_region_is_checksum_covered()
+    {
+        // A flipped byte inside the ext region must fail the header — the
+        // TPM blob can't be silently doctored to a different wrap.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        byte[] page = File.ReadAllBytes(path)[..VaultFormat.HeaderSize];
+        page[300] ^= 0xFF; // inside the tpmPepperBlob span
+        Assert.Throws<VaultException>(() => VaultFormat.ReadHeader(page));
+    }
+
+    [Fact]
+    public void V2_header_page_reads_as_unbound()
+    {
+        // Craft a v2-layout page from a real image's fields: version 2 +
+        // the old @192 checksum. Reads must accept it as unbound.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        byte[] page = File.ReadAllBytes(path)[..VaultFormat.HeaderSize];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+            page.AsSpan(8), 2);
+        SHA256.HashData(page.AsSpan(0, 192)).AsSpan(0, 8)
+            .CopyTo(page.AsSpan(192));
+        VaultHeader h = VaultFormat.ReadHeader(page);
+        Assert.Equal(2u, h.Version);
+        Assert.False(h.TpmBound);
+        Assert.All(h.TpmBlob, b => Assert.Equal(0, b));
+    }
+
+    [Fact]
+    public void Pepper_changes_the_kek()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+        byte[] pepper = RandomNumberGenerator.GetBytes(32);
+        byte[] plain = VaultFormat.DeriveKek(secret, salt);
+        byte[] bound = VaultFormat.DeriveKek(secret, salt, pepper);
+        Assert.NotEqual(plain, bound);
+        // An empty pepper is byte-identical to the v2 derivation.
+        Assert.Equal(plain, VaultFormat.DeriveKek(secret, salt, ReadOnlySpan<byte>.Empty));
+    }
+
+    // ------------------------------------------------------------ TPM seam
+
+    /// <summary>XOR-fold fake: wraps to the 256B blob slot, unwraps back.</summary>
+    private sealed class FakeTpm : IVaultTpm
+    {
+        public bool Available { get; set; } = true;
+        public int DeleteCount;
+
+        public byte[]? WrapPepper(byte[] pepper)
+        {
+            if (!Available) return null;
+            byte[] blob = new byte[VaultFormat.TpmBlobLen];
+            for (int i = 0; i < pepper.Length; i++)
+                blob[i] = (byte)(pepper[i] ^ 0x5A);
+            return blob;
+        }
+
+        public byte[]? UnwrapPepper(byte[] blob)
+        {
+            if (!Available || blob.Length != VaultFormat.TpmBlobLen)
+                return null;
+            byte[] pepper = new byte[VaultFormat.PepperLen];
+            for (int i = 0; i < pepper.Length; i++)
+                pepper[i] = (byte)(blob[i] ^ 0x5A);
+            return pepper;
+        }
+
+        public void DeleteKey() => DeleteCount++;
+    }
+
+    private VaultService BoundVault(string path, byte[] secret,
+        FakeTpm tpm, out KeyConfig config, List<string>? logs = null,
+        string phrase = "passphrase-ok")
+    {
+        config = VaultConfig(path);
+        var vault = new VaultService(config, new TestMounter(),
+            logs != null ? logs.Add : (_ => { }), tpm: tpm);
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string cErr), cErr);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.True(vault.BindTpm(phrase.AsSpan(), strict: false, out string bErr), bErr);
+        Assert.True(vault.ImageTpmBound);
+        return vault;
+    }
+
+    [Fact]
+    public void Bind_requires_open_vault_and_phrase()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { }, tpm: tpm);
+        Assert.False(vault.BindTpm("passphrase-ok".AsSpan(), false, out string e1));
+        Assert.Contains("unlock", e1);
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+        Assert.False(vault.BindTpm("wrong-phrase".AsSpan(), false, out string e2));
+        Assert.Contains("phrase", e2);
+    }
+
+    [Fact]
+    public void Bound_image_needs_the_pepper()
+    {
+        // The security claim in miniature: the unpeppered KEK no longer
+        // unwraps the slots — a copied image + cloned keyfile opens nowhere.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        using (var vault = BoundVault(path, secret, tpm, out _)) { }
+
+        Assert.False(VaultVolume.TryOpen(path, KekFor(path, secret),
+            out VaultVolume? vol, out VaultOpenError err, out _));
+        Assert.Null(vol);
+        Assert.Equal(VaultOpenError.Sealed, err); // unpeppered KEK — dead
+    }
+
+    [Fact]
+    public void Tpm_absent_locks_not_corrupts()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        using (var vault = BoundVault(path, secret, tpm, out KeyConfig c))
+        {
+            vault.KeyGone();
+            vault.KeyVerified(secret.ToArray(), 1);
+            Assert.True(vault.WaitForPendingOps());
+            Assert.Equal(VaultState.Mounted, vault.State); // TPM unwraps
+
+            tpm.Available = false; // TPM cleared / different machine
+            vault.KeyGone();
+            vault.KeyVerified(secret.ToArray(), 1);
+            Assert.True(vault.WaitForPendingOps());
+            Assert.Equal(VaultState.TpmLocked, vault.State);
+        }
+    }
+
+    [Fact]
+    public void Phrase_recovery_opens_then_rebinds()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        using var vault = BoundVault(path, secret, tpm, out _);
+
+        tpm.Available = false;
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.TpmLocked, vault.State);
+
+        Assert.False(vault.UnlockWithPhrase("wrong-phrase".AsSpan(), out string e1));
+        Assert.Contains("phrase", e1);
+        Assert.True(vault.UnlockWithPhrase("passphrase-ok".AsSpan(), out string e2), e2);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State); // opened without the TPM
+        Assert.True(vault.NeedsRebind);                // banner state
+
+        tpm.Available = true; // the TPM comes back — re-bind refreshes the blob
+        Assert.True(vault.BindTpm(ReadOnlySpan<char>.Empty, false, out string e3), e3);
+        Assert.False(vault.NeedsRebind);
+    }
+
+    [Fact]
+    public void Unbind_returns_to_pepperless_open()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        using var vault = BoundVault(path, secret, tpm, out _);
+
+        Assert.True(vault.UnbindTpm(out string err), err);
+        Assert.Equal(1, tpm.DeleteCount); // the TPM key died with the binding
+        Assert.False(vault.ImageTpmBound);
+
+        tpm.Available = false; // unbound opens need no TPM at all
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+    }
+
+    [Fact]
+    public void Strict_bind_has_no_phrase_hatch()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { }, tpm: tpm);
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+        Assert.True(vault.BindTpm("passphrase-ok".AsSpan(), strict: true, out string err), err);
+
+        VaultHeader h = VaultVolume.PeekHeader(path)!;
+        Assert.True(h.TpmBound);
+        Assert.Equal(0u, h.RecIters);
+        Assert.All(h.RecBlob, b => Assert.Equal(0, b));
+
+        tpm.Available = false;
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.TpmLocked, vault.State);
+        Assert.False(vault.UnlockWithPhrase("passphrase-ok".AsSpan(), out string e2));
+        Assert.Contains("strict", e2);
+    }
+
+    [Fact]
+    public void Bound_slots_slide_under_the_pepper()
+    {
+        // A rotation on a bound vault re-wraps under PEPPERED KEKs — the
+        // next open still needs the TPM.
+        string path = Img();
+        byte[] genA = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        byte[] genB = TestDisk.RandomSecret();
+        using var vault = BoundVault(path, genA, tpm, out _);
+
+        vault.KeyVerified(genB.ToArray(), 2); // rotation edge → peppered rewrap
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal((2u, 1u), vault.SlotGens!.Value);
+
+        vault.KeyGone();
+        vault.KeyVerified(genB.ToArray(), 2);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+    }
+
+    [Fact]
+    public void Rollback_fence_fires_on_bound_image()
+    {
+        // The epoch fence composes with binding: the pepper unwraps, the
+        // open succeeds, THEN the seq compare rejects — no mount.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        KeyConfig c;
+        using (var vault = BoundVault(path, secret, tpm, out c))
+        {
+            vault.KeyGone();
+        }
+        c.VaultEpoch = 10; // attested beyond the bound image's seq
+        var mounter = new TestMounter();
+        using var v2 = new VaultService(c, mounter, _ => { }, tpm: tpm);
+        v2.KeyVerified(secret.ToArray(), 1);
+        Assert.True(v2.WaitForPendingOps());
+        Assert.Equal(VaultState.RolledBack, v2.State);
+        Assert.Equal(0, mounter.MountCount);
+    }
+
+    [Fact]
+    public void Keygone_drops_the_held_pepper()
+    {
+        // A recovered pepper dies with the session — reopening a bound
+        // image after KeyGone needs the TPM (or the phrase) again.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        var tpm = new FakeTpm();
+        using var vault = BoundVault(path, secret, tpm, out _);
+
+        tpm.Available = false;
+        vault.KeyGone();
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.TpmLocked, vault.State);
+        Assert.True(vault.UnlockWithPhrase("passphrase-ok".AsSpan(), out _));
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+
+        vault.KeyGone(); // pepper dropped — TPM still absent → locked again
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.TpmLocked, vault.State);
+    }
 }

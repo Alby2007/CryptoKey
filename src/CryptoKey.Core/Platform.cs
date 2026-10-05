@@ -61,6 +61,9 @@ internal sealed class PlatformServices
 
     /// <summary>Vault mount engine (Dokany on Windows) — null impl where unsupported.</summary>
     public required IVaultMounter VaultMounts { get; init; }
+
+    /// <summary>TPM-backed pepper protector — null impl where no TPM exists.</summary>
+    public required IVaultTpm VaultTpm { get; init; }
 }
 
 /// <summary>

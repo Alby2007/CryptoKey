@@ -21,9 +21,22 @@ namespace CryptoKey;
 ///   184 chunkRegionBase u64
 ///   192 headerCheck 8B  (SHA-256 of page[0..192), truncated)
 ///
-/// The shadow is an identical copy — a torn header write leaves one good
-/// page to open from. The checksum catches a torn-but-plausible page
-/// (valid magic, scrambled fields) before it can misdiagnose as sealed.
+/// v3 extends the header inside the same page (the v2 fields above are
+/// untouched — the ext region starts where the v2 checksum used to sit,
+/// so reads distinguish by formatVersion):
+///   192 extLen u16            — 334 for v3; the region's total span
+///   194 tpmPepperBlob 256B    — RSA-2048 OAEP-SHA256(pepper) under the
+///                             persisted TPM-bound NCrypt key
+///   450 recPepperBlob 64B     — pepper sealed under the recovery phrase
+///                             (AES-GCM; zeroed when strict-bound)
+///   514 recIters u32          — PBKDF2 iters frozen at enroll
+///   518 headerCheck 8B        — SHA-256 of page[0..518), truncated
+///
+/// The pepper is a 32B machine-binding secret: when Flags.TpmBound is set
+/// the KEK is HMAC(secret, label ‖ salt ‖ pepper), so the image opens only
+/// where the TPM (or the recovery phrase) can reproduce the pepper. The
+/// flag itself is a UX hint — forging it off can't help (the slots simply
+/// won't unwrap); forging it on yields a vault that can never open.
 ///
 /// manifest slot i at ManifestBase + i*ManifestSlotSize (4 MiB each):
 ///   0   slotMagic "CKVM" u32 | seq u64 | plainLen u32
@@ -43,7 +56,8 @@ internal static class VaultFormat
 {
     internal static readonly byte[] HeaderMagic = "CKVAULT\x01"u8.ToArray();
 
-    internal const uint FormatVersion = 2;
+    internal const uint FormatVersion = 3;
+    internal const uint MinFormatVersion = 2; // v2 images read + upgrade on next header write
     internal const uint ManifestMagic = 0x4D564B43; // "CKVM" little-endian
     internal const uint ManifestFormat = 1;
 
@@ -76,8 +90,22 @@ internal static class VaultFormat
     private const int OffManifestSeq = OffKeySlot + KeySlots * KeySlotLen; // 160
     private const int OffChunkCount = OffManifestSeq + ManifestSlots * 8;  // 176
     private const int OffChunkBase = OffChunkCount + 8;                    // 184
-    private const int OffCheck = OffChunkBase + 8;                         // 192
-    private const int CheckLen = 8; // truncated SHA-256 of page[0..OffCheck)
+    private const int OffCheckV2 = OffChunkBase + 8;                       // 192 — v2 layout's check
+
+    // v3 extension region — starts at the old checksum offset.
+    private const int OffExt = 192;
+    private const int ExtLenV3 = 334;               // whole ext span incl. check
+    private const int OffTpmBlob = OffExt + 2;      // 194
+    internal const int TpmBlobLen = 256;
+    private const int OffRecBlob = OffTpmBlob + TpmBlobLen; // 450
+    internal const int RecBlobLen = 64;
+    private const int OffRecIters = OffRecBlob + RecBlobLen; // 514
+    private const int OffCheckV3 = OffRecIters + 4;          // 518
+
+    private const int CheckLen = 8; // truncated SHA-256 of page[0..checkOff)
+
+    internal const uint FlagTpmBound = 0x1;
+    internal const int PepperLen = 32;
 
     // Key slot field offsets (within a 64B slot).
     private const int SlotGenOff = 0;
@@ -88,13 +116,20 @@ internal static class VaultFormat
     private static readonly byte[] SlotAadLabel = "CKVKEYSLOT"u8.ToArray();
     private static readonly byte[] ManifestAadLabel = "CKVMANIFEST"u8.ToArray();
     private static readonly byte[] ChunkAadLabel = "CKVCHUNK"u8.ToArray();
+    private static readonly byte[] RecLabel = "CKV-REC"u8.ToArray();
 
-    /// <summary>Key-wrapping key for a verified device secret + this image's salt.</summary>
-    internal static byte[] DeriveKek(ReadOnlySpan<byte> secret, ReadOnlySpan<byte> headerSalt)
+    /// <summary>
+    /// Key-wrapping key for a verified device secret + this image's salt
+    /// (+ the machine-binding pepper when the image is TPM-bound). An empty
+    /// pepper is byte-identical to the v2 derivation.
+    /// </summary>
+    internal static byte[] DeriveKek(ReadOnlySpan<byte> secret, ReadOnlySpan<byte> headerSalt,
+        ReadOnlySpan<byte> pepper = default)
     {
-        byte[] data = new byte[KekLabel.Length + headerSalt.Length];
+        byte[] data = new byte[KekLabel.Length + headerSalt.Length + pepper.Length];
         KekLabel.CopyTo(data, 0);
         headerSalt.CopyTo(data.AsSpan(KekLabel.Length));
+        pepper.CopyTo(data.AsSpan(KekLabel.Length + headerSalt.Length));
         return HMACSHA256.HashData(secret, data);
     }
 
@@ -107,10 +142,13 @@ internal static class VaultFormat
             || !page[..HeaderMagic.Length].SequenceEqual(HeaderMagic))
             throw new VaultException("not a CryptoKey vault image");
         uint version = BinaryPrimitives.ReadUInt32LittleEndian(page[OffVersion..]);
-        if (version != FormatVersion)
+        if (version is < MinFormatVersion or > FormatVersion)
             throw new VaultException($"unsupported vault format v{version}");
-        if (!SHA256.HashData(page[..OffCheck]).AsSpan(0, CheckLen)
-                .SequenceEqual(page.Slice(OffCheck, CheckLen)))
+        // v2: check @192 covers page[0..192); v3: check ends the ext region,
+        // so extLen > 334 (a future extension) slides the check along with it.
+        int checkOff = version == 2 ? OffCheckV2 : V3CheckOff(page);
+        if (!SHA256.HashData(page[..checkOff]).AsSpan(0, CheckLen)
+                .SequenceEqual(page.Slice(checkOff, CheckLen)))
             throw new VaultException("header checksum mismatch — torn write");
         var slots = new VaultKeySlot[KeySlots];
         for (int i = 0; i < KeySlots; i++)
@@ -121,7 +159,7 @@ internal static class VaultFormat
                 page.Slice(at + SlotNonceOff, NonceLen).ToArray(),
                 page.Slice(at + SlotWrapOff, WrappedKeyLen).ToArray());
         }
-        return new VaultHeader(
+        var h = new VaultHeader(
             version,
             BinaryPrimitives.ReadUInt32LittleEndian(page[OffFlags..]),
             page.Slice(OffSalt, SaltLen).ToArray(),
@@ -130,13 +168,30 @@ internal static class VaultFormat
             BinaryPrimitives.ReadUInt64LittleEndian(page[(OffManifestSeq + 8)..]),
             BinaryPrimitives.ReadUInt32LittleEndian(page[OffChunkCount..]),
             BinaryPrimitives.ReadUInt64LittleEndian(page[OffChunkBase..]));
+        if (version >= 3)
+        {
+            h.TpmBlob = page.Slice(OffTpmBlob, TpmBlobLen).ToArray();
+            h.RecBlob = page.Slice(OffRecBlob, RecBlobLen).ToArray();
+            h.RecIters = BinaryPrimitives.ReadUInt32LittleEndian(page[OffRecIters..]);
+        }
+        return h;
     }
 
+    private static int V3CheckOff(ReadOnlySpan<byte> page)
+    {
+        uint extLen = BinaryPrimitives.ReadUInt16LittleEndian(page[OffExt..]);
+        int checkOff = OffExt + (int)extLen - CheckLen;
+        if (extLen < ExtLenV3 || checkOff + CheckLen > HeaderSize)
+            throw new VaultException("header extension length out of range");
+        return checkOff;
+    }
+
+    /// <summary>Always writes v3 — a v2 image upgrades on its next header write.</summary>
     internal static byte[] WriteHeader(in VaultHeader h)
     {
         byte[] page = new byte[HeaderSize];
         HeaderMagic.CopyTo(page, 0);
-        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffVersion), h.Version);
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffVersion), FormatVersion);
         BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffFlags), h.Flags);
         h.Salt.CopyTo(page, OffSalt);
         for (int i = 0; i < KeySlots; i++)
@@ -150,8 +205,12 @@ internal static class VaultFormat
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffManifestSeq + 8), h.ManifestSeq1);
         BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffChunkCount), h.ChunkCount);
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffChunkBase), h.ChunkRegionBase);
-        SHA256.HashData(page.AsSpan(0, OffCheck)).AsSpan(0, CheckLen)
-            .CopyTo(page.AsSpan(OffCheck));
+        BinaryPrimitives.WriteUInt16LittleEndian(page.AsSpan(OffExt), ExtLenV3);
+        h.TpmBlob.AsSpan(0, TpmBlobLen).CopyTo(page.AsSpan(OffTpmBlob));
+        h.RecBlob.AsSpan(0, RecBlobLen).CopyTo(page.AsSpan(OffRecBlob));
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffRecIters), h.RecIters);
+        SHA256.HashData(page.AsSpan(0, OffCheckV3)).AsSpan(0, CheckLen)
+            .CopyTo(page.AsSpan(OffCheckV3));
         return page;
     }
 
@@ -200,6 +259,49 @@ internal static class VaultFormat
         BinaryPrimitives.WriteUInt32LittleEndian(
             aad.AsSpan(SlotAadLabel.Length + 4), gen);
         return aad;
+    }
+
+    // --------------------------------------------------- recovery pepper blob
+
+    /// <summary>
+    /// Seal the pepper under a recovery-phrase KEK into the 64B blob slot:
+    /// nonce 12 | ct 32 | tag 16 | pad 4. <paramref name="phraseKek"/> is
+    /// PBKDF2(normalized phrase, "CKV-REC"‖headerSalt, iters) — built by
+    /// <see cref="ConfigStore.DeriveRecoveryKek"/>.
+    /// </summary>
+    internal static byte[] SealRecoveryPepper(byte[] phraseKek, byte[] pepper)
+    {
+        if (pepper.Length != PepperLen)
+            throw new ArgumentException($"pepper must be {PepperLen}B", nameof(pepper));
+        byte[] blob = new byte[RecBlobLen];
+        byte[] nonce = RandomNumberGenerator.GetBytes(NonceLen);
+        nonce.CopyTo(blob, 0);
+        using var gcm = new AesGcm(phraseKek, TagLen);
+        gcm.Encrypt(nonce, pepper,
+            blob.AsSpan(NonceLen, PepperLen),
+            blob.AsSpan(NonceLen + PepperLen, TagLen), RecLabel);
+        return blob;
+    }
+
+    /// <summary>Open a recovery blob under a phrase KEK; null on tag reject.</summary>
+    internal static byte[]? TryOpenRecoveryPepper(byte[] phraseKek, ReadOnlySpan<byte> blob)
+    {
+        if (blob.Length != RecBlobLen)
+            return null;
+        byte[] pepper = new byte[PepperLen];
+        try
+        {
+            using var gcm = new AesGcm(phraseKek, TagLen);
+            gcm.Decrypt(blob[..NonceLen],
+                blob.Slice(NonceLen, PepperLen),
+                blob.Slice(NonceLen + PepperLen, TagLen), pepper, RecLabel);
+            return pepper;
+        }
+        catch (CryptographicException)
+        {
+            CryptographicOperations.ZeroMemory(pepper);
+            return null;
+        }
     }
 
     // ----------------------------------------------------------------- chunks
@@ -326,13 +428,24 @@ internal sealed class VaultHeader
     }
 
     public uint Version { get; }
-    public uint Flags { get; }
+    public uint Flags { get; set; }
     public byte[] Salt { get; }
     public VaultKeySlot[] KeySlots { get; }
     public ulong ManifestSeq0 { get; set; }
     public ulong ManifestSeq1 { get; set; }
     public uint ChunkCount { get; }
     public ulong ChunkRegionBase { get; }
+
+    // v3 extension — zero-filled when the image is a v2 header or unbound.
+    public byte[] TpmBlob { get; set; } = new byte[VaultFormat.TpmBlobLen];
+    public byte[] RecBlob { get; set; } = new byte[VaultFormat.RecBlobLen];
+    public uint RecIters { get; set; }
+
+    /// <summary>UX hint flag — see the format doc: it can't protect itself.</summary>
+    public bool TpmBound => (Flags & VaultFormat.FlagTpmBound) != 0;
+
+    /// <summary>Whether the image carries a phrase recovery hatch (non-strict bind).</summary>
+    public bool HasRecovery => RecIters != 0;
 }
 
 internal sealed class VaultKeySlot
