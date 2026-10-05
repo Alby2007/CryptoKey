@@ -5,8 +5,8 @@
 ```console
 cryptokey                        # dashboard app: guard + UI (add --dev, --takeover, --classic)
 cryptokey guard                  # tray daemon, console hidden (same flags)
-cryptokey enroll                 # enroll the inserted removable drive (failsafe passphrase, min 8
-                                 # chars); also creates the Start Menu + Desktop shortcuts
+cryptokey enroll                 # enroll the inserted removable drive — generates the recovery
+                                 # phrase (shown once, retyped to confirm); creates shortcuts
 cryptokey open                   # raise the dashboard on the running guard
 cryptokey status                 # local verify + guard reachability
 cryptokey lock                   # IPC: lock now
@@ -72,7 +72,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `SecretSalt` + `SecretHash` | `SHA-256(salt ‖ secret)` verifier — base64 |
 | `PrevSecretHash` | Previous ratchet generation (heal window) |
 | `RotationCount`, `LastRotationUtc` | Ratchet bookkeeping; `status`/dashboard show generation |
-| `PassphraseSalt` + `PassphraseHash` | PBKDF2-HMAC-SHA256 verifier — iteration count stored in `PassphraseIterations`: 600 000 written now, legacy 100 000 verifies until the next change |
+| `PassphraseSalt` + `PassphraseHash` | PBKDF2-HMAC-SHA256 verifier over the normalized recovery phrase — iteration count stored in `PassphraseIterations`: 600 000 written now, legacy 100 000 verifies until the next change |
 | `PassphraseIterations` | PBKDF2 rounds for the hash above — persisted so old hashes keep verifying and upgrades ride the next `ChangePassphrase` |
 | `Guard.PollIntervalMs` | USB poll cadence — default 1000, clamped 250–10 000 |
 | `Guard.LockOnRemoval` | Auto-lock when the key disappears — default `true` |
@@ -85,7 +85,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
 | `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One warn (~20 s before, as a balloon) + one lock per idle streak — both re-arm only after input returns, so a present key's auto-unlock can't flap |
-| `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad passphrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
+| `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad phrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
 | `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
@@ -145,3 +145,9 @@ Start Menu `CryptoKey.lnk` shortcut.
 | Start Menu shortcut | `CryptoKey.lnk` |
 | Desktop shortcut | `CryptoKey.lnk` on `DesktopDirectory` (follows OneDrive redirection) |
 | App icon | `app.ico` — embedded via `ApplicationIcon`; every `.lnk` inherits it |
+
+macOS equivalents: config/log dir `~/Library/Application Support/CryptoKey/`,
+config backup `~/Library/Preferences/CryptoKey/config-backup.json`, flock
+locks + `watchdog.stop` under that dir, unix socket `cryptokey-ctl.sock` under
+`$TMPDIR`, LaunchAgent `~/Library/LaunchAgents/com.cryptokey.guard.plist`,
+unix socket `cryptokey-ctl` under `$TMPDIR`,

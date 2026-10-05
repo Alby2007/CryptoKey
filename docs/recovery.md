@@ -5,6 +5,12 @@ The rule throughout: **fail closed** — an ambiguous state locks rather than
 exposes, and every lock mode keeps an escape path that doesn't depend on
 the lock working.
 
+The tables below name the Windows mechanisms. On macOS the same rules hold
+with different machinery: a killed guard releases capture+tap automatically
+(process-scoped resources — no lock-watchdog or `--release-desktop` needed),
+a failed engage fails closed to `CGSession -suspend`, and respawn layers are
+flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
+
 ## Lock-surface failures
 
 | Failure | What happens | Rescue |
@@ -23,10 +29,10 @@ the lock working.
 | Keyfile wiped from the drive | Drive can't verify → `None` forever — no verify edge, so rotation never runs | Security tab → **Repair keyfile** (explicit, user-gated: unlocked session + drive present — the enrollment trust bar). Deliberately not automatic — auto-healing a failed check would hand a working keyfile to any serial-spoofing drive |
 | Rotation interrupted (crash mid-write) | Config is a generation ahead; drive holds `prev` | Stale verify → `keepPrev` rotation heals — a failed write can never orphan the drive two gens back |
 | Read-only / write-protected drive | Write fails every time | Drive stays `prev`-valid, flagged each poll, retry every 5 s — no lockout |
-| `.cryptokey` copied to another drive / user | Serial check rejects other drives; DPAPI unwrap fails for other users/machines | Re-enroll, or the passphrase under `KeyOrPassphrase` |
+| `.cryptokey` copied to another drive / user | Serial check rejects other drives; DPAPI unwrap fails for other users/machines | Re-enroll, or the recovery phrase under `KeyOrPassphrase` |
 | Clone of the keyfile in play | Presents `prev` after rotation | "possible clone" log + tamper badge; the ratchet burns it out — clone lifetime ≤ 1 session |
 | Attestation mismatch (config tampered) | Tripwire: tamper note + log, secret still verifies | Next rotation re-binds the envelope to the live config |
-| Corrupt/malformed keyfile | Unwrap/parse failure → `SecretMatch.None` → fail closed | Re-enroll; under `KeyOrPassphrase` the passphrase still works |
+| Corrupt/malformed keyfile | Unwrap/parse failure → `SecretMatch.None` → fail closed | Re-enroll; under `KeyOrPassphrase` the recovery phrase still works |
 
 ## Config failures
 
@@ -36,15 +42,16 @@ the lock working.
 | `config.json` **and** `.bak` corrupt | `.bak` quarantined to `.bak.bad`; `HKCU\Software\CryptoKey\Config` restores both files and flags `LastRestoreFromRegistry` | Distinct "folder was wiped" modal + guard-log tamper line + remote alert; only if **all three** copies are dead does the app refuse to run → re-enroll |
 | Whole `%APPDATA%\CryptoKey` folder wiped | Both files re-created from the registry copy on next launch; watchdog respawns via `ConfigStore.Resumable` | Same tamper modal — deleting the folder alone can't disarm CryptoKey; a real reset also deletes `HKCU\Software\CryptoKey` |
 | Hand-edited config overwritten | A running guard saves in-memory state on every rotation | `cryptokey quit` before hand-editing — documented |
-| Re-enroll while guard runs | `reenrolled` IPC → in-place `ReloadConfig` — serial, hashes, guard settings all refresh | Old passphrase dies immediately; if the new key isn't inserted the fail-closed check locks |
+| Re-enroll while guard runs | `reenrolled` IPC → in-place `ReloadConfig` — serial, hashes, guard settings all refresh | The old phrase dies immediately; if the new key isn't inserted the fail-closed check locks |
 | `.tmp` orphans from crashed writes | Atomic tmp+move — the real file is never torn | Next write overwrites the orphan |
 
 ## Input failures
 
 | Failure | What happens | Rescue |
 |---|---|---|
-| Forgotten passphrase | — | The key itself under `KeyOrPassphrase`/`KeyOnly`… otherwise a true lockout (the settings warning is honest about this) |
-| Lost key under `KeyOnly` / 2FA | No passphrase path by design | Re-enroll a new drive; panic combo in `--dev`; CAD → Switch user and kill from that session → watchdog restores input |
+| Forgotten recovery phrase | — | The key itself under `KeyOrPassphrase`/`KeyOnly`… or regenerate the phrase on the Security tab with the enrolled key attached — otherwise a true lockout (the settings warning is honest about this) |
+| Legacy passphrase after upgrade | Old credentials never verify — input is normalized before hashing | `KeyOrPassphrase`: unlock with the key → Security tab → regenerate. `KeyAndPassphrase`: the Security tab is unreachable while locked — `cryptokey enroll` from another same-user session migrates (regenerates the phrase; the `reenrolled` IPC reloads the live guard) |
+| Lost key under `KeyOnly` / 2FA | No phrase path by design | Re-enroll a new drive; panic combo in `--dev`; CAD → Switch user and kill from that session → watchdog restores input |
 | Frozen input during backoff | Cooldown gate in the hook | Amber countdown; panic combo works through the freeze (checked first) |
 | Hook callback stalls | `LowLevelHooksTimeout` → input leaks | By design everything slow runs off the hook thread: WMI polling, PBKDF2, USB rotation writes |
 
@@ -61,7 +68,7 @@ the lock working.
 
 ## The escape hatches, ranked
 
-1. **Passphrase** — normal failsafe (unless `KeyOnly`, by design).
+1. **Recovery phrase** — normal failsafe (unless `KeyOnly`, by design).
 2. **Panic combo** `Ctrl+Alt+Shift+F12` — `--dev` only; disengages first, then exits.
 3. **Watchdog** — automatic on guard death while secure-locked.
 4. **`cryptokey --release-desktop`** — manual desktop rescue, independent of IPC/hooks; also restores lock policies. Reachable while locked only from another logged-in session (Switch user) — after a reboot, Win+R works.

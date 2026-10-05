@@ -3,7 +3,8 @@
 ## Process roles — one exe, several hats
 
 `CryptoKey.exe` dispatches on `argv` before anything else happens. All roles
-share the same binary and config:
+share the same binary and config (the diagram shows the Windows host —
+[macos.md](macos.md) has the Mac equivalents):
 
 ```mermaid
 flowchart TD
@@ -78,7 +79,7 @@ consume the same `_config` instance and the same event surface
 | **WMI worker** (`UsbMonitor`) | `Win32_DiskDrive` enumeration | Polls off-pump so a slow WMI query can't stall hooks; results marshal to the UI thread |
 | **Lock thread** (secure mode, per engage) | `SetThreadDesktop` → `InputLocker` LL hooks → `LockForm` → own message pump | STA. Created fresh every engage; teardown closes the form and joins |
 | **Rotation worker** | `RotateKeyfiles` — pure file I/O on a pre-built envelope | Reads no mutable config; logs back via `BeginInvoke` |
-| **Passphrase worker** | PBKDF2 verify (600k iterations; count stored per-config) | Hook returns instantly; result marshaled back to UI |
+| **Phrase worker** | PBKDF2 verify (600k iterations; count stored per-config) | Hook returns instantly; result marshaled back to UI; the char[] attempt is wiped after verify |
 | **Lock-watchdog process** | `Process.WaitForExit(parent)` → `SwitchDesktop(Default)` | Per-engage, spawned before every secure switch, killed on clean disengage — covers the kill-both window while locked |
 | **Supervisor watchdog process** | Pipe heartbeat (`status`) → release desktop → `LockWorkStation` → respawn `cryptokey guard` | Persistent, one per guard lifetime (`Local\CryptoKeyWatchdog` mutex); stands down on the `CryptoKeyWatchdogStop` event; killed watchdog is respawned by the guard's ~5 s liveness tick |
 
@@ -104,41 +105,73 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `captures\*.jpg` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — newest 50 kept |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
-## Module inventory (`src/CryptoKey`)
+## Module inventory
+
+The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
+`net9.0`, no Windows dependencies) and per-platform hosts
+(`src/CryptoKey.Win` today). Hosts register a `PlatformServices` bundle via
+`Platform.Init` at startup; Core statics resolve OS capabilities through it.
+
+### `src/CryptoKey.Core` — platform-neutral
 
 | File | Role |
 |---|---|
-| `Program.cs` | argv dispatch, mutex/takeover, watchdog + release modes, `status`, `install` — self-install to `%LOCALAPPDATA%\CryptoKey` (copy tree, repoint shortcuts/autostart, live handoff via bare `--takeover` so a GUI guard hands off to a GUI guard) |
+| `CryptoKeyCli.cs` | Shared verb table — `enroll`, `status`, `guard`, `open`, `lock`, `pause`, `resume`, `quit`, `watchdog`; hosts keep their OS-specific roles |
+| `Platform.cs` / `PlatformInterfaces.cs` / `PlatformImpls.cs` | The seam: `Platform.Services` ambient holder, one interface per OS capability (paths, protector, USB enum, key monitor, IPC ACLs, single-instance, stop-signal, lock policies, capture, system actions, config backup, keyfile attrs, app lifetime, lock surfaces, enroll extras, user alerts), shared null/file impls |
 | `GuardService.cs` | State machine, unlock policy, backoff, ratchet orchestration, IPC dispatch, config reload |
-| `UsbMonitor.cs` | WMI polling, presence events, error logging |
 | `KeyVerifier.cs` | v2 envelope wrap/unwrap, legacy keyfile compat, `RotateKeyfiles` |
-| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror/fallback, `RotateSecret` |
-| `AtomicFile.cs` | Durability primitive: tmp → `FlushFileBuffers` → rename — used by config, backup, keyfile, policy writes |
-| `Enrollment.cs` | Drive selection, secret generation, keyfile + config write, `reenrolled` ping |
-| `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput` + setters |
+| `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror + third-copy fallback, `RotateSecret` |
+| `RecoveryPhrase.cs` | Generated 20-char Crockford Base32 credential: `Generate`, `Normalize`, `IsValid` — the only user credential, stored hash-only |
+| `AtomicFile.cs` | Durability primitive: tmp → device flush → rename (`FlushFileBuffers` / `F_FULLFSYNC` gated at runtime) — used by config, backup, keyfile, policy writes |
+| `Enrollment.cs` | Drive selection, phrase display/confirm, keyfile + config write, `reenrolled` ping |
+| `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput`, tier marker (`IsOverlay`), `EngageError`, setters |
+| `IpcServer.cs` / `IpcClient.cs` | Accept loop + dispatch marshal / one-shot CLI transport |
+| `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/OS-lock role + `Supervisor` — guard-side liveness probe, spawn, stop |
+| `UsbDisk.cs` | One USB device: serial, model, mounted volume paths |
+| `GuardState.cs` | `GuardState` + `StatusSnapshot` |
+| `FlapPolicy.cs` | Desktop-flap classification + sliding-window storm counter — pure logic, unit-tested |
+| `AlertService.cs` | Security-event push: POST + `Title` header to a user URL (ntfy.sh/webhook), 4 s, quiet after first failure |
+| `Backoff.cs` | Phrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
+
+### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
+
+| File | Role |
+|---|---|
+| `WinPlatform.cs` | The `PlatformServices` bundle: `%APPDATA%` paths, DPAPI protector, WMI enumerator, mutex/event primitives, pipe SDDL, HKCU third copy, `LockWorkStation`, surface factory, MessageBox alerts |
+| `Program.cs` | `Platform.Init` + argv dispatch — Windows-only roles (`install`, `--set-startup`, `--release-desktop`, `--lock-watchdog`, `--export-icon`), GUI/tray pump |
+| `UsbMonitor.cs` | `IKeyMonitor` — hidden message window, `WM_DEVICECHANGE` + 1s poll fallback, error tolerance |
 | `SecureLockSurface.cs` | Private desktop, STA lock thread, watchdog, switch-back discipline |
 | `ClassicLockSurface.cs` | `LockScreen` + `InputLocker` adapter — pre-facade behavior |
 | `LockScreen.cs` / `Ui/LockForm.cs` | Overlay manager (per-monitor) / the lock card form itself |
-| `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, passphrase buffer, panic combo, hook-side cooldown |
-| `IpcServer.cs` / `IpcClient.cs` | Pipe ACLs + accept loop / one-shot CLI transport |
-| `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/`LockWorkStation` role + `Supervisor` — guard-side mutex probe, spawn, stop |
+| `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, phrase buffer (char[], wiped), panic combo, hook-side cooldown |
+| `NativeMethods.cs` | Win32 P/Invoke surface |
 | `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
 | `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure |
-| `FlapPolicy.cs` | Desktop-flap classification + sliding-window storm counter — pure logic, unit-tested |
-| `AlertService.cs` | Security-event push: POST + `Title` header to a user URL (ntfy.sh/webhook), 4 s, quiet after first failure |
 | `Sounds.cs` | Synthesized PCM cues (lock thunk, unlock chime, storm blip) — generated WAVs, `SoundPlayer.Play` off-thread |
-| `Backoff.cs` | Passphrase-freeze ladder (15s doubling → 300s cap) — extracted for the test suite |
-
-`tests/CryptoKey.Tests` (xUnit) covers the pure security invariants —
-rotation chain (incl. `keepPrev` orphan-proofing), envelope/attestation,
-tri-state match, `RotateKeyfiles` semantics, backoff ladder, config-store
-round-trip — the store is redirected into a temp dir by a
-`CRYPTOKEY_CONFIG_ROOT` env var set in a module initializer (before any
-test code, so the static `ConfigDir` can't be captured too early). The
-interactive layer
-(`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
-agents are non-interactive.
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |
 | `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
 | `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/log pages, theming |
+
+### `src/CryptoKey.Mac` — macOS host (`cryptokey`, Avalonia 11)
+
+| File | Role |
+|---|---|
+| `MacPlatform.cs` | The `PlatformServices` bundle: `~/Library/Application Support` paths, Keychain protector, DA enumerator, poll `MacKeyMonitor`, unix-socket IPC, `flock` single-instance + stand-down file, `FileConfigBackup`, `CGSession`/`pmset`/`osascript` actions, pump or Avalonia dispatcher, surface factory |
+| `MacInterop.cs` | P/Invoke surface — CoreFoundation, CoreGraphics, Security, DiskArbitration, libc (`statfs`, `flock`), libobjc (`setLevel:`, activation policy) |
+| `MacUsbEnumerator.cs` | `/Volumes` → `statfs` → `DADiskCreateFromBSDName` — removable + serial per mount, grouped per whole disk |
+| `KeychainProtector.cs` | AES-GCM wrap key in the login Keychain (device-only accessible); entropy → AAD |
+| `MacLockSurface.cs` | `CGEventTap` on its own run-loop thread + `CGDisplayCapture` + fixed char buffer; engage fails closed via `CGSession -suspend` |
+| `Ui/` | `MacApp` + `AvaloniaUiDispatcher`, `LockWindowCtl`/`LockWindow` (per-screen shielding cards), `MacTray` (menu-bar verbs → `DispatchCommand`) |
+| `MacInstall.cs` | `install`/`uninstall` — payload copy to `~/Applications/CryptoKey`, LaunchAgent plist + `launchctl bootstrap` |
+| `Program.cs` | `Platform.Init` + argv dispatch — UI tier by default, `--headless` pump fallback, hidden `uitest` smoke |
+
+`tests/CryptoKey.Tests` (xUnit, `net9.0`) covers the pure security
+invariants — rotation chain (incl. `keepPrev` orphan-proofing),
+envelope/attestation, tri-state match, `RotateKeyfiles` semantics, backoff
+ladder, config-store round-trip. The store is redirected into a temp dir
+by `CRYPTOKEY_CONFIG_ROOT` and `Platform.Services` gets a null/temp
+bundle — both set in a module initializer before any test code runs, so
+the ambient can't be captured too early. The interactive layer
+(`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
+agents are non-interactive.

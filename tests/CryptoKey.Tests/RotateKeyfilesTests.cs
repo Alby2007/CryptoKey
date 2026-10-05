@@ -4,7 +4,7 @@ namespace CryptoKey.Tests;
 public class RotateKeyfilesTests
 {
     [Fact]
-    public void Writes_only_letters_that_already_have_keyfiles()
+    public void Writes_only_volumes_that_already_have_keyfiles()
     {
         string a = TestDisk.TempDir(), b = TestDisk.TempDir();
         byte[] secret = TestDisk.RandomSecret();
@@ -15,14 +15,14 @@ public class RotateKeyfilesTests
         var results = KeyVerifier.RotateKeyfiles(TestDisk.For(a, b), envelope);
 
         Assert.Single(results);
-        Assert.Equal(b, results[0].Letter);
+        Assert.Equal(b, results[0].Volume);
         Assert.Null(results[0].Error);
         Assert.False(File.Exists(KeyVerifier.KeyFilePath(a)));
         Assert.True(File.ReadAllBytes(KeyVerifier.KeyFilePath(b)).SequenceEqual(envelope));
     }
 
     [Fact]
-    public void No_keyfile_anywhere_re_arms_first_letter()
+    public void No_keyfile_anywhere_re_arms_first_volume()
     {
         string a = TestDisk.TempDir(), b = TestDisk.TempDir();
         KeyConfig config = TestDisk.NewConfig(TestDisk.RandomSecret());
@@ -31,7 +31,7 @@ public class RotateKeyfilesTests
         var results = KeyVerifier.RotateKeyfiles(TestDisk.For(a, b), envelope);
 
         Assert.Single(results);
-        Assert.Equal(a, results[0].Letter); // first letter re-armed
+        Assert.Equal(a, results[0].Volume); // first volume re-armed
         Assert.True(File.ReadAllBytes(KeyVerifier.KeyFilePath(a)).SequenceEqual(envelope));
         Assert.False(File.Exists(KeyVerifier.KeyFilePath(b)));
     }
@@ -50,9 +50,9 @@ public class RotateKeyfilesTests
     }
 
     [Fact]
-    public void Unwritable_letter_reports_error_not_throw()
+    public void Unwritable_volume_reports_error_not_throw()
     {
-        // A bogus letter whose parent doesn't exist makes the write fail.
+        // A bogus mount whose parent doesn't exist makes the write fail.
         string bad = Path.Combine(Path.GetTempPath(), "cktest-missing-" + Guid.NewGuid().ToString("N"));
         KeyConfig config = TestDisk.NewConfig(TestDisk.RandomSecret());
         // Pre-seed a "keyfile exists" marker is impossible on a missing dir —

@@ -14,7 +14,7 @@ for the rest.
 | Keyfile copied to another drive or another user | Hardware serial check + DPAPI binding (user+machine) |
 | Long-lived key cloning | Secret ratchet — a stale clone is flagged and burns out |
 | `config.json` tampering | Keyfile attestation MAC — tripwire, not gate |
-| Passphrase brute force | PBKDF2 + exponential input freeze enforced in the hook |
+| Recovery-phrase brute force | PBKDF2 + exponential input freeze enforced in the hook |
 | Single-process kill of the guard | Persistent watchdog — heartbeats the control pipe (~2 s dead-detection), fail-closed `LockWorkStation` + respawn if the guard died locked, respawn if unlocked. The guard respawns the watchdog the same way |
 | Casual discovery of the kill path | Lock policies — while locked, HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` hide Task Manager, Sign out/Switch user, and Start-menu power buttons. In overlay mode this closes the CAD → Task Manager → end-process kill path outright; in secure mode it's a garnish on top of desktop isolation. Priors (any registry kind) backed up verbatim to `lockpolicies.json`, restored on unlock |
 | "Walked away with the key still in" | `GetLastInputInfo` idle lock — fires only from Unlocked (Paused suppresses it like all auto-lock) |
@@ -44,8 +44,25 @@ for the rest.
 | Device secret | `.cryptokey` on the drive | 64 random bytes, generated at enroll; never stored locally in plaintext |
 | `SecretSalt` / `SecretHash` | `config.json` | Verifier: `SHA-256(salt ‖ secret)` — 64 B of entropy, single salted SHA-256 suffices |
 | `PrevSecretHash` | `config.json` | Prior generation — the interrupted-rotation heal window |
-| `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256, per-config iteration count (600 000 new, legacy 100 000 verifies), salted — the failsafe factor |
+| `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256 over the normalized recovery phrase, per-config iteration count (600 000 new, legacy 100 000 verifies), salted — the failsafe factor |
 | Attestation | inside the keyfile envelope | `HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)` |
+
+## Recovery phrase
+
+The failsafe credential is **generated, never chosen**: 20 Crockford
+Base32 characters (`0123456789ABCDEFGHJKMNPQRSTVWXYZ` — no I, L, O, or U,
+dropping the 0/1 lookalikes) ≈ 100 bits, shown grouped as
+`XXXXX-XXXXX-XXXXX-XXXXX`, once, at enrollment and each regeneration;
+only the PBKDF2 hash is stored. Entry is normalized — uppercased,
+separators dropped, `O→0` and `I`·`L→1` folded — so transcription slips
+still verify, while `phrase + stray char` does not.
+
+It replaces the old user-chosen passphrase. The migration is deliberately
+one-way: every credential is normalized before hashing, so a raw legacy
+passphrase hash can never match — old passphrases stop working. The
+escape hatch is the Security tab's regenerate flow, which authorizes by
+**current phrase OR a freshly verified enrolled key** — and the key is a
+stronger proof than the credential anyway.
 
 ## Keyfile envelope (v2)
 
@@ -59,8 +76,8 @@ for the rest.
 
 - **DPAPI under `CurrentUser`** binds the file to this Windows user on this
   machine — a copied `.cryptokey` unwraps to garbage anywhere else.
-- **Attestation MAC** covers the serial and passphrase hash, so swapping
-  `config.json` values (e.g. a known passphrase hash) makes the keyfile's
+- **Attestation MAC** covers the serial and phrase hash, so swapping
+  `config.json` values (e.g. a known phrase hash) makes the keyfile's
   attestation disagree with the live config → tamper flag. It's a
   **tripwire, not a gate**: the secret itself still verifies and the next
   rotation re-binds the envelope to the live config.
@@ -111,18 +128,18 @@ Failure semantics:
 `Guard.UnlockPolicy` — `KeyOrPassphrase` (default), `KeyAndPassphrase`,
 `KeyOnly` — plus `StrictTamper`:
 
-| Policy | Key insert | Passphrase | Stale keyfile |
+| Policy | Key insert | Recovery phrase | Stale keyfile |
 |---|---|---|---|
 | `KeyOrPassphrase` | unlocks | unlocks | unlocks (flagged) — strict: no |
-| `KeyAndPassphrase` | **arms the factor** — stays locked until passphrase | completes unlock only while armed | strict: doesn't arm |
+| `KeyAndPassphrase` | **arms the factor** — stays locked until the phrase | completes unlock only while armed | strict: doesn't arm |
 | `KeyOnly` | unlocks | rejected — "insert the key" | strict: no auto-unlock |
 
 - Under `KeyAndPassphrase` the armed factor is **volatile**: removing the
-  key while locked disarms it — a correct passphrase alone won't unlock
+  key while locked disarms it — a correct phrase alone won't unlock
   ("insert your key first").
-- **Break-glass**: strict + stale keyfile + correct passphrase → unlocks,
+- **Break-glass**: strict + stale keyfile + correct phrase → unlocks,
   logged loudly as a break-glass event with the tamper alarm. An absent key
-  under 2FA is *not* break-glass — the passphrase alone never suffices.
+  under 2FA is *not* break-glass — the phrase alone never suffices.
 - `StrictTamper` says a replayed previous-generation secret never counts as
   the key factor — under any policy. The rotation still heals the file to
   current, at which point normal rules apply.
@@ -158,7 +175,7 @@ machine:
 - `quit` is refused while locked (quitting would be a silent unlock);
   `pause` requires unlocked/paused.
 
-## Passphrase backoff
+## Recovery-phrase backoff
 
 Failures 1–2 are free. From failure 3: `15 << min(fails−3, 5)` seconds,
 capped at 300 — 15 s → 30 s → 60 s → 120 s → 240 s → 300 s. Enforced
@@ -166,6 +183,36 @@ capped at 300 — 15 s → 30 s → 60 s → 120 s → 240 s → 300 s. Enforced
 input during a freeze is eaten without counting. The lock screen paints a
 live countdown. The counter is in-memory — it clears on unlock, re-lock,
 config reload, or restart (documented trade-off).
+
+## macOS equivalences (`CryptoKey.Mac`)
+
+The crypto and state machine are identical; the OS-facing primitives differ:
+
+- **Keyfile binding**: DPAPI's machine+user seal becomes a random AES-256-GCM
+  wrap key in the login Keychain (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
+  — never iCloud, unusable while locked). The caller-supplied `entropy` rides
+  as AES-GCM *additional authenticated data*, so a ciphertext can only be
+  unwrapped under the same call context. A copied keyfile is as dead off this
+  Mac as a DPAPI blob is off the Windows box.
+- **IPC**: `cryptokey-ctl` is a unix socket under the per-user `$TMPDIR` —
+  same-user-only by filesystem layout; the DACL/SACL hardening has no analog
+  needed (no cross-integrity sharing to label for).
+- **Single-instance / supervision**: `flock` on config-dir lockfiles (dies
+  with the process, same semantics as the mutexes). The watchdog pair is
+  unchanged; launchd (`KeepAlive=Crashed`) adds a third, outermost respawn
+  layer — it revives signal-killed guards but lets clean exits stay dead.
+- **Lock surface**: there is no private-desktop API on macOS. The single tier
+  is `CGDisplayCapture` (blanks every display to the capturing app) +
+  shielding-level windows + a session `CGEventTap` that eats all HID events
+  and feeds the same fixed 256-char buffer. Death safety is stronger than
+  Windows by construction — capture and taps are per-process resources, so a
+  killed guard always releases the session; no lock-watchdog needed.
+- **Fail-closed**: a failed engage (missing Accessibility permission)
+  releases everything and calls `CGSession -suspend` — the real OS lock
+  stands in for Task-Manager sealing.
+- **Tripwires**: idle meter via `CGEventSourceSecondsSinceLastEventType`;
+  lock policies and webcam capture are no-ops (no platform equivalent
+  wired yet).
 
 ## Known limits
 
