@@ -50,7 +50,7 @@ internal static class MacPlatform
             KeyfileAttrs = new NoopKeyfileAttrs(), // ".cryptokey" is a dotfile already
             AppLifetime = lifetime,
             Surfaces = new MacLockSurfaceFactory(lockUi),
-            EnrollmentExtras = new NoopEnrollmentExtras(),
+            EnrollmentExtras = new MacEnrollmentExtras(),
             UserAlerts = new MacUserAlerts(),
         };
 }
@@ -351,7 +351,8 @@ internal sealed class MacSystemActions : ISystemActions
                 System.Diagnostics.Process.Start(cgSession, "-suspend");
                 return;
             }
-            System.Diagnostics.Process.Start("pmset", "displaysleepnow");
+            // Absolute path — launchd's PATH is minimal.
+            System.Diagnostics.Process.Start("/usr/bin/pmset", "displaysleepnow");
         }
         catch (Exception) { }
     }
@@ -390,6 +391,12 @@ internal sealed class MacLockSurfaceFactory : ILockSurfaceFactory
         => new MacLockSurface(devMode, _ui);
 }
 
+/// <summary>Post-enroll: a freshly enrolled guard should start immediately.</summary>
+internal sealed class MacEnrollmentExtras : IEnrollmentExtras
+{
+    public void AfterEnroll() => MacInstall.KickstartIfInstalled();
+}
+
 /// <summary>Headless alert: osascript dialog if a UI session is up, else console.</summary>
 internal sealed class MacUserAlerts : IUserAlerts
 {
@@ -398,7 +405,7 @@ internal sealed class MacUserAlerts : IUserAlerts
         try
         {
             string esc = message.Replace("\"", "\\\"");
-            var psi = new System.Diagnostics.ProcessStartInfo("osascript")
+            var psi = new System.Diagnostics.ProcessStartInfo("/usr/bin/osascript")
             { UseShellExecute = false };
             psi.ArgumentList.Add("-e");
             psi.ArgumentList.Add($"display dialog \"{esc}\" with title \"CryptoKey\" " +

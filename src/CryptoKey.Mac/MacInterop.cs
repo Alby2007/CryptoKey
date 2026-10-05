@@ -221,6 +221,7 @@ internal static class MacInterop
     [DllImport(LibC)] internal static extern int close(int fd);
     [DllImport(LibC)] internal static extern int unlink(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(LibC)] internal static extern uint getuid();
 
     internal const int O_WRONLY = 0x0001;
     internal const int O_CREAT = 0x0200;

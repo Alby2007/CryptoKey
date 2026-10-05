@@ -169,7 +169,7 @@ internal interface ILockSurfaceFactory
 
 internal interface IEnrollmentExtras
 {
-    /// <summary>After a successful enroll — shell shortcuts on Windows; no-op on Mac.</summary>
+    /// <summary>After a successful enroll — shell shortcuts on Windows; LaunchAgent kickstart on Mac.</summary>
     void AfterEnroll();
 }
 

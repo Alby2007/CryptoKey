@@ -41,9 +41,9 @@ internal static class Program
                 return UiTest(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
                     args.Contains("--headless", StringComparer.OrdinalIgnoreCase));
             case "install":
-                Console.WriteLine("install is not wired on macOS yet — run " +
-                    "'cryptokey guard' directly (LaunchAgent lands in Phase 4).");
-                return 1;
+                return MacInstall.Install();
+            case "uninstall":
+                return MacInstall.Uninstall();
             case "help":
                 Usage();
                 return 0;
@@ -226,8 +226,11 @@ internal static class Program
         Console.WriteLine("  cryptokey pause [mins]  Pause auto-lock (default 5)");
         Console.WriteLine("  cryptokey resume        End a pause early");
         Console.WriteLine("  cryptokey quit          Stop the guard (refused while locked)");
+        Console.WriteLine("  cryptokey install       Copy to ~/Applications + LaunchAgent autostart");
+        Console.WriteLine("  cryptokey uninstall     Remove the LaunchAgent (binary stays)");
         Console.WriteLine();
         Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Opt+Shift+F12");
+        Console.WriteLine("  --headless         run without windows/tray (capture+tap only)");
         Console.WriteLine("  NOTE: the lock needs Accessibility permission (event tap) —");
         Console.WriteLine("        approve the prompt in Privacy & Security → Accessibility.");
     }
