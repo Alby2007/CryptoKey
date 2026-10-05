@@ -298,7 +298,7 @@ internal static class Program
             try
             {
                 CopyTree(sourceDir, targetDir);
-                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}");
+                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}\n  build {CryptoKeyCli.BuildStamp}");
             }
             catch (Exception ex)
             {
@@ -335,7 +335,7 @@ internal static class Program
                     Console.WriteLine("Copy still blocked after the guard quit — files stayed locked.");
                     return 1;
                 }
-                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}");
+                Console.WriteLine($"Installed {sourceDir}\n  -> {targetDir}\n  build {CryptoKeyCli.BuildStamp}");
             }
         }
 

@@ -44,8 +44,10 @@ Flags: `--dev` enables the panic exit combo `Ctrl+Alt+Shift+F12`;
 `--classic` forces the overlay lock for that launch.
 
 `status` exit code: 0 when the keyfile verifies (including previous-gen),
-non-zero otherwise. `status` output includes `Unlock policy` and
-`Lock mode` lines, and a `Guard:` line when the daemon answers the pipe.
+non-zero otherwise. `status` output starts with a `CryptoKey:` build line
+(`0.9.0+<commit>` — compare the suffix against `git rev-parse HEAD` to
+check the installed copy is current), then `Unlock policy`/`Lock mode`
+lines, and a `Guard:` line when the daemon answers the pipe.
 
 ## IPC protocol — `\\.\pipe\cryptokey-ctl`
 
@@ -59,7 +61,7 @@ read timeout ~5 s.
 | `resume` | `ok resumed` / `err not paused` | |
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
-| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
+| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… build=…` | `watchdog=alive/down` — supervisor liveness; `build` = running guard's version+commit |
 | `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… tpm=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`/`tpmlocked`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq; `tpm` = `bound`/`-` |
 | `vault tpm-bind <phrase> [--strict]` | `ok vault bound to this machine` / `err …` | Wraps the pepper under the TPM + seals a phrase-recovery blob (omitted under `--strict`); needs the vault unsealed |
 | `vault tpm-unbind` | `ok vault unbound` / `err …` | Re-wraps slots pepperless + deletes the TPM key |

@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace CryptoKey;
 
 /// <summary>Host-specific verb hooks — the pump-carrying guard run is the host's.</summary>
@@ -15,6 +17,22 @@ internal interface IHostVerbs
 /// </summary>
 internal static class CryptoKeyCli
 {
+    /// <summary>
+    /// "0.9.0+747d38b…" — version + commit of the running exe, from
+    /// InformationalVersion (the SDK stamps SourceRevisionId). Compare the
+    /// suffix with `git rev-parse HEAD` to tell whether the installed copy
+    /// matches the repo.
+    /// </summary>
+    public static string BuildStamp
+    {
+        get
+        {
+            var asm = Assembly.GetEntryAssembly() ?? typeof(CryptoKeyCli).Assembly;
+            return asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                       ?.InformationalVersion ?? "0.0.0+unknown";
+        }
+    }
+
     public static int? Run(string[] args, IHostVerbs host)
     {
         if (args.Length == 0)
@@ -121,6 +139,7 @@ internal static class CryptoKeyCli
             return 1;
         }
 
+        Console.WriteLine($"CryptoKey:     {BuildStamp}");
         Console.WriteLine($"Config:        {ConfigStore.ConfigPath}");
         Console.WriteLine($"Device serial: {config.DeviceSerial}");
         Console.WriteLine($"Unlock policy: {config.Guard.UnlockPolicy}" +

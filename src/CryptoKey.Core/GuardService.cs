@@ -456,6 +456,7 @@ internal sealed class GuardService : IDisposable
                        $"keyVerified={_keyVerifiedNow} " +
                        $"policy={_config.Guard.UnlockPolicy} " +
                        $"watchdog={(s.WatchdogAlive ? "alive" : "down")} " +
+                       $"build={CryptoKeyCli.BuildStamp} " +
                        $"vault={(s.Vault == null ? "off" :
                            s.Vault.State.ToString().ToLowerInvariant() +
                            (s.Vault.State == VaultState.Mounted ? $"@{s.Vault.MountPoint}" : ""))}";
