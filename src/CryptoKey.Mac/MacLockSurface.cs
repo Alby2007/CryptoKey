@@ -41,21 +41,24 @@ internal sealed class MacLockSurface : ILockSurface
     private volatile bool _engaged;
     private volatile bool _tapReady; // tap thread posted its run loop
     private volatile bool _tapAbort; // StartTap timed out — thread must not publish
+    private readonly bool _isOverlay;
     private string? _engageError;
 
     // The callback must be rooted — the GC can't see the CFMachPort's ref.
     private readonly MacInterop.CgEventTapCallBack _tapCallback;
 
-    public MacLockSurface(bool devMode, LockWindowCtl? ui)
+    public MacLockSurface(bool devMode, LockWindowCtl? ui, bool securePreferred = true)
     {
         _devMode = devMode;
         _ui = ui;
+        _isOverlay = !securePreferred;
         _tapCallback = OnTapEvent;
     }
 
-    /// <summary>One tier on macOS — capture+tap can't strand a session, so
-    /// it answers true to "are you the safe fallback" either way.</summary>
-    public bool IsOverlay => true;
+    /// <summary>Reports whichever tier was asked for — capture+tap serves both
+    /// on macOS, and answering honestly keeps EnsureSurfaceMode from churning
+    /// a fresh surface on every lock.</summary>
+    public bool IsOverlay => _isOverlay;
 
     public string? EngageError => _engageError;
 
@@ -103,6 +106,7 @@ internal sealed class MacLockSurface : ILockSurface
     /// <summary>Fail-dead path, callable from any thread.</summary>
     public void ReleaseInput()
     {
+        _engaged = false; // same contract as Windows: disarmed means disengaged
         try { KillTap(); } catch (Exception) { }
         // Windows go before capture release — a topmost fullscreen card
         // must never linger on the normal desktop.
@@ -180,17 +184,27 @@ internal sealed class MacLockSurface : ILockSurface
 
     private void KillTap()
     {
-        IntPtr port = _tapPort;
-        IntPtr rl = _tapRunLoop;
+        IntPtr rl;
+        lock (_tapSync)
+        {
+            rl = _tapRunLoop;
+            _tapRunLoop = IntPtr.Zero;
+            // _tapPort stays published — the tap thread is its sole owner
+            // and releases it in TapThreadMain's finally. Invalidating it
+            // here would race that CFRelease — a use-after-free window.
+        }
         if (rl != IntPtr.Zero)
         {
-            if (port != IntPtr.Zero)
-                MacInterop.CFMachPortInvalidate(port);
+            // Stopping + waking the run loop ends CFRunLoopRun; the tap
+            // port is then released by its owning thread. An unserviced
+            // tap is auto-disabled by the OS anyway — no lock-in risk.
             MacInterop.CFRunLoopStop(rl);
             MacInterop.CFRunLoopWakeUp(rl);
         }
-        _tapPort = IntPtr.Zero;
-        _tapRunLoop = IntPtr.Zero;
+        // Bound the wait — PanicRequested runs ON the tap thread (Join on
+        // self deadlocks), and a wedged loop must not hang disposal.
+        if (_tapThread != null && _tapThread != Thread.CurrentThread)
+            _tapThread.Join(2000);
     }
 
     private void TapThreadMain()
@@ -228,13 +242,16 @@ internal sealed class MacLockSurface : ILockSurface
         }
         finally
         {
-            if (src != IntPtr.Zero) MacInterop.CFRelease(src);
-            if (port != IntPtr.Zero) MacInterop.CFRelease(port);
+            // Clear the published handles BEFORE releasing them — KillTap
+            // grabs them under the same lock, so it can never invalidate a
+            // port this thread has already freed.
             lock (_tapSync)
             {
                 _tapPort = IntPtr.Zero;
                 _tapRunLoop = IntPtr.Zero;
             }
+            if (src != IntPtr.Zero) MacInterop.CFRelease(src);
+            if (port != IntPtr.Zero) MacInterop.CFRelease(port);
         }
     }
 

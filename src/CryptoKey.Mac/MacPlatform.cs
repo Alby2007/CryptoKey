@@ -94,6 +94,8 @@ internal sealed class MacPump : IUiDispatcher, IAppLifetime
     public T Send<T>(Func<T> work)
     {
         // Callers run OFF the pump (IPC server thread). Marshal in, block out.
+        if (_exited)
+            throw new InvalidOperationException("pump is stopped");
         var done = new ManualResetEventSlim();
         T? result = default;
         Exception? error = null;
@@ -103,7 +105,10 @@ internal sealed class MacPump : IUiDispatcher, IAppLifetime
             catch (Exception ex) { error = ex; }
             finally { done.Set(); }
         });
-        done.Wait();
+        // Bounded wait — if the pump dies after the Post lands, an unbounded
+        // Wait would wedge the IPC thread forever.
+        if (!done.Wait(TimeSpan.FromSeconds(15)))
+            throw new TimeoutException("pump did not run the work item");
         if (error != null)
             throw error;
         return result!;
@@ -210,7 +215,10 @@ internal sealed class MacKeyMonitor : IKeyMonitor
     {
         _dead = true;
         _wake.Set();
-        _wake.Dispose();
+        // _wake is deliberately NOT disposed: the loop can sit between
+        // Reset() and the next Wait() while Dispose runs, and a disposed
+        // Wait would throw on the monitor thread — an unhandled crash
+        // during shutdown. Abandoned MRESes cost nothing.
     }
 }
 
@@ -384,11 +392,12 @@ internal sealed class MacLockSurfaceFactory : ILockSurfaceFactory
 
     /// <summary>
     /// One surface, both tiers: capture+tap IS the strong tier on macOS;
-    /// the overlay distinction is a Windows artifact. securePreferred is
-    /// ignored — same machinery either way.
+    /// the overlay distinction is a Windows artifact. securePreferred only
+    /// sets which tier the surface claims to be, so GuardService's
+    /// EnsureSurfaceMode has nothing to rebuild.
     /// </summary>
     public ILockSurface Create(bool securePreferred, bool devMode)
-        => new MacLockSurface(devMode, _ui);
+        => new MacLockSurface(devMode, _ui, securePreferred);
 }
 
 /// <summary>Post-enroll: a freshly enrolled guard should start immediately.</summary>
@@ -404,7 +413,9 @@ internal sealed class MacUserAlerts : IUserAlerts
     {
         try
         {
-            string esc = message.Replace("\"", "\\\"");
+            // Backslash first — escaping quotes before backslashes would
+            // double-escape and a trailing \ would still eat the close quote.
+            string esc = message.Replace("\\", "\\\\").Replace("\"", "\\\"");
             var psi = new System.Diagnostics.ProcessStartInfo("/usr/bin/osascript")
             { UseShellExecute = false };
             psi.ArgumentList.Add("-e");

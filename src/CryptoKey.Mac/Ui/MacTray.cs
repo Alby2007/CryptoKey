@@ -42,8 +42,16 @@ internal static class MacTray
             Dispatcher.UIThread.Post(() =>
             {
                 string reply = svc.DispatchCommand(verb);
-                if (reply.StartsWith("err", StringComparison.Ordinal))
-                    Platform.Services.UserAlerts.Warn(reply);
+                if (reply.StartsWith("err", StringComparison.Ordinal)
+                    || verb == "status")
+                {
+                    // Errors always surface; Status is the menu's only
+                    // read-only verb — show the snapshot it returned.
+                    Platform.Services.UserAlerts.Warn(
+                        reply.StartsWith("ok ", StringComparison.Ordinal)
+                            ? reply[3..]
+                            : reply);
+                }
             });
         };
         return item;
