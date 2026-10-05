@@ -2,7 +2,7 @@
 
 CryptoKey turns a USB flash drive into a physical security key: pull the
 drive and the PC locks behind a private desktop or a fullscreen overlay;
-insert it (or type the failsafe passphrase) to unlock.
+insert it (or type your recovery phrase) to unlock.
 
 These docs describe how the pieces fit together. For the user-facing guide
 (install, usage, warnings) see the [root README](../README.md).

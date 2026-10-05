@@ -153,12 +153,14 @@ public class ConfigStoreTests
         KeyConfig config = ConfigStore.CreateNew("S", TestDisk.RandomSecret(), "pass-one");
         Assert.Equal(600_000, config.PassphraseIterations);
 
-        // A legacy 100k hash keeps verifying under its own count…
+        // A legacy 100k hash keeps verifying under its own count — the
+        // stored hash is of the normalized form ("PASSONE"), which is how
+        // every phrase credential is written now.
         byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
         config.PassphraseIterations = 100_000;
         config.PassphraseHash = Convert.ToBase64String(
             System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
-                "pass-one", salt, 100_000,
+                "PASSONE", salt, 100_000,
                 System.Security.Cryptography.HashAlgorithmName.SHA256, 32));
         Assert.True(ConfigStore.VerifyPassphrase(config, "pass-one"));
 

@@ -1,25 +1,24 @@
 using System.Diagnostics;
-using System.Drawing.Drawing2D;
 
 namespace CryptoKey;
 
-/// <summary>Failsafe-passphrase management, enrolled-key info, re-enroll.</summary>
+/// <summary>Recovery-phrase management, enrolled-key info, re-enroll.</summary>
 internal sealed class SecurityPage : UserControl
 {
-    private const int MinPassphraseLength = KeyConfig.MinPassphraseLength;
-
     private readonly KeyConfig _config;
     private readonly GuardService _service;
     private readonly Action<string, bool> _notify;
 
     private readonly TextField _current;
-    private readonly TextField _newPass;
-    private readonly TextField _confirm;
-    private readonly StrengthMeter _meter;
+    private readonly TextField _retype;
+    private readonly Label _phrase;
     private readonly Label _result;
     private readonly Label _keyStatus;
     private readonly Label _keyDetail;
+    private readonly AppButton _gen;
+    private readonly AppButton _confirm;
     private readonly AppButton _repair;
+    private string? _pending;   // generated phrase awaiting retype-confirmation
 
     public SecurityPage(KeyConfig config, GuardService service, Action<string, bool> notify)
     {
@@ -85,42 +84,82 @@ internal sealed class SecurityPage : UserControl
         _repair.Click += (_, _) => Repair();
         keyCard.Controls.AddRange(new Control[] { _keyStatus, _keyDetail, reenroll, _repair });
 
-        // ---- Passphrase ----
+        // ---- Recovery phrase ----
         var passCard = new CardPanel
         {
-            Title = "Failsafe passphrase",
+            Title = "Recovery phrase",
             Glyph = Glyphs.Key,
             Dock = DockStyle.Top,
-            Height = 246,
+            Height = 306,
         };
         var passInner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 4; i++)
-            passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, i == 3 ? 16f : 42f));
+        passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
+        passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+        passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
+        passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f));
+        passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
         passInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
         passInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        _current = Field("Current passphrase");
-        _newPass = Field("New passphrase");
-        _confirm = Field("Confirm new passphrase");
-        _meter = new StrengthMeter { Dock = DockStyle.Fill, Margin = new Padding(2, 2, 2, 0) };
-        _newPass.TextValueChanged += (_, _) => _meter.Score = Score(_newPass.Text);
-
-        var changeBtn = new AppButton
+        var info = new Label
         {
-            Text = "Update passphrase",
-            Glyph = Glyphs.Check,
+            Text = "Generated, not chosen — the failsafe when your key isn't attached. " +
+                   "Old passphrases no longer work: regenerate with the enrolled key attached.",
+            Font = Theme.UIFont(8.5f),
+            ForeColor = Theme.TextDim,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoSize = false,
+        };
+
+        _current = Field("Current phrase");
+        _current.EnterKey += (_, _) => GeneratePhrase();
+
+        _gen = new AppButton
+        {
+            Text = "Generate new phrase",
+            Glyph = Glyphs.Refresh,
             Variant = ButtonVariant.Primary,
             Dock = DockStyle.Left,
             Width = 180,
         };
-        changeBtn.Click += (_, _) => ChangePassphrase();
+        _gen.Click += (_, _) => GeneratePhrase();
+
+        _phrase = new Label
+        {
+            Text = "the new phrase appears here — shown once",
+            Font = Theme.MonoFont(11f),
+            ForeColor = Theme.TextDim,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            AutoSize = false,
+        };
+
+        // Plain text — the phrase is already on screen, so masking the
+        // retype buys nothing and only invites typos.
+        _retype = Field("Retype the new phrase to confirm");
+        _retype.Password = false;
+        _retype.Enabled = false;
+        _retype.EnterKey += (_, _) => ConfirmPhrase();
+
+        _confirm = new AppButton
+        {
+            Text = "Save phrase",
+            Glyph = Glyphs.Check,
+            Variant = ButtonVariant.Primary,
+            Dock = DockStyle.Left,
+            Width = 180,
+            Enabled = false,
+        };
+        _confirm.Click += (_, _) => ConfirmPhrase();
+
         _result = new Label
         {
             Font = Theme.UIFont(8.5f),
@@ -129,12 +168,13 @@ internal sealed class SecurityPage : UserControl
             Anchor = AnchorStyles.Left,
         };
 
-        passInner.Controls.Add(_current, 0, 0);
-        passInner.Controls.Add(_newPass, 0, 1);
-        passInner.Controls.Add(_confirm, 0, 2);
-        passInner.Controls.Add(_meter, 0, 3);
-        passInner.Controls.Add(changeBtn, 0, 4);
-        passInner.Controls.Add(_result, 0, 5);
+        passInner.Controls.Add(info, 0, 0);
+        passInner.Controls.Add(_current, 0, 1);
+        passInner.Controls.Add(_gen, 0, 2);
+        passInner.Controls.Add(_phrase, 0, 3);
+        passInner.Controls.Add(_retype, 0, 4);
+        passInner.Controls.Add(_confirm, 0, 5);
+        passInner.Controls.Add(_result, 0, 6);
         passCard.Controls.Add(passInner);
 
         layout.Controls.Add(keyCard, 0, 0);
@@ -153,36 +193,75 @@ internal sealed class SecurityPage : UserControl
             Margin = new Padding(0, 0, 0, 8),
         };
 
-    private static int Score(string s)
+    /// <summary>
+    /// Regeneration is gated two ways: the current credential, OR a freshly
+    /// verified enrolled key — the key is a stronger proof than the
+    /// credential anyway, and it's the migration hatch for legacy
+    /// passphrases, which fail verify by design under normalization.
+    /// </summary>
+    private void GeneratePhrase()
     {
-        if (s.Length == 0)
-            return 0;
-        int score = s.Length >= 12 ? 2 : s.Length >= 8 ? 1 : 0;
-        bool lower = s.Any(char.IsLower), upper = s.Any(char.IsUpper),
-             digit = s.Any(char.IsDigit), sym = s.Any(c => !char.IsLetterOrDigit(c));
-        int classes = (lower ? 1 : 0) + (upper ? 1 : 0) + (digit ? 1 : 0) + (sym ? 1 : 0);
-        return Math.Clamp(score + (classes >= 3 ? 2 : classes >= 2 ? 1 : 0), 1, 4);
+        if (!_gen.Enabled)
+            return; // verification already in flight
+        _gen.Enabled = false;
+        _result.ForeColor = Theme.TextDim;
+        _result.Text = "Verifying…";
+        // PBKDF2 (600k) and the WMI key check would freeze the page on the
+        // UI thread — run them off, finish on the pump.
+        string current = _current.Text;
+        Task.Run(() =>
+            (current.Length > 0 && ConfigStore.VerifyPassphrase(_config, current))
+            || KeyVerifiesNow())
+            .ContinueWith(t => OnGenerateAuthorized(
+                t.Status == TaskStatus.RanToCompletion && t.Result),
+                TaskScheduler.FromCurrentSynchronizationContext());
     }
 
-    private void ChangePassphrase()
+    private void OnGenerateAuthorized(bool ok)
     {
-        if (!ConfigStore.VerifyPassphrase(_config, _current.Text))
-        {
-            Fail("Current passphrase is wrong.", _current);
+        if (IsDisposed)
             return;
-        }
-        if (_newPass.Text.Length < MinPassphraseLength)
+        _gen.Enabled = true;
+        if (!ok)
         {
-            Fail($"New passphrase too short (min {MinPassphraseLength}).", _newPass);
-            return;
-        }
-        if (_newPass.Text != _confirm.Text)
-        {
-            Fail("New passphrases do not match.", _confirm);
+            Fail("Enter the current phrase, or attach your enrolled key.", _current);
             return;
         }
 
-        ConfigStore.ChangePassphrase(_config, _newPass.Text);
+        _pending = RecoveryPhrase.Generate();
+        _phrase.Text = _pending;
+        _phrase.ForeColor = Theme.AccentGreen;
+        _retype.Enabled = true;
+        _retype.ClearText();
+        _retype.FocusBox();
+        _confirm.Enabled = true;
+        _result.ForeColor = Theme.AccentAmber;
+        _result.Text = "Shown once — write it down somewhere safe, then retype it below.";
+    }
+
+    private void ConfirmPhrase()
+    {
+        if (_pending == null)
+            return;
+        Span<char> want = stackalloc char[64];
+        Span<char> got = stackalloc char[64];
+        try
+        {
+            int wantLen = RecoveryPhrase.Normalize(_pending.AsSpan(), want);
+            int gotLen = RecoveryPhrase.Normalize(_retype.Text.AsSpan(), got);
+            if (gotLen != wantLen || !got[..gotLen].SequenceEqual(want[..wantLen]))
+            {
+                Fail("That doesn't match the phrase shown — check each group.", _retype);
+                return;
+            }
+        }
+        finally
+        {
+            want.Clear();
+            got.Clear();
+        }
+
+        ConfigStore.ChangePassphrase(_config, _pending);
         try
         {
             ConfigStore.Save(_config);
@@ -193,7 +272,7 @@ internal sealed class SecurityPage : UserControl
             return;
         }
 
-        // The attestation MAC covers the passphrase hash — re-attest now if
+        // The attestation MAC covers the phrase hash — re-attest now if
         // the key is present, else the next insert self-heals via rotation.
         bool reattested;
         try
@@ -206,14 +285,39 @@ internal sealed class SecurityPage : UserControl
         }
         _result.ForeColor = Theme.AccentGreen;
         _result.Text = reattested
-            ? "Passphrase updated — key re-attested."
-            : "Passphrase updated — key will re-attest on next insert.";
+            ? "Recovery phrase updated — key re-attested."
+            : "Recovery phrase updated — key will re-attest on next insert.";
         _notify(reattested
-            ? "Passphrase updated — key re-attested"
-            : "Passphrase updated — key re-attests on next insert", false);
+            ? "Recovery phrase updated — key re-attested"
+            : "Recovery phrase updated — key re-attests on next insert", false);
+
+        _pending = null;
+        _phrase.Text = "the new phrase appears here — shown once";
+        _phrase.ForeColor = Theme.TextDim;
         _current.ClearText();
-        _newPass.ClearText();
-        _confirm.ClearText();
+        _retype.ClearText();
+        _retype.Enabled = false;
+        _confirm.Enabled = false;
+    }
+
+    /// <summary>
+    /// Fresh key check — the regeneration alternative to knowing the
+    /// credential. Requires a Current-generation match: a stale keyfile is
+    /// clone-suspect and must not authorize a credential reset (the same
+    /// trust bar StrictTamper applies to unlocks).
+    /// </summary>
+    private bool KeyVerifiesNow()
+    {
+        try
+        {
+            UsbDisk? disk = UsbMonitor.FindDisk(_config.DeviceSerial);
+            return disk != null
+                && KeyVerifier.Check(_config, disk).Match == SecretMatch.Current;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private void Fail(string message, TextField? field)
@@ -306,51 +410,6 @@ internal sealed class SecurityPage : UserControl
         catch (Exception ex)
         {
             _notify($"Could not launch enroll: {ex.Message}", true);
-        }
-    }
-
-    /// <summary>Four-segment password strength bar.</summary>
-    private sealed class StrengthMeter : Control
-    {
-        private int _score;
-
-        public int Score
-        {
-            get => _score;
-            set { _score = Math.Clamp(value, 0, 4); Invalidate(); }
-        }
-
-        public StrengthMeter()
-        {
-            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-            SetStyle(ControlStyles.Selectable, false);
-            BackColor = Theme.Surface;
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(BackColor);
-            Color color = _score switch
-            {
-                1 => Theme.AccentRed,
-                2 => Theme.AccentAmber,
-                3 => Theme.AccentAmber,
-                4 => Theme.AccentGreen,
-                _ => Theme.TextDim,
-            };
-            const int segs = 4;
-            float gap = 4f;
-            float w = (Width - gap * (segs - 1)) / segs;
-            for (int i = 0; i < segs; i++)
-            {
-                var r = new RectangleF(i * (w + gap), 2f, w, 5f);
-                using var brush = new SolidBrush(
-                    i < _score ? color : Theme.SurfaceHigh);
-                g.FillPath(brush, Theme.RoundedRect(r, 2.5f));
-            }
         }
     }
 }

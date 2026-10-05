@@ -1,20 +1,26 @@
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Security.Cryptography;
 
 namespace CryptoKey;
 
 /// <summary>
 /// Swallows all keyboard/mouse input via low-level hooks while active.
-/// The keyboard hook feeds a failsafe passphrase buffer before eating each
-/// keystroke, so typing the passphrase still works while input is "blocked".
+/// The keyboard hook feeds a recovery-phrase buffer before eating each
+/// keystroke, so typing the phrase still works while input is "blocked".
+///
+/// Memory hygiene: the phrase accumulates in a fixed char[] — never a
+/// string/StringBuilder, so no GC copies of partial input can linger. On
+/// submit the used region is copied to a fresh char[] and the buffer is
+/// wiped; the submitted array is the subscriber's to wipe after verify.
 /// </summary>
 internal sealed class InputLocker : IDisposable
 {
-    /// <summary>Current length of the passphrase buffer (for masked feedback).</summary>
+    /// <summary>Current length of the phrase buffer (for masked feedback).</summary>
     public event Action<int>? PassphraseLengthChanged;
 
-    /// <summary>Raised when the user presses Enter; argument is the buffered passphrase.</summary>
-    public event Action<string>? PassphraseSubmitted;
+    /// <summary>Raised when the user presses Enter; argument is the buffered
+    /// phrase in a char[] the subscriber must wipe after use.</summary>
+    public event Action<char[]>? PassphraseSubmitted;
 
     /// <summary>Dev-mode emergency exit combo (Ctrl+Alt+Shift+F12).</summary>
     public event Action? PanicRequested;
@@ -22,7 +28,12 @@ internal sealed class InputLocker : IDisposable
     private const int MaxPassphraseLength = 256;
 
     private readonly bool _devMode;
-    private readonly StringBuilder _buffer = new();
+    private readonly char[] _buffer = new char[MaxPassphraseLength];
+    private int _len;
+    // Per-hook reusable scratch — kept alive so keystrokes allocate nothing.
+    // Hook callbacks are single-threaded (the pumping thread), so reuse is safe.
+    private readonly char[] _scratch = new char[8];
+    private readonly byte[] _keyState = new byte[256];
     private bool _capsOn;
     private bool _numOn;
     private DateTime _cooldownUntil = DateTime.MinValue;
@@ -54,7 +65,7 @@ internal sealed class InputLocker : IDisposable
             return false;
         }
         ClipCursor();
-        _buffer.Clear();
+        WipeBuffer();
         _cooldownUntil = DateTime.MinValue;
         _capsOn = ToggledOn(NativeMethods.VK_CAPITAL);
         _numOn = ToggledOn(NativeMethods.VK_NUMLOCK);
@@ -70,7 +81,7 @@ internal sealed class InputLocker : IDisposable
     }
 
     /// <summary>
-    /// Freeze passphrase input until the given time — the hook keeps
+    /// Freeze phrase input until the given time — the hook keeps
     /// swallowing keystrokes but never buffers or submits them, so mashing
     /// during a cooldown can't stack the penalty. Null clears it.
     /// </summary>
@@ -94,7 +105,14 @@ internal sealed class InputLocker : IDisposable
             _mouseHook = IntPtr.Zero;
         }
         NativeMethods.ClipCursor(IntPtr.Zero);
-        _buffer.Clear();
+        WipeBuffer();
+    }
+
+    /// <summary>Zero the whole buffer — partial input never survives.</summary>
+    private void WipeBuffer()
+    {
+        CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_buffer));
+        _len = 0;
     }
 
     private static void ClipCursor()
@@ -131,17 +149,23 @@ internal sealed class InputLocker : IDisposable
                     case NativeMethods.VK_RETURN:
                         // An empty Enter is noise, not a guess — don't burn
                         // a backoff attempt on it.
-                        if (_buffer.Length == 0)
+                        if (_len == 0)
                             break;
-                        string attempt = _buffer.ToString();
-                        _buffer.Clear();
+                        // The subscriber owns this copy — it's wiped after
+                        // verify, while our buffer is wiped now.
+                        var attempt = new char[_len];
+                        _buffer.AsSpan(0, _len).CopyTo(attempt);
+                        WipeBuffer();
                         PassphraseLengthChanged?.Invoke(0);
                         PassphraseSubmitted?.Invoke(attempt);
                         break;
                     case NativeMethods.VK_BACK:
-                        if (_buffer.Length > 0)
-                            _buffer.Length--;
-                        PassphraseLengthChanged?.Invoke(_buffer.Length);
+                        if (_len > 0)
+                        {
+                            _len--;
+                            _buffer[_len] = '\0';
+                        }
+                        PassphraseLengthChanged?.Invoke(_len);
                         break;
                     case NativeMethods.VK_CAPITAL:
                         _capsOn = !_capsOn;
@@ -150,12 +174,19 @@ internal sealed class InputLocker : IDisposable
                         _numOn = !_numOn;
                         break;
                     default:
-                        string? chars = VkToChars(kbd.vkCode, kbd.scanCode);
-                        if (chars != null && _buffer.Length < MaxPassphraseLength)
+                        int chars = VkToChars(kbd.vkCode, kbd.scanCode);
+                        if (chars > 0)
                         {
-                            int room = MaxPassphraseLength - _buffer.Length;
-                            _buffer.Append(chars.Length <= room ? chars : chars[..room]);
-                            PassphraseLengthChanged?.Invoke(_buffer.Length);
+                            int room = MaxPassphraseLength - _len;
+                            int take = Math.Min(chars, room);
+                            if (take > 0)
+                            {
+                                _scratch.AsSpan(0, take).CopyTo(_buffer.AsSpan(_len));
+                                _len += take;
+                                PassphraseLengthChanged?.Invoke(_len);
+                            }
+                            CryptographicOperations.ZeroMemory(
+                                MemoryMarshal.AsBytes(_scratch));
                         }
                         break;
                 }
@@ -178,9 +209,10 @@ internal sealed class InputLocker : IDisposable
     // so our flags can't drift from what the user sees. Dead keys are left
     // pending (ToUnicode returns <0) and compose with the next stroke — which
     // is also why multi-char results are appended whole.
-    private string? VkToChars(uint vk, uint scan)
+    private int VkToChars(uint vk, uint scan)
     {
-        var state = new byte[256];
+        byte[] state = _keyState;
+        Array.Clear(state);
         SetDown(state, NativeMethods.VK_SHIFT);
         SetDown(state, NativeMethods.VK_CONTROL);
         SetDown(state, NativeMethods.VK_MENU);
@@ -195,19 +227,30 @@ internal sealed class InputLocker : IDisposable
         if (_numOn)
             state[NativeMethods.VK_NUMLOCK] = 0x01;
 
-        var sb = new StringBuilder(8);
         uint flags = ModifierDown(NativeMethods.VK_MENU) ? 1u : 0u;
-        int result = NativeMethods.ToUnicode(vk, scan, state, sb, sb.Capacity, flags);
-        if (result <= 0)
-            return null;
-
-        var chars = new StringBuilder(result);
-        for (int i = 0; i < result; i++)
+        int result = NativeMethods.ToUnicode(vk, scan, state, _scratch, _scratch.Length, flags);
+        if (result == 0)
+            return 0;
+        if (result < 0)
         {
-            if (!char.IsControl(sb[i]))
-                chars.Append(sb[i]);
+            // Dead key — left pending inside ToUnicode to compose with the
+            // next stroke; the accent char it echoed is wiped.
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch));
+            return 0;
         }
-        return chars.Length == 0 ? null : chars.ToString();
+
+        // Compact non-control chars to the front; the caller copies
+        // _scratch[..count] into the buffer and wipes the scratch.
+        int useful = 0;
+        for (int i = 0; i < result && i < _scratch.Length; i++)
+        {
+            char c = _scratch[i];
+            if (!char.IsControl(c))
+                _scratch[useful++] = c;
+        }
+        if (useful == 0)
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(_scratch));
+        return useful;
     }
 
     private static void SetDown(byte[] state, int vk)

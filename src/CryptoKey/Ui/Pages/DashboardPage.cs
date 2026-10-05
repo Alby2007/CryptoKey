@@ -325,9 +325,9 @@ internal sealed class DashboardPage : UserControl
                 _stateLabel.Text = "LOCKED";
                 _stateLabel.ForeColor = Theme.AccentRed;
                 // Armed-while-locked only happens under 2FA — the key factor
-                // is satisfied and the passphrase completes the unlock.
+                // is satisfied and the recovery phrase completes the unlock.
                 _reasonLabel.Text = snap.KeyFactorArmed
-                    ? "key verified — enter the passphrase"
+                    ? "key verified — enter the recovery phrase"
                     : snap.LastVerifyFailure != null
                         ? snap.LastVerifyFailure
                         : "key absent";

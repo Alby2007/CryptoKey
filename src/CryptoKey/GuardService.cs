@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 namespace CryptoKey;
@@ -28,7 +29,7 @@ internal sealed class GuardService : IDisposable
     private string? _tamperNote;
     private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
     private bool _staleKeyPresent;     // a previous-generation file is on the drive
-    private DateTime? _cooldownUntil;  // passphrase-input freeze deadline
+    private DateTime? _cooldownUntil;  // phrase-input freeze deadline
     private AttestState _lastAttest;   // dedup for the legacy-format log line
 
     public GuardService(KeyConfig config, bool devMode, bool forceClassic)
@@ -281,7 +282,7 @@ internal sealed class GuardService : IDisposable
     /// <summary>
     /// Reload config.json after a re-enroll — the enroll process is separate,
     /// so without this the guard keeps verifying against the OLD serial and
-    /// passphrase hash until restart.
+    /// phrase hash until restart.
     /// </summary>
     public string ReloadConfig()
     {
@@ -291,13 +292,14 @@ internal sealed class GuardService : IDisposable
             if (fresh == null)
                 return "err no config on disk";
             // Mutate in place, don't swap: dashboard/settings pages and the
-            // passphrase verifier all share _config — a swapped reference
+            // phrase verifier all share _config — a swapped reference
             // would leave them reading (and saving over) a stale copy.
             _config.DeviceSerial = fresh.DeviceSerial;
             _config.SecretSalt = fresh.SecretSalt;
             _config.SecretHash = fresh.SecretHash;
             _config.PassphraseSalt = fresh.PassphraseSalt;
             _config.PassphraseHash = fresh.PassphraseHash;
+            _config.PassphraseIterations = fresh.PassphraseIterations;
             _config.PrevSecretHash = fresh.PrevSecretHash;
             _config.RotationCount = fresh.RotationCount;
             _config.LastRotationUtc = fresh.LastRotationUtc;
@@ -367,7 +369,7 @@ internal sealed class GuardService : IDisposable
             case "quit":
                 return RequestQuit()
                     ? "ok quitting"
-                    : "err locked — insert the key or enter the passphrase first";
+                    : "err locked — insert the key or enter the recovery phrase first";
             case "reenrolled":
                 return ReloadConfig();
             case "status":
@@ -425,11 +427,11 @@ internal sealed class GuardService : IDisposable
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
             // Under 2FA the screen may still say "Key verified — enter the
-            // passphrase" from when the factor was armed; keep it honest.
+            // recovery phrase" from when the factor was armed; keep it honest.
             if (State == GuardState.Locked
                 && _config.Guard.UnlockPolicy == UnlockPolicy.KeyAndPassphrase)
             {
-                _surface.SetStatus("Key removed — insert it, then enter the passphrase.");
+                _surface.SetStatus("Key removed — insert it, then enter the recovery phrase.");
             }
             EmitSnapshot();
             return;
@@ -489,12 +491,12 @@ internal sealed class GuardService : IDisposable
                     _surface.SetStatus(policy switch
                     {
                         UnlockPolicy.KeyAndPassphrase when _keyVerifiedNow
-                            => "Key verified — enter the passphrase.",
+                            => "Key verified — enter the recovery phrase.",
                         UnlockPolicy.KeyAndPassphrase
-                            => "Stale keyfile — passphrase required.",
+                            => "Stale keyfile — recovery phrase required.",
                         UnlockPolicy.KeyOnly
                             => "Stale keyfile — attempting repair (re-enroll if it persists).",
-                        _ => "Stale keyfile — type the passphrase.",
+                        _ => "Stale keyfile — type the recovery phrase.",
                     });
                 }
             }
@@ -530,15 +532,15 @@ internal sealed class GuardService : IDisposable
             else if (changed)
             {
                 Log($"Key detected but verification failed: {check.Detail}");
-                _surface.SetStatus($"CryptoKey detected — {check.Detail}. Or type the passphrase.");
+                _surface.SetStatus($"CryptoKey detected — {check.Detail}. Or type the recovery phrase.");
             }
         }
         EmitSnapshot();
     }
 
     /// <summary>
-    /// Forced rotation outside the edge/throttle gate — the passphrase-change
-    /// path uses it to re-attest (the MAC covers the passphrase hash, so a
+    /// Forced rotation outside the edge/throttle gate — the phrase-change
+    /// path uses it to re-attest (the MAC covers the phrase hash, so a
     /// change invalidates every existing keyfile). False when the key is
     /// absent or no letter accepted the write.
     /// </summary>
@@ -685,16 +687,20 @@ internal sealed class GuardService : IDisposable
             MaybeAutoLock("pause expired, key absent");
     }
 
-    private void OnPassphraseSubmitted(string attempt)
+    private void OnPassphraseSubmitted(char[] attempt)
     {
         // This runs inside the low-level keyboard hook — return instantly or
         // the hook times out and keystrokes leak through unswallowed. PBKDF2
-        // runs off-thread and the result is marshaled back to the UI.
+        // runs off-thread and the result is marshaled back to the UI. The
+        // attempt buffer is wiped in every path — it's the only copy.
 
         // Belt-and-braces: the hook drops input during cooldown, but an Enter
         // queued just before the freeze could still land here.
         if (_cooldownUntil is DateTime until && DateTime.Now < until)
+        {
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(attempt.AsSpan()));
             return;
+        }
 
         UnlockPolicy policy = _config.Guard.UnlockPolicy;
         Task.Run(() =>
@@ -707,6 +713,10 @@ internal sealed class GuardService : IDisposable
             catch (Exception)
             {
                 ok = false;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(attempt.AsSpan()));
             }
 
             try
@@ -736,16 +746,16 @@ internal sealed class GuardService : IDisposable
                 _cooldownUntil = until;
                 _surface.SetCooldown(until);
                 _surface.SetStatus($"Too many attempts — input frozen for {secs}s.");
-                Log($"Passphrase failed attempt #{_failedAttempts} — input frozen {secs}s.");
+                Log($"Recovery-phrase failed attempt #{_failedAttempts} — input frozen {secs}s.");
             }
             else
             {
-                _surface.SetStatus("Incorrect passphrase — try again.");
+                _surface.SetStatus("Incorrect recovery phrase — try again.");
             }
             return;
         }
 
-        // Correct passphrase — now the policy gate decides.
+        // Correct phrase — now the policy gate decides.
         _failedAttempts = 0;
         _cooldownUntil = null;
         _surface.SetCooldown(null);
@@ -753,28 +763,28 @@ internal sealed class GuardService : IDisposable
 
         if (policy == UnlockPolicy.KeyOnly)
         {
-            _surface.SetStatus("Passphrase is disabled — insert the key.");
+            _surface.SetStatus("The recovery phrase is disabled — insert the key.");
             return;
         }
         if (policy == UnlockPolicy.KeyAndPassphrase && !_keyVerifiedNow)
         {
             // Break-glass: under strict tamper a stale key never counts as
-            // the factor, but the passphrase remains an explicit failsafe —
+            // the factor, but the recovery phrase remains an explicit failsafe —
             // the unlock happens WITH the tamper alarm already raised.
             if (_config.Guard.StrictTamper && _staleKeyPresent)
             {
-                Log("Break-glass unlock — passphrase accepted over a stale keyfile.");
+                Log("Break-glass unlock — recovery phrase accepted over a stale keyfile.");
                 Snap("breakglass");
-                Alert("Break-glass", "passphrase accepted over a stale keyfile");
+                Alert("Break-glass", "recovery phrase accepted over a stale keyfile");
                 UnlockNow();
             }
             else
             {
-                _surface.SetStatus("Passphrase correct — insert your key first.");
+                _surface.SetStatus("Recovery phrase correct — insert your key first.");
             }
             return;
         }
-        Log("Unlocked via failsafe passphrase — re-locks on next key removal.");
+        Log("Unlocked via recovery phrase — re-locks on next key removal.");
         UnlockNow();
     }
 
@@ -844,7 +854,7 @@ internal sealed class GuardService : IDisposable
         _surface.SetCooldown(null);
         // Disengage returns input (and the input desktop) before teardown.
         // If the session couldn't be switched back, the surface stays alive
-        // and functional — keep State locked so the passphrase path still
+        // and functional — keep State locked so the phrase path still
         // works and the next unlock retries the switch.
         if (!_surface.Disengage())
         {

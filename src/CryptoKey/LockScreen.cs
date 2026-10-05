@@ -9,7 +9,7 @@ namespace CryptoKey;
 internal sealed class LockScreen : IDisposable
 {
     private const string DefaultStatus =
-        "Insert your CryptoKey, or type the failsafe passphrase and press Enter.";
+        "Insert your CryptoKey, or type your recovery phrase and press Enter.";
 
     /// <summary>Raised after each topmost re-assert (lets the input locker re-clip).</summary>
     public event Action? ReassertTick;
@@ -81,7 +81,7 @@ internal sealed class LockScreen : IDisposable
             f.SetFailedAttempts(count);
     }
 
-    /// <summary>Passphrase-input freeze deadline — countdown paints live until expiry.</summary>
+    /// <summary>Phrase-input freeze deadline — countdown paints live until expiry.</summary>
     public void SetCooldown(DateTime? until)
     {
         _cooldownUntil = until;

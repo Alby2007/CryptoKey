@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 
 namespace CryptoKey;
 
@@ -66,24 +65,23 @@ internal static class Enrollment
             return 1;
         }
 
-        string passphrase = ReadMasked("Set failsafe passphrase: ");
-        string confirm = ReadMasked("Confirm passphrase: ");
-        if (passphrase != confirm)
-        {
-            Console.WriteLine("Passphrases do not match.");
+        // The recovery phrase is generated, not chosen — shown once, stored
+        // only as a hash, and confirmed by retyping.
+        string phrase = RecoveryPhrase.Generate();
+        Console.WriteLine();
+        Console.WriteLine("Your recovery phrase — the failsafe when the key isn't available:");
+        Console.WriteLine();
+        Console.WriteLine($"    {phrase}");
+        Console.WriteLine();
+        Console.WriteLine("Write it down somewhere safe — it is shown ONCE and stored only as a hash.");
+        if (!ConfirmPhrase(phrase))
             return 1;
-        }
-        if (passphrase.Length < KeyConfig.MinPassphraseLength)
-        {
-            Console.WriteLine($"Passphrase too short (min {KeyConfig.MinPassphraseLength} characters).");
-            return 1;
-        }
 
         // Config first — the v2 keyfile's attestation MAC covers the serial
-        // and passphrase hash, so the envelope can't be written until the
+        // and phrase hash, so the envelope can't be written until the
         // config fields exist. Keep guard preferences across a re-enroll.
         byte[] secret = RandomNumberGenerator.GetBytes(SecretBytes);
-        KeyConfig fresh = ConfigStore.CreateNew(disk.SerialNumber, secret, passphrase);
+        KeyConfig fresh = ConfigStore.CreateNew(disk.SerialNumber, secret, phrase);
         if (existing?.Guard != null)
             fresh.Guard = existing.Guard;
 
@@ -133,37 +131,36 @@ internal static class Enrollment
         return 0;
     }
 
-    private static string ReadMasked(string prompt)
+    /// <summary>
+    /// Retype-to-confirm for the generated phrase. Plain echo is fine — the
+    /// phrase is already on screen. Normalization makes case, separators,
+    /// and ambiguous glyphs (O/0, I/L/1) forgiveable; up to 3 tries.
+    /// </summary>
+    private static bool ConfirmPhrase(string phrase)
     {
-        Console.Write(prompt);
-        if (Console.IsInputRedirected)
+        Span<char> wantBuf = stackalloc char[64];
+        Span<char> gotBuf = stackalloc char[64];
+        try
         {
-            string? line = Console.ReadLine();
-            Console.WriteLine();
-            return line ?? "";
+            int wantLen = RecoveryPhrase.Normalize(phrase.AsSpan(), wantBuf);
+            for (int tries = 1; tries <= 3; tries++)
+            {
+                Console.Write("Retype the phrase to confirm: ");
+                string? typed = Console.ReadLine();
+                int gotLen = RecoveryPhrase.Normalize(typed.AsSpan(), gotBuf);
+                if (gotLen == wantLen
+                    && gotBuf[..gotLen].SequenceEqual(wantBuf[..wantLen]))
+                    return true;
+                Console.WriteLine(tries < 3
+                    ? "That doesn't match — check each group and try again."
+                    : "Confirmation failed — enrollment aborted.");
+            }
+            return false;
         }
-        var sb = new StringBuilder();
-        while (true)
+        finally
         {
-            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
-            if (key.Key == ConsoleKey.Enter)
-            {
-                Console.WriteLine();
-                return sb.ToString();
-            }
-            if (key.Key == ConsoleKey.Backspace)
-            {
-                if (sb.Length > 0)
-                {
-                    sb.Length--;
-                    Console.Write("\b \b");
-                }
-            }
-            else if (!char.IsControl(key.KeyChar))
-            {
-                sb.Append(key.KeyChar);
-                Console.Write('*');
-            }
+            wantBuf.Clear();
+            gotBuf.Clear();
         }
     }
 }

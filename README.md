@@ -1,8 +1,8 @@
 # CryptoKey
 
 Turn any USB flash drive into a physical PC key. Pull it out and a fullscreen
-lock swallows your screen, keyboard, and mouse; plug it back in — or type the
-failsafe passphrase — to unlock.
+lock swallows your screen, keyboard, and mouse; plug it back in — or type
+your recovery phrase — to unlock.
 
 > **Internals:** architecture, security model, state machine, recovery
 > paths, and the CLI/config reference live in [`docs/`](docs/README.md).
@@ -11,7 +11,8 @@ failsafe passphrase — to unlock.
 
 - **Enroll** records the drive's hardware `SerialNumber` (via WMI, immune to
   drive-letter changes), writes a 64-byte random secret to `<drive>:\.cryptokey`,
-  and stores salted hashes of the secret and your failsafe passphrase in
+  generates a 20-character **recovery phrase** (shown once — write it down),
+  and stores salted hashes of the secret and the phrase in
   `%APPDATA%\CryptoKey\config.json`.
 - **Guard** watches `WM_DEVICECHANGE` (with a 1s poll fallback). Key absent →
   lock; key present → verify serial + keyfile hash → unlock. It lives in the
@@ -25,15 +26,15 @@ failsafe passphrase — to unlock.
   attestation)`, bound to this user+machine via DPAPI (`CurrentUser`). Copies
   of the file are dead weight off this machine. The embedded attestation is
   `HMAC-SHA256(secret, serial || passphraseHash)` — if config.json's serial or
-  passphrase hash is tampered with, the drive itself calls it out (tamper
+  phrase hash is tampered with, the drive itself calls it out (tamper
   badge + log; the secret still verifies — tripwire, not gate). Legacy raw
   keyfiles self-upgrade on next rotation.
-- **Unlock policy** (Settings → Unlock policy): `Key or passphrase` (default),
-  `Key + passphrase` (2FA — a verified key alone stays locked; passphrase with
-  no verified key is denied; **lost key = real lockout** — dev panic or Task
-  Manager only), `Key only` (passphrase disabled). Strict tamper mode makes
-  stale keyfiles never count as the key factor.
-- **Passphrase backoff** — fails 1-2 are free, then input freezes
+- **Unlock policy** (Settings → Unlock policy): `Key or phrase` (default),
+  `Key + phrase` (2FA — a verified key alone stays locked; a recovery phrase
+  with no verified key is denied; **lost key = real lockout** — dev panic or
+  Task Manager only), `Key only` (recovery phrase disabled). Strict tamper
+  mode makes stale keyfiles never count as the key factor.
+- **Recovery-phrase backoff** — fails 1-2 are free, then input freezes
   15s/30s/60s/120s/300s (enforced inside the keyboard hook, so mashing can't
   pile up attempts; countdown shown on the lock screen).
 - **Lock** has two surfaces, chosen by Settings → *Lock on a private desktop*
@@ -44,20 +45,20 @@ failsafe passphrase — to unlock.
     policy-disabled while locked *because* launching it from Ctrl+Alt+Del
     would switch you back to the Default desktop — the SAS is the one path
     the private desktop can't isolate, so the policies seal it. The input hooks
-    still run on a dedicated lock thread to feed the passphrase buffer. If
+    still run on a dedicated lock thread to feed the phrase buffer. If
     engagement fails at any step, the guard falls back to the overlay below.
   - **overlay** — the classic surface: one borderless topmost dark overlay
     per monitor (topmost re-asserted every 250 ms) on your own desktop,
     low-level keyboard + mouse hooks that swallow all input, and
     `ClipCursor`.
-  In both modes the keyboard hook feeds the passphrase buffer before
-  swallowing, so the failsafe works while input is blocked.
+  In both modes the keyboard hook feeds the phrase buffer before
+  swallowing, so the recovery phrase works while input is blocked.
 - **IPC** — `lock` / `pause` / `resume` / `status` / `quit` reach the running
   guard over `\\.\pipe\cryptokey-ctl` (one line in, one line out; `quit` is
   refused while locked).
 - **Tripwires** (Settings → Tripwires & alerts, all off by default): lock
   after N idle minutes via `GetLastInputInfo`; webcam still on tamper events
-  (bad passphrase, clone flag, break-glass) into `captures/`; and remote
+  (bad phrase, clone flag, break-glass) into `captures/`; and remote
   alerts — every lock/unlock/tamper event POSTs to your ntfy.sh topic or
   any webhook. The camera and the endpoint are opt-in, nothing leaves the
   machine otherwise.
@@ -124,9 +125,9 @@ and the dashboard activity feed persists to
 `%APPDATA%\CryptoKey\guard.log` (rotated at 256 KB).
 
 Tray menu: **Lock now**, **Pause auto-lock ▸** (5/15/60 min), **Resume**,
-**Settings…** (key info, passphrase change, poll interval, balloon tips),
+**Settings…** (key info, recovery phrase, poll interval, balloon tips),
 **Quit** — enabled only while *unlocked*. While locked the ways out are
-the key, the passphrase, or — as last resorts — Ctrl+Alt+Del → Switch user
+the key, the recovery phrase, or — as last resorts — Ctrl+Alt+Del → Switch user
 or the power button (Task Manager and Sign out are policy-disabled by
 design while locked).
 
@@ -141,11 +142,18 @@ dotnet test                    # xUnit suite — pure security invariants
 dotnet run --project src/CryptoKey -- enroll
 ```
 
-Enroll asks for a failsafe passphrase (min 8 chars — the Security tab's
-change-passphrase floor is the same; existing shorter passphrases keep
-working). If the drive's keyfile is ever wiped, the Security tab's
-**Repair keyfile** button re-arms it — deliberately user-gated rather
-than automatic.
+Enroll **generates** your recovery phrase — 20 Crockford Base32 characters
+(`XXXXX-XXXXX-XXXXX-XXXXX`, ~100 bits, no ambiguous glyphs) — shows it
+once, and asks you to retype it. Case, dashes, and O/0 or I-L/1 slips are
+forgiven on entry. It's the failsafe when the key isn't available, and the
+Security tab can regenerate it — authorized either by the current phrase
+or by a verified enrolled key. Upgraded installs: **legacy passphrases no
+longer verify** — attach your enrolled key and regenerate the phrase on
+the Security tab. (Under `Key + phrase` the old passphrase can't unlock
+at all, so the Security tab is unreachable — run `cryptokey enroll` from
+another logged-in session to migrate.) If the drive's keyfile is ever
+wiped, the Security tab's **Repair keyfile** button re-arms it —
+deliberately user-gated rather than automatic.
 
 ## Warnings / known limits
 

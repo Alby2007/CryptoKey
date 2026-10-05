@@ -8,7 +8,7 @@ namespace CryptoKey;
 /// session is switched onto while locked. Nothing else exists there — no
 /// taskbar, no apps, no focus to steal, and Task Manager can't see the form.
 /// Input containment is structural; the low-level hooks still run on the
-/// lock thread to feed the passphrase buffer and arm the panic combo.
+/// lock thread to feed the phrase buffer and arm the panic combo.
 ///
 /// Lifecycle: Engage captures the user's input desktop BEFORE switching,
 /// spawns an STA lock thread (SetThreadDesktop is its first statement),
@@ -19,7 +19,7 @@ namespace CryptoKey;
 /// </summary>
 internal sealed class SecureLockSurface : ILockSurface
 {
-    public event Action<string>? PassphraseSubmitted;
+    public event Action<char[]>? PassphraseSubmitted;
     public event Action? PanicRequested;
     public event Action<string>? SecurityEvent;
 
@@ -218,54 +218,60 @@ internal sealed class SecureLockSurface : ILockSurface
         while (!_surfaceDead)
         {
             Thread.Sleep(300);
-            if (!_engaged)
-                continue; // volatile fast-path — no lock churn while unlocked
-
-            // Classify, re-switch, and count under the lock; raise events
-            // AFTER releasing it — handlers must never run inside
-            // _engageSync (Monitor reentrancy would let a callback run
-            // surface teardown on this thread).
-            string? flapEvent = null, stormEvent = null;
-            bool stormNow = false;
-            lock (_engageSync)
+            // A bad tick must never kill this thread — it's the surface's
+            // only monitor and StartFlapMonitor won't respawn it.
+            try
             {
                 if (!_engaged)
-                    continue;
-                IntPtr h = NativeMethods.OpenInputDesktop(0, false,
-                    NativeMethods.DESKTOP_READOBJECTS);
-                bool openFailed = h == IntPtr.Zero;
-                string? name = null;
-                if (!openFailed)
+                    continue; // volatile fast-path — no lock churn while unlocked
+
+                // Classify, re-switch, and count under the lock; raise events
+                // AFTER releasing it — handlers must never run inside
+                // _engageSync (Monitor reentrancy would let a callback run
+                // surface teardown on this thread).
+                string? flapEvent = null, stormEvent = null;
+                bool stormNow = false;
+                lock (_engageSync)
                 {
-                    name = GetDesktopName(h);
-                    NativeMethods.CloseDesktop(h);
-                }
-                if (!FlapPolicy.IsHostile(name, openFailed))
-                    continue;
-                if (!_engaged)
-                    continue; // ReleaseInput switched back mid-open — don't fight it
-                NativeMethods.SwitchDesktop(_hLock);
-                flapEvent = "desktop-flap";
-                if (_flapCounter.Record(DateTime.UtcNow))
-                {
-                    stormNow = true; // stay pinned at OS auth — fires per flap, idempotent
-                    if (!_stormAnnounced)
+                    if (!_engaged)
+                        continue;
+                    IntPtr h = NativeMethods.OpenInputDesktop(0, false,
+                        NativeMethods.DESKTOP_READOBJECTS);
+                    bool openFailed = h == IntPtr.Zero;
+                    string? name = null;
+                    if (!openFailed)
                     {
-                        _stormAnnounced = true; // edge only — a sustained attack
-                        stormEvent = "desktop-flap-storm"; // shouldn't push-spam
+                        name = GetDesktopName(h);
+                        NativeMethods.CloseDesktop(h);
+                    }
+                    if (!FlapPolicy.IsHostile(name, openFailed))
+                        continue;
+                    if (!_engaged)
+                        continue; // ReleaseInput switched back mid-open — don't fight it
+                    NativeMethods.SwitchDesktop(_hLock);
+                    flapEvent = "desktop-flap";
+                    if (_flapCounter.Record(DateTime.UtcNow))
+                    {
+                        stormNow = true; // stay pinned at OS auth — fires per flap, idempotent
+                        if (!_stormAnnounced)
+                        {
+                            _stormAnnounced = true; // edge only — a sustained attack
+                            stormEvent = "desktop-flap-storm"; // shouldn't push-spam
+                        }
+                    }
+                    else
+                    {
+                        _stormAnnounced = false; // aged out — a fresh burst re-alerts
                     }
                 }
-                else
-                {
-                    _stormAnnounced = false; // aged out — a fresh burst re-alerts
-                }
+                if (flapEvent != null)
+                    SecurityEvent?.Invoke(flapEvent);
+                if (stormEvent != null)
+                    SecurityEvent?.Invoke(stormEvent);
+                if (stormNow)
+                    NativeMethods.LockWorkStation();
             }
-            if (flapEvent != null)
-                SecurityEvent?.Invoke(flapEvent);
-            if (stormEvent != null)
-                SecurityEvent?.Invoke(stormEvent);
-            if (stormNow)
-                NativeMethods.LockWorkStation();
+            catch (Exception) { }
         }
     }
 

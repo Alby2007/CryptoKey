@@ -8,7 +8,7 @@ namespace CryptoKey;
 /// </summary>
 internal sealed class ClassicLockSurface : ILockSurface
 {
-    public event Action<string>? PassphraseSubmitted;
+    public event Action<char[]>? PassphraseSubmitted;
     public event Action? PanicRequested;
 
     /// <summary>Never fires — the overlay has no private desktop to flap.</summary>

@@ -8,8 +8,9 @@ namespace CryptoKey;
 /// </summary>
 internal interface ILockSurface : IDisposable
 {
-    /// <summary>Raised with the buffered passphrase when Enter is pressed.</summary>
-    event Action<string>? PassphraseSubmitted;
+    /// <summary>Raised with the buffered phrase when Enter is pressed —
+    /// a char[] the handler must wipe after verifying.</summary>
+    event Action<char[]>? PassphraseSubmitted;
 
     /// <summary>Dev-mode emergency exit (Ctrl+Alt+Shift+F12).</summary>
     event Action? PanicRequested;

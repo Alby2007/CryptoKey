@@ -7,9 +7,6 @@ namespace CryptoKey;
 
 internal sealed class KeyConfig
 {
-    /// <summary>Failsafe-passphrase floor at enroll/change — verification accepts any length.</summary>
-    public const int MinPassphraseLength = 8;
-
     public int ConfigVersion { get; set; } = 1;
     public string DeviceSerial { get; set; } = "";
     public string SecretSalt { get; set; } = "";
@@ -18,12 +15,13 @@ internal sealed class KeyConfig
     public int RotationCount { get; set; } = 1;
     public DateTime? LastRotationUtc { get; set; }
     public string PassphraseSalt { get; set; } = "";
+    /// <summary>PBKDF2 verifier for the generated recovery phrase — see <see cref="RecoveryPhrase"/>.</summary>
     public string PassphraseHash { get; set; } = "";
     /// <summary>
     /// PBKDF2 rounds for <see cref="PassphraseHash"/>. Legacy configs carry
     /// 100k; anything written now uses the current OWASP floor (600k).
-    /// Verify uses the stored count, change rewrites it — old hashes keep
-    /// verifying until the next passphrase change upgrades them.
+    /// Verify uses the stored count, regenerate rewrites it — old hashes keep
+    /// verifying until the next phrase regeneration upgrades them.
     /// </summary>
     public int PassphraseIterations { get; set; } = 100_000;
     public GuardSettings Guard { get; set; } = new();
@@ -36,7 +34,7 @@ internal enum SecretMatch
     Previous,
 }
 
-/// <summary>How a verified key and the failsafe passphrase combine to unlock.</summary>
+/// <summary>How a verified key and the recovery phrase combine to unlock.</summary>
 internal enum UnlockPolicy
 {
     KeyOrPassphrase,
@@ -233,7 +231,7 @@ internal static class ConfigStore
         catch (Exception) { }
     }
 
-    public static KeyConfig CreateNew(string serial, byte[] secret, string passphrase)
+    public static KeyConfig CreateNew(string serial, byte[] secret, string recoveryPhrase)
     {
         byte[] secretSalt = RandomNumberGenerator.GetBytes(16);
         byte[] passSalt = RandomNumberGenerator.GetBytes(16);
@@ -245,7 +243,7 @@ internal static class ConfigStore
             RotationCount = 1,
             PassphraseSalt = Convert.ToBase64String(passSalt),
             PassphraseHash = Convert.ToBase64String(
-                HashPassphrase(passphrase, passSalt, CurrentPbkdf2Iterations)),
+                HashNormalized(recoveryPhrase, passSalt, CurrentPbkdf2Iterations)),
             PassphraseIterations = CurrentPbkdf2Iterations,
         };
     }
@@ -296,36 +294,60 @@ internal static class ConfigStore
         config.LastRotationUtc = DateTime.UtcNow;
     }
 
-    public static void ChangePassphrase(KeyConfig config, string newPassphrase)
+    public static void ChangePassphrase(KeyConfig config, string newRecoveryPhrase)
     {
         byte[] salt = RandomNumberGenerator.GetBytes(16);
         config.PassphraseSalt = Convert.ToBase64String(salt);
         config.PassphraseHash = Convert.ToBase64String(
-            HashPassphrase(newPassphrase, salt, CurrentPbkdf2Iterations));
+            HashNormalized(newRecoveryPhrase, salt, CurrentPbkdf2Iterations));
         config.PassphraseIterations = CurrentPbkdf2Iterations;
     }
 
-    public static bool VerifyPassphrase(KeyConfig config, string passphrase)
+    /// <summary>
+    /// Verify a credential against the stored hash. Input is normalized
+    /// first (<see cref="RecoveryPhrase.Normalize"/>), so a generated phrase
+    /// verifies however the user managed to type it — and a legacy
+    /// free-form passphrase fails against a phrase hash by design
+    /// (force-migration; the enrolled key is the regeneration hatch).
+    /// </summary>
+    public static bool VerifyPassphrase(KeyConfig config, ReadOnlySpan<char> phrase)
     {
+        // 64 chars covers any sane credential — anything that normalizes
+        // past the buffer can't be the canonical phrase, so fail closed.
+        Span<char> buf = stackalloc char[64];
         try
         {
+            int n = RecoveryPhrase.Normalize(phrase, buf);
+            if (n > buf.Length)
+                return false;
             byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
             byte[] expected = Convert.FromBase64String(config.PassphraseHash);
-            return CryptographicOperations.FixedTimeEquals(
-                HashPassphrase(passphrase, salt, config.PassphraseIterations), expected);
+            byte[] derived = HashPassphrase(buf[..n], salt, config.PassphraseIterations);
+            try
+            {
+                return CryptographicOperations.FixedTimeEquals(derived, expected);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(derived);
+            }
         }
         catch (Exception)
         {
             return false; // corrupt or tampered config — never verify
         }
+        finally
+        {
+            buf.Clear();
+        }
     }
 
     /// <summary>
     /// Attestation MAC embedded in the v2 keyfile: the drive vouches that this
-    /// config (serial + passphrase hash) is the one the keyfile was written
-    /// for. A mismatch means config.json or the keyfile was tampered with —
-    /// the secret is required to forge the MAC, so an attacker who only
-    /// copies/edits files can't produce one.
+    /// config (serial + recovery-phrase hash) is the one the keyfile was
+    /// written for. A mismatch means config.json or the keyfile was tampered
+    /// with — the secret is required to forge the MAC, so an attacker who
+    /// only copies/edits files can't produce one.
     /// </summary>
     public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
     {
@@ -349,6 +371,29 @@ internal static class ConfigStore
         return SHA256.HashData(combined);
     }
 
-    private static byte[] HashPassphrase(string passphrase, byte[] salt, int iterations)
-        => Rfc2898DeriveBytes.Pbkdf2(passphrase, salt, iterations, HashAlgorithmName.SHA256, 32);
+    /// <summary>
+    /// PBKDF2 over the normalized phrase — storage always holds the hash of
+    /// the canonical uppercase form, and verify normalizes identically, so
+    /// typed variants land on the same bytes.
+    /// </summary>
+    private static byte[] HashNormalized(ReadOnlySpan<char> phrase, byte[] salt, int iterations)
+    {
+        Span<char> buf = stackalloc char[64];
+        try
+        {
+            int n = RecoveryPhrase.Normalize(phrase, buf);
+            // Over-long input can't be a canonical phrase — refuse loudly
+            // rather than hash a truncated prefix or an empty value.
+            if (n > buf.Length)
+                throw new ArgumentOutOfRangeException(nameof(phrase));
+            return HashPassphrase(buf[..n], salt, iterations);
+        }
+        finally
+        {
+            buf.Clear();
+        }
+    }
+
+    private static byte[] HashPassphrase(ReadOnlySpan<char> phrase, byte[] salt, int iterations)
+        => Rfc2898DeriveBytes.Pbkdf2(phrase, salt, iterations, HashAlgorithmName.SHA256, 32);
 }

@@ -9,8 +9,8 @@ stateDiagram-v2
     Unlocked --> Paused : IPC pause N / tray
     Paused --> Unlocked : IPC resume · timer expires
     Paused --> Locked : timer expires + key absent
-    Locked --> Unlocked : verified key [policy] · passphrase [policy] · break-glass
-    Locked --> Locked : stale keyfile → rotate &amp; re-verify<br/>cooldown · wrong passphrase
+    Locked --> Unlocked : verified key [policy] · recovery phrase [policy] · break-glass
+    Locked --> Locked : stale keyfile → rotate &amp; re-verify<br/>cooldown · wrong phrase
 ```
 
 `State` is the single source of truth — tray, dashboard, IPC `status`,
@@ -120,7 +120,7 @@ Three distinct paths, deliberately different:
 Panic combo (`Ctrl+Alt+Shift+F12`, dev builds): `Disengage()` **then**
 `Application.Exit()` — exiting while switched leaves the user on an empty
 desktop, so the order matters. It's checked in the hook *before* the
-cooldown gate, so it works during a passphrase freeze.
+cooldown gate, so it works during a phrase freeze.
 
 ## Mutual supervision
 
@@ -185,20 +185,20 @@ Throttled to one attempt per 5 s — a drive that can't be written stays
 ```mermaid
 flowchart TD
     V[KeyfileCheck] --> M{Match}
-    M -->|None| F["verify failure → maybe auto-lock<br/>status: detail + 'or type the passphrase'"]
+    M -->|None| F["verify failure → maybe auto-lock<br/>status: detail + 'or type the recovery phrase'"]
     M -->|Previous| ST[stale=true · tamper note + clone log]
     M -->|Current| ST2[stale=false]
     ST --> ARM
     ST2 --> ARM
     ARM{"armed? = !stale ‖ !strict"} -->|no| S1["stays locked —<br/>status per policy"]
     ARM -->|yes| P{policy}
-    P -->|KeyAndPassphrase| A2["stay locked —<br/>'Key verified — enter passphrase'"]
+    P -->|KeyAndPassphrase| A2["stay locked —<br/>'Key verified — enter recovery phrase'"]
     P -->|KeyOrPassphrase / KeyOnly| AU["UnlockNow"]
 
-    subgraph pp["Passphrase submitted (verify off-hook)"]
+    subgraph pp["Recovery phrase submitted (verify off-hook)"]
         OK{correct?} -->|no| BACK["fails++ → backoff freeze ≥3 fails"]
         OK -->|yes| G{gate}
-        G -->|KeyOnly| D1["'Passphrase is disabled'"]
+        G -->|KeyOnly| D1["'Phrase is disabled'"]
         G -->|2FA + !armed| D2{strict ∧ stale?}
         D2 -->|yes| BG["BREAK-GLASS unlock + alarm"]
         D2 -->|no| D3["'insert your key first'"]

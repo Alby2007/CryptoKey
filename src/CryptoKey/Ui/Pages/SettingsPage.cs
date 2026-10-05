@@ -211,7 +211,7 @@ internal sealed class SettingsPage : UserControl
 
         _policy = _config.Guard.UnlockPolicy;
         _policyBtns = new AppButton[3];
-        string[] policyLabels = { "Key or passphrase", "Key + passphrase", "Key only" };
+        string[] policyLabels = { "Key or phrase", "Key + phrase", "Key only" };
         for (int i = 0; i < 3; i++)
         {
             int idx = i;

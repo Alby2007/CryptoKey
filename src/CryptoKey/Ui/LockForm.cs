@@ -13,7 +13,7 @@ namespace CryptoKey;
 internal sealed class LockForm : Form
 {
     private const string DefaultStatus =
-        "Insert your CryptoKey, or type the failsafe passphrase and press Enter.";
+        "Insert your CryptoKey, or type your recovery phrase and press Enter.";
 
     // Shared fonts — app lifetime, never disposed.
     private static readonly Font ClockFont = Theme.DisplayFont(30f, FontStyle.Bold);
@@ -245,7 +245,7 @@ internal sealed class LockForm : Form
             g.DrawString(_status, SubFont, brush,
                 new RectangleF(card.X + 24f, card.Y + 248f, card.Width - 48f, 20f), Center);
 
-        // Passphrase dots — replaced by the cooldown countdown while
+        // Phrase dots — replaced by the cooldown countdown while
         // input is frozen (tick repaints, so it self-clears on expiry).
         float dy = card.Y + 296f;
         if (_cooldownUntil is DateTime until && DateTime.Now < until)
@@ -269,7 +269,7 @@ internal sealed class LockForm : Form
             if (_passLen == 0)
             {
                 using var brush = new SolidBrush(Theme.WithAlpha(Theme.TextDim, 120));
-                g.DrawString("type your passphrase", SubFont, brush,
+                g.DrawString("type your recovery phrase", SubFont, brush,
                     new RectangleF(card.X, dy - 6f, card.Width, 20f), Center);
             }
         }
