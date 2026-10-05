@@ -13,13 +13,14 @@ for the rest.
 | Focus-stealing / covering the lock UI | Secure mode: private desktop — nothing else exists there |
 | Keyfile copied to another drive or another user | Hardware serial check + DPAPI binding (user+machine) |
 | Long-lived key cloning | Secret ratchet — a stale clone is flagged and burns out |
-| `config.json` tampering | Keyfile attestation MAC — tripwire, not gate |
+| `config.json` tampering | Keyfile attestation MAC over the security-relevant Guard fields — announce-then-heal tripwire |
 | Recovery-phrase brute force | PBKDF2 + exponential input freeze enforced in the hook |
 | Single-process kill of the guard | Persistent watchdog — heartbeats the control pipe (~2 s dead-detection), fail-closed `LockWorkStation` + respawn if the guard died locked, respawn if unlocked. The guard respawns the watchdog the same way |
 | Casual discovery of the kill path | Lock policies — while locked, HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` hide Task Manager, Sign out/Switch user, and Start-menu power buttons. In overlay mode this closes the CAD → Task Manager → end-process kill path outright; in secure mode it's a garnish on top of desktop isolation. Priors (any registry kind) backed up verbatim to `lockpolicies.json`, restored on unlock |
 | "Walked away with the key still in" | `GetLastInputInfo` idle lock — fires only from Unlocked (Paused suppresses it like all auto-lock) |
 | Wiping the whole `%APPDATA%\CryptoKey` folder | Registry backup — `HKCU\Software\CryptoKey\Config` holds the same JSON, a third copy on a different kill surface. Load chain: primary → `.bak` → registry (registry restores re-create both files and log as tamper); the watchdog's respawn gate accepts any copy |
-| Silent tamper | Webcam stills (opt-in, `captures/` trimmed to 50) + remote alerts via ntfy.sh/any webhook — tripwires become forensics and a pager |
+| Silent tamper | Webcam stills (opt-in, `captures/` trimmed to 50) + remote alerts via ntfy.sh/any webhook — tripwires become forensics and a pager. Captures are DPAPI-sealed (`.cap`) — only this user on this machine can view them |
+| Vault left mounted on an unattended unlocked session | `VaultIdleMinutes` idle seal — past the threshold a mounted vault gets the full `KeyGone` teardown (dismount + zeroed keys), and the verify feed stays suppressed until input returns, so the vault remounts when you do |
 | `SwitchDesktop`-away attack | Flap monitor — while the secure desktop is engaged it polls `OpenInputDesktop` every ~300ms inside `_engageSync`; a foreign input desktop gets re-switched instantly, ≥3 in 10s escalates to `LockWorkStation` + alert + snap (the attacker lands on real OS auth). Legit paths — `Winlogon` by name, or an `OpenInputDesktop` failure (the SAS ACL-deny tell) — are skipped, not counted |
 | Stolen machine / copied `vault.ckv` | The vault image holds only an AES-GCM-wrapped volume key — the KEK derives from the **device secret**, which lives nowhere but the USB key. No key, no mount; filenames are ciphertext too |
 | Vault visible to another logged-in user | The Dokan mount is session-scoped (no MountManager registration) and the reported ACL names only the owning SID — other sessions can't see the letter |
@@ -51,7 +52,7 @@ for the rest.
 | `PassphraseHash` | `config.json` | PBKDF2-HMAC-SHA256 over the normalized recovery phrase, per-config iteration count (600 000 new, legacy 100 000 verifies), salted — the failsafe factor |
 | Vault volume key | `vault.ckv` key slots | 256 random bits, AES-256-GCM-wrapped twice — once under the current-generation KEK, once under previous. Never stored or logged unwrapped |
 | Vault KEK | derived, in-memory only | `HMAC-SHA256(deviceSecret, "CryptoKeyVaultKEK" ‖ headerSalt)` — lives in a pinned buffer, zeroed on dismount/dispose |
-| Attestation | inside the keyfile envelope | `HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)` |
+| Attestation | inside the keyfile envelope | `HMAC-SHA256(secret, "CKY-ATTEST2" ‖ serial ‖ PassphraseHash ‖ guard-canon)` — legacy `CKY-ATTEST` MACs still verify |
 
 ## Recovery phrase
 
@@ -82,11 +83,19 @@ stronger proof than the credential anyway.
 
 - **DPAPI under `CurrentUser`** binds the file to this Windows user on this
   machine — a copied `.cryptokey` unwraps to garbage anywhere else.
-- **Attestation MAC** covers the serial and phrase hash, so swapping
-  `config.json` values (e.g. a known phrase hash) makes the keyfile's
-  attestation disagree with the live config → tamper flag. It's a
-  **tripwire, not a gate**: the secret itself still verifies and the next
-  rotation re-binds the envelope to the live config.
+- **Attestation MAC** covers the serial, the phrase hash, and a
+  deterministic canon of the security-relevant Guard fields (`UnlockPolicy`,
+  `StrictTamper`, `LockMode`, `LockOnRemoval`, `Watchdog`, `LockPolicies`,
+  `IdleLockMinutes`, `WebcamOnTamper`, `AlertUrl`, `VaultEnabled`,
+  `VaultAutoMount`, `VaultIdleMinutes`, `PollIntervalMs`) — an off-app edit
+  that silently downgrades security trips the wire. Cosmetic/layout fields
+  (Sounds, BalloonTips, Animations, mount letter, image path, size) are
+  deliberately outside it. Semantics are **announce, then ratify**: a
+  mismatch flags tamper + log + snap + alert once, then the envelope
+  re-wraps to the live config (same secret — no generation burn). In-app
+  saves mark the flag instead (`MarkConfigDirty`), so our own edits heal
+  silently. It's a tripwire, not a gate — a same-user attacker who also
+  dismisses the flag still wins; the defense is the noise it makes.
 - **Legacy 64-byte files** (pre-v2 raw secret) verify as `AttestState.Missing`
   — "pre-attestation" — and self-upgrade on the next rotation. They log
   once; they don't raise the clone alarm.

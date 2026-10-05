@@ -25,10 +25,12 @@ your recovery phrase — to unlock.
 - **Keyfile v2 envelope** — `.cryptokey` is `"CKY2" || DPAPI(secret ||
   attestation)`, bound to this user+machine via DPAPI (`CurrentUser`). Copies
   of the file are dead weight off this machine. The embedded attestation is
-  `HMAC-SHA256(secret, serial || passphraseHash)` — if config.json's serial or
-  phrase hash is tampered with, the drive itself calls it out (tamper
-  badge + log; the secret still verifies — tripwire, not gate). Legacy raw
-  keyfiles self-upgrade on next rotation.
+  `HMAC-SHA256(secret, serial || passphraseHash || guard-canon)` — the canon
+  covers the security-relevant settings (unlock policy, watchdog, strict
+  tamper, vault flags, alert URL, …), so hand-editing `config.json` to weaken
+  them is itself a tamper event: announce once (badge + log + snap + alert),
+  then the envelope re-binds to the live config. In-app saves heal silently.
+  Legacy raw keyfiles self-upgrade on next rotation.
 - **Unlock policy** (Settings → Unlock policy): `Key or phrase` (default),
   `Key + phrase` (2FA — a verified key alone stays locked; a recovery phrase
   with no verified key is denied; **lost key = real lockout** — dev panic or
@@ -61,7 +63,8 @@ your recovery phrase — to unlock.
   refused while locked).
 - **Tripwires** (Settings → Tripwires & alerts, all off by default): lock
   after N idle minutes via `GetLastInputInfo`; webcam still on tamper events
-  (bad phrase, clone flag, break-glass) into `captures/`; and remote
+  (bad phrase, clone flag, break-glass) into `captures/` as DPAPI-sealed
+  `.cap` files — only this app on this user can view them; and remote
   alerts — every lock/unlock/tamper event POSTs to your ntfy.sh topic or
   any webhook. The camera and the endpoint are opt-in, nothing leaves the
   machine otherwise. With idle lock on, a balloon warns ~20 s before it
@@ -75,9 +78,10 @@ your recovery phrase — to unlock.
   it force-dismounts with every secret buffer zeroed. There is no vault
   passphrase — the device secret is the only factor, and its two key
   slots ride the rotation ratchet so a cloned keyfile unseals it for at
-  most one generation. Vault tab → Create. Requires the Dokany driver;
-  the app reports honestly when it's absent. (`cryptokey vault …` for the
-  CLI verbs.)
+  most one generation. An optional idle seal (`VaultIdleMinutes`) dismounts
+  it when the session goes idle and remounts when you're back. Vault tab →
+  Create. Requires the Dokany driver; the app reports honestly when it's
+  absent. (`cryptokey vault …` for the CLI verbs.)
 
 ## Usage
 

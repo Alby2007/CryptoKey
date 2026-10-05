@@ -531,6 +531,7 @@ internal static class Program
         Console.WriteLine($"Vault image:   {vault.ImagePath}");
         Console.WriteLine($"Enabled:       {config.Guard.VaultEnabled}");
         Console.WriteLine($"Auto-mount:    {config.Guard.VaultAutoMount}");
+        Console.WriteLine($"Idle seal:     {(config.Guard.VaultIdleMinutes == 0 ? "off" : $"{config.Guard.VaultIdleMinutes} min")}");
         Console.WriteLine($"Mount point:   {vault.ConfiguredMountPoint}");
         Console.WriteLine($"Driver:        {(vault.DriverPresent ? "present" : "MISSING — " + vault.DriverHint)}");
         if (!vault.ImageExists)

@@ -703,6 +703,10 @@ internal sealed class SettingsPage : UserControl
         try
         {
             ConfigStore.Save(_config);
+            // Covered-field saves trip the keyfile's config attestation —
+            // flag it so the next verify re-binds quietly (announce-then-heal
+            // would otherwise snap the webcam over our own edit).
+            _service.MarkConfigDirty();
         }
         catch (Exception ex)
         {

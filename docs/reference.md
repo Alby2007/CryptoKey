@@ -56,7 +56,7 @@ read timeout ~5 s.
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
 | `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=…` | `watchdog=alive/down` — supervisor liveness |
-| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted` |
+| `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… slots=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`; `idlemin` = `VaultIdleMinutes` |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
@@ -93,13 +93,14 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
 | `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One warn (~20 s before, as a balloon) + one lock per idle streak — both re-arm only after input returns, so a present key's auto-unlock can't flap |
-| `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad phrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/`, trimmed to 50 |
+| `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad phrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/` as DPAPI-sealed `.cap` files (viewable only by this app on this user; legacy cleartext captures still render), trimmed to 50 |
 | `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
 | `Guard.VaultEnabled` | Vault feature gate — default `false` until the first `vault create` (the Vault page enables it on create) |
 | `Guard.VaultAutoMount` | Mount as soon as the key verifies — default `true` |
 | `Guard.VaultImagePath` | Image location — default `%LOCALAPPDATA%\CryptoKey\vault.ckv` |
 | `Guard.VaultMountPoint` | Drive letter — default `V:\`; free letters offered in the Vault page |
 | `Guard.VaultSizeMb` | Image size used by `vault create` — default 256, range 64–8192 |
+| `Guard.VaultIdleMinutes` | Seal the vault after N minutes without input — `0` = off (default). A mounted vault dismounts and drops its keys; the verify feed stays suppressed while idle, so it remounts when input returns |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
 on every save — a third copy on a different kill surface. Load chain:
@@ -115,7 +116,11 @@ Hidden+system, written flushed-tmp→rename per letter on rotation.
 ```text
 v2:  "CKY2" ‖ DPAPI-CurrentUser( secret 64B ‖ attestation 32B )
 v1:  secret 64B  (legacy — verifies as pre-attestation, upgrades on rotation)
-attestation = HMAC-SHA256(secret, "CKY-ATTEST" ‖ serial ‖ PassphraseHash)
+attestation = HMAC-SHA256(secret, "CKY-ATTEST2" ‖ serial ‖ PassphraseHash ‖ canon)
+  canon = security Guard fields only — unlock policy, strict-tamper, lock
+  mode, removal/watchdog/policies/idle-lock, webcam, alert URL, vault
+  enabled/automount/idle, poll interval (cosmetic + layout fields excluded;
+  legacy "CKY-ATTEST" MACs still verify)
 ```
 
 ## Logs — `%APPDATA%\CryptoKey\guard.log` + `watchdog.log`

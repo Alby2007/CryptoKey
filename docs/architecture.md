@@ -102,7 +102,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
 | `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
-| `captures\*.jpg` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — newest 50 kept |
+| `captures\*.cap` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — DPAPI-sealed per user+machine, newest 50 kept |
 | `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — dual header pages (checksummed) + dual manifest slots + AES-GCM chunks; session-scoped Dokan mount only while the key verifies |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
 
@@ -197,7 +197,7 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `InputLocker.cs` | `WH_KEYBOARD_LL` + `WH_MOUSE_LL`, phrase buffer (char[], wiped), panic combo, hook-side cooldown |
 | `NativeMethods.cs` | Win32 P/Invoke surface |
 | `LockPolicies.cs` | While locked: HKCU `DisableTaskMgr`/`NoLogoff`/`NoClose` = 1 with exact prior-value backup/restore |
-| `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure |
+| `CaptureService.cs` | FlashCap one-shot webcam stills on tamper — fire-and-forget, single-flight, log-once failure; written DPAPI-sealed (`.cap`) |
 | `Sounds.cs` | Synthesized PCM cues (lock thunk, unlock chime, storm blip) — generated WAVs, `SoundPlayer.Play` off-thread |
 | `StartupManager.cs` | Run key vs scheduled task, content-validated `GetMode` |
 | `ShortcutManager.cs` | `.lnk` writer (WScript.Shell) — Start Menu + Desktop targets, auto-created on enroll |

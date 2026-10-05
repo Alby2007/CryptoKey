@@ -472,14 +472,24 @@ internal sealed class SecurityPage : UserControl
                 if (newest == null)
                 {
                     note = _config.Guard.WebcamOnTamper
-                        ? "No captures yet — the first tamper event writes one."
+                        ? "No captures yet — the first tamper event writes one " +
+                          "(sealed to this user)."
                         : "Off — enable 'webcam snapshot on tamper' in Settings.";
                 }
                 else
                 {
-                    // FromFile would lock the jpeg — read the bytes instead.
-                    thumb = Image.FromStream(new MemoryStream(File.ReadAllBytes(newest.FullName)));
-                    note = $"{newest.Name}  ({newest.Length / 1024} KB)";
+                    // .cap files are DPAPI-sealed — Explorer can't read them;
+                    // legacy cleartext captures pass through as raw bytes.
+                    byte[]? bytes = CaptureService.TryOpenCapture(newest.FullName);
+                    if (bytes != null)
+                    {
+                        thumb = Image.FromStream(new MemoryStream(bytes));
+                        note = $"{newest.Name}  ({newest.Length / 1024} KB — sealed to this user)";
+                    }
+                    else
+                    {
+                        note = $"{newest.Name} — unreadable (sealed or corrupt).";
+                    }
                 }
             }
             catch (Exception ex)

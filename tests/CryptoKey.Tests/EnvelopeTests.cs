@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Xunit;
 namespace CryptoKey.Tests;
 
@@ -76,5 +78,115 @@ public class EnvelopeTests
             out byte[]? back, out AttestState attest, out _));
         Assert.Equal(secret, back);
         Assert.Equal(AttestState.Mismatch, attest);
+    }
+
+    // ------------------------------------------------- canon (CKY-ATTEST2)
+
+    [Fact]
+    public void Covered_guard_field_change_flags_mismatch()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig config = TestDisk.NewConfig(secret);
+        byte[] file = KeyVerifier.WrapKeyfile(secret, config);
+
+        // Watchdog is in the attest canon — a silent downgrade trips it.
+        config.Guard.Watchdog = !config.Guard.Watchdog;
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out _, out AttestState attest, out _));
+        Assert.Equal(AttestState.Mismatch, attest);
+    }
+
+    [Theory]
+    [InlineData("sounds")]
+    [InlineData("balloon")]
+    [InlineData("mountpoint")]
+    [InlineData("size")]
+    public void Excluded_fields_dont_trip_attestation(string which)
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig config = TestDisk.NewConfig(secret);
+        byte[] file = KeyVerifier.WrapKeyfile(secret, config);
+
+        // Cosmetic/layout fields are deliberately outside the canon —
+        // changing them must not force a re-attest.
+        switch (which)
+        {
+            case "sounds": config.Guard.Sounds = !config.Guard.Sounds; break;
+            case "balloon": config.Guard.BalloonTips = !config.Guard.BalloonTips; break;
+            case "mountpoint": config.Guard.VaultMountPoint = "Q:"; break;
+            case "size": config.Guard.VaultSizeMb = 1024; break;
+        }
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out _, out AttestState attest, out _));
+        Assert.Equal(AttestState.Ok, attest);
+    }
+
+    [Fact]
+    public void Legacy_attestation_form_still_verifies()
+    {
+        // Pre-canon keyfiles carry MAC = HMAC(secret, "CKY-ATTEST"‖serial‖
+        // phraseHash) — hand-build that envelope; AttestMatches accepts it.
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig config = TestDisk.NewConfig(secret);
+        byte[] attest = HMACSHA256.HashData(secret,
+            Encoding.UTF8.GetBytes(
+                "CKY-ATTEST" + config.DeviceSerial + config.PassphraseHash));
+        byte[] plain = new byte[64 + 32];
+        Buffer.BlockCopy(secret, 0, plain, 0, 64);
+        Buffer.BlockCopy(attest, 0, plain, 64, 32);
+        byte[] blob = Platform.Services.Protector.Protect(
+            plain, KeyVerifier.ProtectorEntropy);
+        byte[] file = new byte[4 + blob.Length];
+        "CKY2"u8.ToArray().CopyTo(file, 0);
+        Buffer.BlockCopy(blob, 0, file, 4, blob.Length);
+
+        Assert.True(KeyVerifier.TryUnwrapKeyfile(file, config,
+            out byte[]? back, out AttestState attestState, out _));
+        Assert.Equal(secret, back);
+        Assert.Equal(AttestState.Ok, attestState);
+    }
+
+    [Fact]
+    public void Re_attest_heals_covered_field_change()
+    {
+        // File-level: wrap → covered edit → mismatch → RotateKeyfiles with a
+        // fresh envelope (same secret, no generation burn) → Ok again.
+        string letter = TestDisk.TempDir();
+        try
+        {
+            byte[] secret = TestDisk.RandomSecret();
+            KeyConfig config = TestDisk.NewConfig(secret);
+            var disk = TestDisk.For(letter);
+            TestDisk.WriteKeyfile(letter, secret, config);
+
+            config.Guard.LockOnRemoval = false; // covered field — downgrade
+            Assert.Equal(AttestState.Mismatch,
+                KeyVerifier.Check(config, disk).Attest);
+
+            var results = KeyVerifier.RotateKeyfiles(disk,
+                KeyVerifier.WrapKeyfile(secret, config));
+            Assert.All(results, r => Assert.Null(r.Error));
+            Assert.Equal(AttestState.Ok, KeyVerifier.Check(config, disk).Attest);
+        }
+        finally
+        {
+            try { Directory.Delete(letter, recursive: true); } catch (Exception) { }
+        }
+    }
+
+    [Fact]
+    public void Canon_is_deterministic_and_covering()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig a = TestDisk.NewConfig(secret);
+        // Clone — NewConfig regenerates salts, which are themselves attested.
+        KeyConfig b = System.Text.Json.JsonSerializer.Deserialize<KeyConfig>(
+            System.Text.Json.JsonSerializer.Serialize(a))!;
+        b.Guard.Animations = !a.Guard.Animations; // excluded — identical MAC
+        Assert.Equal(ConfigStore.ComputeAttest(secret, a),
+            ConfigStore.ComputeAttest(secret, b));
+        b.Guard.IdleLockMinutes = 5; // covered — MAC must diverge
+        Assert.NotEqual(ConfigStore.ComputeAttest(secret, a),
+            ConfigStore.ComputeAttest(secret, b));
     }
 }

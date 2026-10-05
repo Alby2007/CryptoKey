@@ -31,7 +31,7 @@ flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
 | Read-only / write-protected drive | Write fails every time | Drive stays `prev`-valid, flagged each poll, retry every 5 s — no lockout |
 | `.cryptokey` copied to another drive / user | Serial check rejects other drives; DPAPI unwrap fails for other users/machines | Re-enroll, or the recovery phrase under `KeyOrPassphrase` |
 | Clone of the keyfile in play | Presents `prev` after rotation | "possible clone" log + tamper badge; the ratchet burns it out — clone lifetime ≤ 1 session |
-| Attestation mismatch (config tampered) | Tripwire: tamper note + log, secret still verifies | Next rotation re-binds the envelope to the live config |
+| Attestation mismatch | Tripwire: tamper note + log + snap + alert once — "changed off-app or tampered" | The same verify re-wraps the envelope to the live config (announce-then-heal; in-app saves skip the flag via MarkConfigDirty). If it persists, something edited the covered Guard fields off-app |
 | Corrupt/malformed keyfile | Unwrap/parse failure → `SecretMatch.None` → fail closed | Re-enroll; under `KeyOrPassphrase` the recovery phrase still works |
 
 ## Vault failures (`vault.ckv`)

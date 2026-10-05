@@ -28,6 +28,10 @@ internal sealed class GuardService : IDisposable
     private StatusSnapshot? _lastSnapshot;
     private bool _verifiedEdge;
     private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
+    private bool _reattestPending;      // an in-app save changed a covered field
+    private DateTime _lastReattestUtc = DateTime.MinValue;
+    private uint _lastIdleMs;           // last GetLastInputInfo reading (SlowTick)
+    private uint _vaultFedGen;          // generation last handed to the vault
     private string? _tamperNote;
     private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
     private bool _staleKeyPresent;     // a previous-generation file is on the drive
@@ -241,7 +245,8 @@ internal sealed class GuardService : IDisposable
     private void IdleTick()
     {
         int mins = _config.Guard.IdleLockMinutes;
-        if (mins <= 0)
+        int vaultMins = _config.Guard.VaultIdleMinutes;
+        if (mins <= 0 && vaultMins <= 0)
             return;
         try
         {
@@ -251,12 +256,24 @@ internal sealed class GuardService : IDisposable
                 _idleGateMins = mins;
             }
             uint idleMs = Platform.Services.SystemActions.IdleMilliseconds();
+            _lastIdleMs = idleMs;
             // Lock on the UI thread — the timer callback is a pool thread.
             _ui.Post(new Action(() =>
             {
+                // Idle vault seal: a mounted V: on an unattended unlocked
+                // session defeats the vault. Same teardown as a key-yank —
+                // the feed suppression in OnPresenceChecked keeps it sealed
+                // until input returns.
+                if (VaultIdleGate.ShouldSeal(vaultMins, idleMs, _vault.State))
+                {
+                    Log($"Vault idle-sealed ({vaultMins} min idle).");
+                    Notification?.Invoke("CryptoKey",
+                        "Vault sealed — session idle; it remounts when you're back.");
+                    _vault.KeyGone();
+                }
                 // Paused/Locked suppress it; the gate stops re-locking on
                 // the same idle streak after a key-present auto-unlock.
-                if (State != GuardState.Unlocked)
+                if (mins <= 0 || State != GuardState.Unlocked)
                     return;
                 switch (_idleGate.Check(idleMs))
                 {
@@ -433,6 +450,13 @@ internal sealed class GuardService : IDisposable
         }
     }
 
+    /// <summary>
+    /// An in-app save changed the config — mark the keyfile's config
+    /// attestation stale so the next verify re-wraps the envelope quietly
+    /// instead of flagging a tamper event we caused ourselves.
+    /// </summary>
+    public void MarkConfigDirty() => _reattestPending = true;
+
     /// <summary>`cryptokey vault …` piped to a live guard — mount/unmount/create/status.</summary>
     private string DispatchVault(string[] parts)
     {
@@ -450,6 +474,7 @@ internal sealed class GuardService : IDisposable
                        $"exists={_vault.ImageExists} " +
                        $"driver={(_vault.DriverPresent ? "present" : "missing")} " +
                        $"mount={(_vault.State == VaultState.Mounted ? _vault.MountPoint : "-")} " +
+                       $"idlemin={_config.Guard.VaultIdleMinutes} " +
                        $"slots={slots} " +
                        $"used={(usage?.Used ?? 0)} total={(usage?.Total ?? 0)}";
             case "mount":
@@ -512,6 +537,7 @@ internal sealed class GuardService : IDisposable
             _tamperNote = null;
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
+            _reattestPending = false; // key left — a pending re-attest dies with it
             _vault.KeyGone();
             // Under 2FA the screen may still say "Key verified — enter the
             // recovery phrase" from when the factor was armed; keep it honest.
@@ -534,14 +560,42 @@ internal sealed class GuardService : IDisposable
             _keyVerifiedNow = !stale || !strict;
             _lastVerifyFailure = null;
             bool edgeFlip = !_verifiedEdge;
+            uint gen = (uint)(stale ? Math.Max(1, _config.RotationCount - 1)
+                                    : _config.RotationCount);
+
+            // Ordering gates: a rotation rewrites the envelope with a fresh
+            // MAC anyway — a same-pass re-attest would double-write the drive.
+            bool rotationDue = (edgeFlip || stale)
+                && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5);
+            // Announce-then-heal: a mismatch announces as tamper below, then
+            // the envelope re-binds to the live config (same secret — no
+            // generation burn). An in-app save (_reattestPending) re-binds
+            // silently — we caused it, it isn't tamper.
+            bool reattest = (_reattestPending || check.Attest == AttestState.Mismatch)
+                && !stale && !rotationDue
+                && DateTime.UtcNow - _lastReattestUtc > TimeSpan.FromSeconds(5);
+            // The vault consumes its own copy on feed — when the rewrap also
+            // needs the secret this pass, hand it a separate one.
+            byte[]? reattestSecret = reattest && check.Secret != null
+                ? check.Secret.ToArray()
+                : null;
+
+            // Idle vault seal: past the threshold a sealed vault stays
+            // sealed — feeding would re-unseal + remount it every poll. A
+            // generation change still feeds: skipping the rewrap would leave
+            // the vault's slots a full generation behind (dead window).
+            bool idleSuppressed = gen == _vaultFedGen
+                && VaultIdleGate.ShouldSuppressFeed(
+                    _config.Guard.VaultIdleMinutes, _lastIdleMs, _vault.State);
             // The vault consumes the verified secret for its key slots —
             // a stale secret counts only when it counts for the lock, and
             // an attestation mismatch seals the vault even though the
             // secret itself checked out (config tamper is vault tamper).
-            if (_keyVerifiedNow && check.Attest != AttestState.Mismatch)
-                _vault.KeyVerified(check.Secret!,
-                    (uint)(stale ? Math.Max(1, _config.RotationCount - 1)
-                                 : _config.RotationCount));
+            if (_keyVerifiedNow && check.Attest != AttestState.Mismatch && !idleSuppressed)
+            {
+                _vault.KeyVerified(check.Secret!, gen);
+                _vaultFedGen = gen;
+            }
             else
             {
                 if (check.Secret != null)
@@ -554,10 +608,12 @@ internal sealed class GuardService : IDisposable
             // like; attestation failures flag config.json tampering or a
             // forged keyfile. The badge is for real alerts only — a legacy
             // (pre-v2) file is benign and self-upgrades on rotation, so it
-            // gets a dedup'd log line instead of a clone alarm.
+            // gets a dedup'd log line instead of a clone alarm. A mismatch
+            // with _reattestPending set is our own in-app save — it heals
+            // silently below instead of crying wolf.
             string? note = stale ? "possible clone — stale keyfile replayed"
-                : check.Attest == AttestState.Mismatch
-                    ? "config attestation failed — config.json tampered"
+                : check.Attest == AttestState.Mismatch && !_reattestPending
+                    ? "config attestation failed — config.json changed off-app or tampered"
                 : null;
             if (check.Attest == AttestState.Missing && _lastAttest != AttestState.Missing)
                 Log("Keyfile is pre-attestation (legacy) — upgrades to v2 on this rotation.");
@@ -570,11 +626,60 @@ internal sealed class GuardService : IDisposable
                     string msg = stale
                         ? "Keyfile presented a previous-generation secret — " +
                           "possible clone or interrupted rotation."
-                        : "Keyfile attestation mismatch — config.json " +
-                          "tampered or the keyfile was forged.";
+                        : "Keyfile attestation mismatch — config.json changed " +
+                          "off-app or tampered; the keyfile re-binds to the live config.";
                     Log(msg);
                     Snap("tamper");
                     Alert("Tamper", msg);
+                }
+            }
+
+            // Ratify after the announce — the envelope re-wraps against the
+            // live config and rewrites every keyfile on the drive.
+            if (reattestSecret != null)
+            {
+                _lastReattestUtc = DateTime.UtcNow;
+                _reattestPending = false;
+                byte[]? env = null;
+                try
+                {
+                    env = KeyVerifier.WrapKeyfile(reattestSecret, _config);
+                }
+                catch (Exception ex)
+                {
+                    Log($"Config re-attestation failed — envelope error ({ex.Message}).");
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(reattestSecret);
+                }
+                if (env != null)
+                {
+                    byte[] envelope = env;
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            var results = KeyVerifier.RotateKeyfiles(disk, envelope);
+                            try
+                            {
+                                _ui.Post(new Action(() =>
+                                {
+                                    if (results.All(r => r.Error == null))
+                                        Log("Config re-attested — keyfile rebound to current config.");
+                                    else
+                                        foreach (var r in results.Where(r => r.Error != null))
+                                            Log($"Re-attestation write failed at {r.Volume}: {r.Error}");
+                                }));
+                            }
+                            catch (Exception) { /* monitor dead — feed closed */ }
+                        }
+                        catch (Exception) { }
+                        finally
+                        {
+                            CryptographicOperations.ZeroMemory(envelope);
+                        }
+                    });
                 }
             }
 
@@ -606,11 +711,12 @@ internal sealed class GuardService : IDisposable
             // stale file shows up (heals interrupted rotations), throttled.
             // Under 2FA/strict policies the lock stays engaged here — the
             // write goes to a worker so a stalled USB write can't hold the
-            // hook pump open.
-            if ((edgeFlip || stale)
-                && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5))
+            // hook pump open. A rotation's envelope carries the current
+            // attestation — it also clears any pending re-attest.
+            if (rotationDue)
             {
                 _lastRotateAttemptUtc = DateTime.UtcNow;
+                _reattestPending = false;
                 // Pin prev when the drive IS the previous generation — a failed
                 // write must leave it still-verifiable, not two gens behind.
                 TryRotate(disk, keepPrev: stale, backgroundWrite: true);
@@ -1075,6 +1181,33 @@ internal sealed class GuardService : IDisposable
         _surface.Dispose();
         _monitor.Dispose();
     }
+}
+
+/// <summary>
+/// Vault idle decider — pure, no guard glue. Seal fires while a mounted
+/// vault sits past the idle threshold; suppression stops the per-poll
+/// verify feed re-unsealing it while the session stays idle (the vault
+/// comes back when you do — next input lifts suppression).
+/// </summary>
+internal static class VaultIdleGate
+{
+    /// <summary>Seal once: mounted + past the threshold. KeyGone's state
+    /// drop self-latches — no edge flag needed.</summary>
+    public static bool ShouldSeal(int minutes, uint idleMs, VaultState state)
+        => minutes > 0
+           && idleMs >= (ulong)minutes * 60_000
+           && state == VaultState.Mounted;
+
+    /// <summary>
+    /// Feed suppression while idle — meaningful only for states where a
+    /// feed does real work (Sealed would re-unseal). Open states (Mounted,
+    /// Unsealed) keep feeding harmlessly; NeedsDriver/Corrupt stay
+    /// suppressed too — no mounts happen while nobody's at the desk.
+    /// </summary>
+    public static bool ShouldSuppressFeed(int minutes, uint idleMs, VaultState state)
+        => minutes > 0
+           && idleMs >= (ulong)minutes * 60_000
+           && state is not (VaultState.Mounted or VaultState.Unsealed);
 }
 
 internal enum IdleVerdict { None, Warn, Lock }

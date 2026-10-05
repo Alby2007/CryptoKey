@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using FlashCap;
 
 namespace CryptoKey;
@@ -14,6 +15,9 @@ internal static class CaptureService
 {
     private const int MaxCaptures = 50;
     private static readonly TimeSpan SnapTimeout = TimeSpan.FromSeconds(6);
+
+    /// <summary>Protector scope tag — captures seal to this user+machine.</summary>
+    internal static readonly byte[] CaptureEntropy = "CryptoKey.cap.v1"u8.ToArray();
 
     private static int _busy;
     private static int _unavailableLogged;
@@ -57,9 +61,13 @@ internal static class CaptureService
                 Directory.CreateDirectory(CapturesDir);
                 string safe = string.Concat(reason.Select(
                     ch => char.IsLetterOrDigit(ch) ? ch : '-')).Trim('-');
+                // Sealed at rest — .cap is a DPAPI blob; only this app on
+                // this user can view it (TryOpenCapture falls back to raw
+                // for legacy cleartext captures).
                 string path = Path.Combine(CapturesDir,
-                    $"{DateTime.Now:yyyyMMdd-HHmmss}-{safe}{SniffExt(image)}");
-                File.WriteAllBytes(path, image);
+                    $"{DateTime.Now:yyyyMMdd-HHmmss}-{safe}.cap");
+                File.WriteAllBytes(path,
+                    Platform.Services.Protector.Protect(image, CaptureEntropy));
                 log?.Invoke($"Tamper snapshot → {path}");
                 TrimCaptures();
             }
@@ -74,12 +82,30 @@ internal static class CaptureService
         });
     }
 
-    /// <summary>File extension from magic bytes — FlashCap may yield JPEG, PNG or BMP.</summary>
-    private static string SniffExt(byte[] image)
-        => image.Length >= 3 && image[0] == 0xFF && image[1] == 0xD8 ? ".jpg"
-        : image.Length >= 4 && image[0] == 0x89 && image[1] == 0x50 ? ".png"
-        : image.Length >= 2 && image[0] == 0x42 && image[1] == 0x4D ? ".bmp"
-        : ".jpg"; // JPEG characteristics requested — assume it held
+    /// <summary>
+    /// Read a capture for display: .cap blobs unseal through the protector;
+    /// a legacy cleartext capture fails unprotect and returns raw bytes.
+    /// Null when the file is missing/unreadable.
+    /// </summary>
+    public static byte[]? TryOpenCapture(string path)
+    {
+        try
+        {
+            byte[] blob = File.ReadAllBytes(path);
+            try
+            {
+                return Platform.Services.Protector.Unprotect(blob, CaptureEntropy);
+            }
+            catch (CryptographicException)
+            {
+                return blob; // pre-seal cleartext capture — still viewable
+            }
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     private static void TrimCaptures()
     {

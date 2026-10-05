@@ -29,6 +29,9 @@ internal sealed class VaultPage : UserControl
     private readonly AppButton _openBtn;
     private readonly Label _driverNote;
     private readonly ToggleSwitch _autoMount;
+    private readonly Slider _idleSeal;
+    private readonly Label _idleSealValue;
+    private readonly System.Windows.Forms.Timer _idleSealSave = new() { Interval = 500 };
     private readonly ComboBox _letter;
     private readonly Label _imagePath;
     private readonly AppButton _reformatBtn;
@@ -242,12 +245,12 @@ internal sealed class VaultPage : UserControl
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 5; i++)
-            sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 20f));
+        for (int i = 0; i < 6; i++)
+            sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 6f));
 
         _autoMount = new ToggleSwitch
         {
@@ -259,6 +262,7 @@ internal sealed class VaultPage : UserControl
         {
             _config.Guard.VaultAutoMount = _autoMount.Checked;
             ConfigStore.Save(_config);
+            _service.MarkConfigDirty();
         };
         sInner.Controls.Add(_autoMount, 0, 0);
 
@@ -290,6 +294,7 @@ internal sealed class VaultPage : UserControl
             {
                 _service.Vault.ApplyMountPoint(letter);
                 ConfigStore.Save(_config);
+                _service.MarkConfigDirty();
                 _notify?.Invoke($"Vault letter → {letter} (applies on next mount)", false);
             }
         };
@@ -338,6 +343,57 @@ internal sealed class VaultPage : UserControl
         pathRow.Controls.Add(openFolder, 2, 0);
         sInner.Controls.Add(pathRow, 0, 2);
 
+        // Idle seal — "Seal vault after idle" slider (0 = off, same call as
+        // the idle lock: a surprise dismount mid-open-file is hostile UX).
+        var idleSealRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Theme.Surface,
+            Margin = new Padding(0),
+        };
+        idleSealRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34f));
+        idleSealRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46f));
+        idleSealRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20f));
+        _idleSeal = new Slider
+        {
+            Minimum = 0,
+            Maximum = 60,
+            Step = 1,
+            Value = Math.Clamp(_config.Guard.VaultIdleMinutes, 0, 60),
+            Dock = DockStyle.Fill,
+            Margin = new Padding(6, 0, 6, 0),
+        };
+        _idleSealValue = new Label
+        {
+            Text = _idleSeal.Value == 0 ? "off" : $"{_idleSeal.Value} min",
+            Font = Theme.MonoFont(8.5f),
+            ForeColor = Theme.TextDim,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleRight,
+            AutoSize = false,
+        };
+        _idleSeal.ValueChanged += (_, _) =>
+        {
+            _idleSealValue.Text = _idleSeal.Value == 0 ? "off" : $"{_idleSeal.Value} min";
+            _idleSealSave.Stop();
+            _idleSealSave.Start(); // drags fire per-tick — debounce the write
+        };
+        _idleSealSave.Tick += (_, _) =>
+        {
+            _idleSealSave.Stop();
+            _config.Guard.VaultIdleMinutes = _idleSeal.Value;
+            // VaultIdleMinutes is in the attest set — toggling it is itself
+            // a mild downgrade, so flag the re-attest like any covered save.
+            ConfigStore.Save(_config);
+            _service.MarkConfigDirty();
+        };
+        idleSealRow.Controls.Add(MidLabel("Seal vault after idle"), 0, 0);
+        idleSealRow.Controls.Add(_idleSeal, 1, 0);
+        idleSealRow.Controls.Add(_idleSealValue, 2, 0);
+        sInner.Controls.Add(idleSealRow, 0, 3);
+
         var dangerRow = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -370,7 +426,7 @@ internal sealed class VaultPage : UserControl
         dangerRow.Controls.Add(MidLabel("Danger zone"), 0, 0);
         dangerRow.Controls.Add(_reformatBtn, 1, 0);
         dangerRow.Controls.Add(_deleteBtn, 2, 0);
-        sInner.Controls.Add(dangerRow, 0, 3);
+        sInner.Controls.Add(dangerRow, 0, 4);
 
         var vaultNote = new Label
         {
@@ -382,7 +438,7 @@ internal sealed class VaultPage : UserControl
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
         };
-        sInner.Controls.Add(vaultNote, 0, 4);
+        sInner.Controls.Add(vaultNote, 0, 5);
         setCard.Controls.Add(sInner);
 
         layout.Controls.Add(vaultCard, 0, 0);
@@ -442,6 +498,7 @@ internal sealed class VaultPage : UserControl
         {
             _config.Guard.VaultEnabled = true;
             ConfigStore.Save(_config);
+            _service.MarkConfigDirty();
             _service.Vault.ReloadConfig();
             _notify?.Invoke("Vault enabled — click Create once more.", false);
             Refresh();
@@ -451,6 +508,7 @@ internal sealed class VaultPage : UserControl
         {
             _config.Guard.VaultSizeMb = _size.Value;
             ConfigStore.Save(_config);
+            _service.MarkConfigDirty();
             _notify?.Invoke($"Vault created ({_size.Value} MB)", false);
         }
         else
@@ -677,6 +735,8 @@ internal sealed class VaultPage : UserControl
     {
         if (disposing)
         {
+            _idleSealSave.Stop();
+            _idleSealSave.Dispose();
             _service.StateChanged -= OnGuardState;
             _service.Vault.StatusChanged -= OnVaultState;
         }

@@ -96,6 +96,9 @@ internal sealed class GuardSettings
 
     /// <summary>Created image size in MiB.</summary>
     public int VaultSizeMb { get; set; } = 256;
+
+    /// <summary>Seal the vault (dismount + drop keys) after N idle minutes (0 = off).</summary>
+    public int VaultIdleMinutes { get; set; } = 0;
 }
 
 internal static class ConfigStore
@@ -346,12 +349,35 @@ internal static class ConfigStore
 
     /// <summary>
     /// Attestation MAC embedded in the v2 keyfile: the drive vouches that this
-    /// config (serial + recovery-phrase hash) is the one the keyfile was
-    /// written for. A mismatch means config.json or the keyfile was tampered
-    /// with — the secret is required to forge the MAC, so an attacker who
-    /// only copies/edits files can't produce one.
+    /// config (serial + recovery-phrase hash + the security-relevant Guard
+    /// fields) is the one the keyfile was written for. A mismatch means
+    /// config.json or the keyfile was tampered with — the secret is required
+    /// to forge the MAC, so an attacker who only copies/edits files can't
+    /// produce one.
     /// </summary>
     public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
+    {
+        byte[] data = Encoding.UTF8.GetBytes(
+            "CKY-ATTEST2" + config.DeviceSerial + config.PassphraseHash
+            + GuardCanonical(config));
+        return HMACSHA256.HashData(secret, data);
+    }
+
+    /// <summary>
+    /// Fixed-time compare against BOTH attestation forms: the extended
+    /// canon (everything written now) and the legacy
+    /// CKY-ATTEST‖serial‖phraseHash form (pre-canon keyfiles keep
+    /// verifying — the next envelope write upgrades them silently).
+    /// </summary>
+    public static bool AttestMatches(byte[] secret, KeyConfig config,
+        ReadOnlySpan<byte> stored)
+        => CryptographicOperations.FixedTimeEquals(stored,
+               ComputeAttest(secret, config))
+           || CryptographicOperations.FixedTimeEquals(stored,
+               LegacyAttest(secret, config));
+
+    /// <summary>The pre-canon attestation input — kept for reads only.</summary>
+    private static byte[] LegacyAttest(byte[] secret, KeyConfig config)
     {
         byte[] tag = Encoding.UTF8.GetBytes("CKY-ATTEST");
         byte[] serial = Encoding.UTF8.GetBytes(config.DeviceSerial);
@@ -361,6 +387,32 @@ internal static class ConfigStore
         Buffer.BlockCopy(serial, 0, data, tag.Length, serial.Length);
         Buffer.BlockCopy(pass, 0, data, tag.Length + serial.Length, pass.Length);
         return HMACSHA256.HashData(secret, data);
+    }
+
+    /// <summary>
+    /// Deterministic name=value canon over the security-relevant Guard
+    /// fields — a silent downgrade in any of these trips the attestation.
+    /// Cosmetic fields (Sounds, BalloonTips, Animations) and layout fields
+    /// (VaultMountPoint/SizeMb/ImagePath) are deliberately absent: changing
+    /// them must not force a re-attest. The hash-chain fields self-verify.
+    /// </summary>
+    private static string GuardCanonical(KeyConfig config)
+    {
+        GuardSettings g = config.Guard;
+        static string B(bool v) => v ? "true" : "false";
+        return "|unlockpolicy=" + (int)g.UnlockPolicy
+            + "|stricttamper=" + B(g.StrictTamper)
+            + "|lockmode=" + g.LockMode.ToLowerInvariant()
+            + "|lockonremoval=" + B(g.LockOnRemoval)
+            + "|watchdog=" + B(g.Watchdog)
+            + "|lockpolicies=" + B(g.LockPolicies)
+            + "|idlelockminutes=" + g.IdleLockMinutes
+            + "|webcamontamper=" + B(g.WebcamOnTamper)
+            + "|alerturl=" + g.AlertUrl.Trim()
+            + "|vaultenabled=" + B(g.VaultEnabled)
+            + "|vaultautomount=" + B(g.VaultAutoMount)
+            + "|vaultidleminutes=" + g.VaultIdleMinutes
+            + "|pollintervalms=" + g.PollIntervalMs;
     }
 
     // The on-disk secret is 64 random bytes — high entropy, so a single

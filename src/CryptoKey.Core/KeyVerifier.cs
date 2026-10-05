@@ -79,13 +79,20 @@ internal static class KeyVerifier
     public static byte[] WrapKeyfile(byte[] secret, KeyConfig config)
     {
         byte[] plain = new byte[SecretLen + AttestLen];
-        Buffer.BlockCopy(secret, 0, plain, 0, SecretLen);
-        Buffer.BlockCopy(ConfigStore.ComputeAttest(secret, config), 0, plain, SecretLen, AttestLen);
-        byte[] blob = Platform.Services.Protector.Protect(plain, ProtectorEntropy);
-        byte[] file = new byte[Magic.Length + blob.Length];
-        Buffer.BlockCopy(Magic, 0, file, 0, Magic.Length);
-        Buffer.BlockCopy(blob, 0, file, Magic.Length, blob.Length);
-        return file;
+        try
+        {
+            Buffer.BlockCopy(secret, 0, plain, 0, SecretLen);
+            Buffer.BlockCopy(ConfigStore.ComputeAttest(secret, config), 0, plain, SecretLen, AttestLen);
+            byte[] blob = Platform.Services.Protector.Protect(plain, ProtectorEntropy);
+            byte[] file = new byte[Magic.Length + blob.Length];
+            Buffer.BlockCopy(Magic, 0, file, 0, Magic.Length);
+            Buffer.BlockCopy(blob, 0, file, Magic.Length, blob.Length);
+            return file;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plain); // raw secret+attest — not ours to keep
+        }
     }
 
     /// <summary>
@@ -141,8 +148,7 @@ internal static class KeyVerifier
 
         byte[] unwrapped = plain.AsSpan(0, SecretLen).ToArray();
         ReadOnlySpan<byte> storedAttest = plain.AsSpan(SecretLen, AttestLen);
-        bool ok = CryptographicOperations.FixedTimeEquals(storedAttest,
-            ConfigStore.ComputeAttest(unwrapped, config));
+        bool ok = ConfigStore.AttestMatches(unwrapped, config, storedAttest);
         CryptographicOperations.ZeroMemory(plain); // secret+attest blob — done with it
         attest = ok ? AttestState.Ok : AttestState.Mismatch;
         detail = ok ? "attested" : "config attestation failed — config.json tampered";

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using DokanNet;
 using DokanNet.Logging;
 
@@ -15,12 +16,22 @@ internal sealed class DokanVaultMounter : IVaultMounter
 
     public DokanVaultMounter(Action<string>? log = null) => _log = log;
 
+    private static IntPtr _dokanLib; // pinned for process life — see below
+
     public bool DriverPresent
     {
         get
         {
             // Failure is retried every check — installing Dokany mid-session
             // gets picked up on the next verify/mount attempt.
+            // Probe the user-mode DLL BEFORE touching DokanNet: a Dokan
+            // object whose ctor or Dispose hits DokanShutdown while
+            // dokan2.dll is absent leaves a finalizer that throws
+            // DllNotFoundException on the GC thread — a process killer.
+            // The handle stays loaded so no later P/Invoke can miss it.
+            if (_dokanLib == IntPtr.Zero
+                && !NativeLibrary.TryLoad("dokan2.dll", out _dokanLib))
+                return false;
             try
             {
                 using var dokan = new Dokan(new NullLogger());
