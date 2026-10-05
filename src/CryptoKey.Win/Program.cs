@@ -339,6 +339,15 @@ internal static class Program
             }
         }
 
+        // Prove the copy actually launches — a polluted payload (runtime
+        // host files beside the exe) only fails HERE, not on a byte diff.
+        if (!VerifyInstalledExeRuns(installedExe))
+        {
+            Console.WriteLine("WARNING: the installed exe didn't answer a " +
+                "status probe — the copy may be incomplete or the .NET " +
+                "runtime can't resolve. Test it: \"" + installedExe + "\" status");
+        }
+
         // Shortcuts repoint at the installed exe — IconLocation rides along,
         // so the embedded padlock survives the move.
         try
@@ -732,13 +741,79 @@ internal static class Program
             || ans.Trim().Equals("y", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Runtime-payload files that must never sit beside the installed exe:
+    /// an apphost that finds hostfxr/hostpolicy/coreclr app-locally treats
+    /// the install dir as the dotnet root and looks for shared/ frameworks
+    /// there — the framework-dependent app then fails to launch at all.
+    /// (These land in bin/ when a self-contained publish pollutes the build
+    /// output; CryptoKey ships framework-dependent.)
+    /// </summary>
+    private static readonly string[] RuntimePayloadFiles =
+    {
+        "hostfxr.dll", "hostpolicy.dll", "coreclr.dll", "createdump.exe",
+        "mscordaccore.dll", "mscordaccore_amd64_amd64_9.0.1025.47515.dll",
+        "mscordbi.dll", "mscorlib.dll", "mscorrc.dll",
+        "clrgc.dll", "clrgcexp.dll", "clretwrc.dll",
+    };
+
+    private static bool IsRuntimePayload(string fileName)
+        => RuntimePayloadFiles.Contains(fileName, StringComparer.OrdinalIgnoreCase)
+           || fileName.StartsWith("System.Private.", StringComparison.OrdinalIgnoreCase)
+           || fileName.StartsWith("mscordaccore_amd64", StringComparison.OrdinalIgnoreCase);
+
     private static void CopyTree(string source, string target)
     {
         Directory.CreateDirectory(target);
         foreach (string f in Directory.GetFiles(source))
+        {
+            if (IsRuntimePayload(Path.GetFileName(f)))
+                continue; // poison for a framework-dependent install
             File.Copy(f, Path.Combine(target, Path.GetFileName(f)), overwrite: true);
+        }
         foreach (string d in Directory.GetDirectories(source))
-            CopyTree(d, Path.Combine(target, Path.GetFileName(d)));
+        {
+            string name = Path.GetFileName(d);
+            if (name.Equals("publish", StringComparison.OrdinalIgnoreCase))
+                continue; // stale publish trees bloat the install
+            CopyTree(d, Path.Combine(target, name));
+        }
+        // The install dir keeps files between installs — prune poison that
+        // landed from a polluted payload previously.
+        foreach (string f in Directory.GetFiles(target))
+            if (IsRuntimePayload(Path.GetFileName(f)))
+                try { File.Delete(f); } catch (Exception) { }
+    }
+
+    /// <summary>
+    /// Launch the installed exe once and confirm it answers — catches the
+    /// "payload copied but the runtime can't start it" class (bad runtime
+    /// resolution, truncated copy) that a byte-diff can't see.
+    /// </summary>
+    private static bool VerifyInstalledExeRuns(string installedExe)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(installedExe, "status")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var p = Process.Start(psi);
+            if (p == null)
+                return false;
+            string outText = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(15_000);
+            // status exits non-zero without a key — the marker line is the
+            // proof the runtime + payload loaded.
+            return outText.Contains("CryptoKey:", StringComparison.Ordinal);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private static int SetStartupMode(StartupMode mode)
