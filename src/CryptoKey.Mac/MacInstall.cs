@@ -68,9 +68,15 @@ internal static class MacInstall
         }
         Run("/bin/chmod", "755", InstalledExe);
 
-        // Quarantine: a downloaded file carries com.apple.quarantine and
-        // Gatekeeper blocks it — clear it on the installed copy.
-        Run("/usr/bin/xattr", "-d", "com.apple.quarantine", InstalledExe);
+        // Quarantine: a downloaded payload carries com.apple.quarantine and
+        // Gatekeeper would block it — strip it only when it's actually
+        // there (a locally-built binary never carries it, and an
+        // unconditional strip is the kind of call audits flag).
+        if (RunQuiet("/usr/bin/xattr", "-p", "com.apple.quarantine", InstalledExe) == 0)
+        {
+            Run("/usr/bin/xattr", "-d", "com.apple.quarantine", InstalledExe);
+            Console.WriteLine("Cleared Gatekeeper quarantine on the installed copy.");
+        }
 
         File.WriteAllText(PlistPath, BuildPlist());
         Console.WriteLine($"Wrote {PlistPath}");

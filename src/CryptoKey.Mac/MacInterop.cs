@@ -199,26 +199,20 @@ internal static class MacInterop
     [DllImport(DA)] internal static extern IntPtr DADiskCreateFromBSDName(
         IntPtr allocator, IntPtr session,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    /// <summary>Volume mount-point → disk. Null for paths that aren't mounted volumes.</summary>
+    [DllImport(DA)] internal static extern IntPtr DADiskCreateFromVolumePath(
+        IntPtr allocator, IntPtr session, IntPtr url);
+    /// <summary>"disk4s1" as a malloc'd C string — caller frees with free().</summary>
+    [DllImport(DA)] internal static extern IntPtr DADiskCopyBSDName(IntPtr disk);
     [DllImport(DA)] internal static extern IntPtr DADiskCopyDescription(IntPtr disk);
 
     // ---------- libc ----------
-
-    // struct statfs offsets (identical on x86_64 + arm64):
-    //   f_fstypename[16]  @ 72
-    //   f_mntonname[1024] @ 88
-    //   f_mntfromname[1024] @ 1112   ("/dev/disk4s1")
-    internal const int StatfsBufSize = 4096;
-    internal const int StatfsMntFromOff = 1112;
-
-    [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "statfs$INODE64",
-        SetLastError = true)]
-    internal static extern int StatFs(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string path, [Out] byte[] buf);
 
     [DllImport(LibC, SetLastError = true)] internal static extern int open(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, int mode);
     [DllImport(LibC, SetLastError = true)] internal static extern int flock(int fd, int operation);
     [DllImport(LibC)] internal static extern int close(int fd);
+    [DllImport(LibC, EntryPoint = "free")] internal static extern void Free(IntPtr ptr);
     [DllImport(LibC)] internal static extern int unlink(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(LibC)] internal static extern uint getuid();

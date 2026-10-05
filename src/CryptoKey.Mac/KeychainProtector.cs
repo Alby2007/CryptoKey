@@ -119,8 +119,14 @@ internal sealed class KeychainProtector : IKeyProtector
                 add = MacInterop.CfDict(kClass, vClass, kService, vService,
                     kAccount, vAccount, kAccessible, vAccessible, kValue, vData);
                 // A keychain item that exists with the wrong shape is replaced —
-                // delete first so Add can't bounce on errSecDuplicateItem.
-                MacInterop.SecItemDelete(query);
+                // delete first so Add can't bounce on errSecDuplicateItem. The
+                // delete gets a minimal primary-key query: SecItemDelete can
+                // errSecParam on return-type keys like r_Data, and a bounced
+                // delete is exactly what wedges the add.
+                IntPtr del = MacInterop.CfDict(kClass, vClass, kService, vService,
+                    kAccount, vAccount);
+                try { MacInterop.SecItemDelete(del); }
+                finally { MacInterop.CFRelease(del); }
                 st = MacInterop.SecItemAdd(add, IntPtr.Zero);
                 if (st != MacInterop.ErrSecSuccess)
                     throw new CryptographicException($"Keychain write failed (OSStatus {st})");

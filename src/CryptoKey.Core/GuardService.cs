@@ -725,6 +725,22 @@ internal sealed class GuardService : IDisposable
         }
 
         UnlockPolicy policy = _config.Guard.UnlockPolicy;
+        // Is the input even phrase-shaped? A failed verify of a valid
+        // XXXXX-XXXXX-XXXXX-XXXXX is "wrong phrase"; anything else is most
+        // likely a legacy free-form passphrase — say so rather than just
+        // "incorrect" (they were retired when phrases replaced them).
+        Span<char> shape = stackalloc char[64];
+        bool notPhraseShaped;
+        try
+        {
+            int n = RecoveryPhrase.Normalize(attempt.AsSpan(), shape);
+            notPhraseShaped = !RecoveryPhrase.IsValid(shape[..Math.Min(n, shape.Length)]);
+        }
+        finally
+        {
+            shape.Clear();
+        }
+
         Task.Run(() =>
         {
             bool ok;
@@ -743,7 +759,7 @@ internal sealed class GuardService : IDisposable
 
             try
             {
-                _ui.Post(new Action(() => OnPassphraseResult(ok, policy)));
+                _ui.Post(new Action(() => OnPassphraseResult(ok, policy, notPhraseShaped)));
             }
             catch (Exception)
             {
@@ -752,7 +768,7 @@ internal sealed class GuardService : IDisposable
         });
     }
 
-    private void OnPassphraseResult(bool ok, UnlockPolicy policy)
+    private void OnPassphraseResult(bool ok, UnlockPolicy policy, bool notPhraseShaped)
     {
         if (!ok)
         {
@@ -769,6 +785,12 @@ internal sealed class GuardService : IDisposable
                 _surface.SetCooldown(until);
                 _surface.SetStatus($"Too many attempts — input frozen for {secs}s.");
                 Log($"Recovery-phrase failed attempt #{_failedAttempts} — input frozen {secs}s.");
+            }
+            else if (notPhraseShaped)
+            {
+                _surface.SetStatus("That's not a recovery phrase — credentials are " +
+                    "generated XXXXX-XXXXX-XXXXX-XXXXX phrases now. Old passphrases " +
+                    "were retired; unlock with the key and regenerate on the Security tab.");
             }
             else
             {

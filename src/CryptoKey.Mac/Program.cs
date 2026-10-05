@@ -95,7 +95,9 @@ internal static class Program
     {
         var ui = new AvaloniaUiDispatcher();
         var lockUi = new LockWindowCtl();
-        Platform.Init(MacPlatform.UiServices(ui, lockUi));
+        // Deliberate upgrade: Main installed the headless bundle so config
+        // failures could alert pre-UI; swap in the UI bundle now.
+        Platform.Reinit(MacPlatform.UiServices(ui, lockUi));
 
         GuardService? service = null;
         IpcServer? ipc = null;
@@ -126,7 +128,7 @@ internal static class Program
     private static int GuardHeadless(KeyConfig config, bool devMode)
     {
         var pump = new MacPump();
-        Platform.Init(MacPlatform.Headless(pump));
+        Platform.Reinit(MacPlatform.Headless(pump));
         using var service = StartBackend(config, devMode, out IpcServer? ipc);
         using (ipc)
         {
@@ -157,7 +159,7 @@ internal static class Program
         if (headless)
         {
             var pump = new MacPump();
-            Platform.Init(MacPlatform.Headless(pump));
+            Platform.Reinit(MacPlatform.Headless(pump));
             surface = new MacLockSurface(devMode, null);
             Console.WriteLine("uitest (headless): engaging 3s…");
             bool ok = surface.Engage();
@@ -171,7 +173,9 @@ internal static class Program
 
         var ui = new AvaloniaUiDispatcher();
         var lockUi = new LockWindowCtl();
-        Platform.Init(MacPlatform.UiServices(ui, lockUi));
+        // Deliberate upgrade: Main installed the headless bundle so config
+        // failures could alert pre-UI; swap in the UI bundle now.
+        Platform.Reinit(MacPlatform.UiServices(ui, lockUi));
         var surfaceBox = new MacLockSurface(devMode, lockUi);
         surface = surfaceBox;
         MacApp.OnStartup = () =>

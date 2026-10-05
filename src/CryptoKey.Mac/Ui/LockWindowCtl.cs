@@ -44,6 +44,27 @@ internal sealed class LockWindowCtl
             Dispatcher.UIThread.Post(DoClose);
     }
 
+    /// <summary>
+    /// Close with a bounded synchronous wait — the surface calls this before
+    /// releasing display capture, and a Posted-but-unrun close would leave a
+    /// shielding window on the normal desktop for a dispatcher frame.
+    /// </summary>
+    public void CloseAndWait()
+    {
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            DoClose();
+            return;
+        }
+        using var done = new ManualResetEventSlim();
+        Dispatcher.UIThread.Post(() =>
+        {
+            try { DoClose(); }
+            finally { done.Set(); }
+        });
+        done.Wait(TimeSpan.FromSeconds(1));
+    }
+
     private void DoOpen()
     {
         if (_open || MacApp.Anchor == null)

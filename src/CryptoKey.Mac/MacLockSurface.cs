@@ -109,8 +109,9 @@ internal sealed class MacLockSurface : ILockSurface
         _engaged = false; // same contract as Windows: disarmed means disengaged
         try { KillTap(); } catch (Exception) { }
         // Windows go before capture release — a topmost fullscreen card
-        // must never linger on the normal desktop.
-        try { _ui?.Close(); } catch (Exception) { }
+        // must never linger on the normal desktop. CloseAndWait blocks
+        // (bounded) until the windows are actually gone, not just queued.
+        try { _ui?.CloseAndWait(); } catch (Exception) { }
         try { ReleaseDisplays(); } catch (Exception) { }
         WipeBuffer();
     }

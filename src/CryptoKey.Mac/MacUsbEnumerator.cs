@@ -1,14 +1,15 @@
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace CryptoKey;
 
 /// <summary>
-/// USB enumeration on macOS: walk /Volumes, statfs each mount for its BSD
-/// name ("/dev/disk4s1"), then ask DiskArbitration for that disk's
-/// description — removable flag + USB serial/product via DADeviceProperties.
-/// That serial↔mount join is what WMI hands us free on Windows — a
-/// multi-partition flash drive yields one UsbDisk with every mount in
-/// VolumePaths.
+/// USB enumeration on macOS: walk /Volumes, ask DiskArbitration to resolve
+/// each mount to a disk (DADiskCreateFromVolumePath → DADiskCopyBSDName),
+/// then read that disk's description — removable flag + USB serial/product
+/// via DADeviceProperties. That serial↔mount join is what WMI hands us free
+/// on Windows — a multi-partition flash drive yields one UsbDisk with every
+/// mount in VolumePaths.
 /// </summary>
 internal sealed class MacUsbEnumerator : IUsbEnumerator
 {
@@ -27,7 +28,7 @@ internal sealed class MacUsbEnumerator : IUsbEnumerator
             throw new InvalidOperationException("DASessionCreate failed");
         try
         {
-            foreach (string mount in MountsUnder("/Volumes"))
+            foreach (string mount in Directory.GetDirectories("/Volumes"))
             {
                 try { Probe(mount, session, bySerial); }
                 catch (Exception) { /* one bad mount shouldn't kill the scan */ }
@@ -40,33 +41,42 @@ internal sealed class MacUsbEnumerator : IUsbEnumerator
             .ToList();
     }
 
-    /// <summary>/Volumes entries that are actually mounted volumes.</summary>
-    private static IEnumerable<string> MountsUnder(string root)
-    {
-        foreach (string mnt in Directory.GetDirectories(root))
-            if (Statfs(mnt) is string bsd && bsd.Length > 0)
-                yield return mnt;
-    }
-
     /// <summary>
-    /// BSD name ("disk4s1") of the device a path is mounted from, via
-    /// statfs f_mntfromname. Returns "" if statfs fails or the path isn't a
-    /// mount root whose from-name is a /dev/disk* node.
+    /// BSD name ("disk4s1") for the disk mounted at <paramref name="mount"/>,
+    /// via DADiskCreateFromVolumePath — documented API, no struct scraping.
+    /// "" for /Volumes entries that aren't mount roots (the boot-volume
+    /// symlink, strays) or on any DA failure.
     /// </summary>
-    private static string Statfs(string path)
+    private static string MountToBsd(string mount, IntPtr session)
     {
-        var buf = new byte[MacInterop.StatfsBufSize];
-        if (MacInterop.StatFs(path, buf) != 0)
-            return "";
-        string from = ReadCStr(buf, MacInterop.StatfsMntFromOff);
-        const string dev = "/dev/";
-        return from.StartsWith(dev, StringComparison.Ordinal) ? from[dev.Length..] : "";
+        IntPtr url = IntPtr.Zero, disk = IntPtr.Zero, name = IntPtr.Zero;
+        try
+        {
+            // CFURLCreateFromFileSystemRepresentation wants a NUL-terminated
+            // UTF-8 buffer with the length NOT counting the terminator.
+            byte[] path = Encoding.UTF8.GetBytes(mount + "\0");
+            url = MacInterop.CFURLCreateFromFileSystemRepresentation(
+                IntPtr.Zero, path, (IntPtr)(path.Length - 1), true);
+            if (url == IntPtr.Zero)
+                return "";
+            disk = MacInterop.DADiskCreateFromVolumePath(IntPtr.Zero, session, url);
+            if (disk == IntPtr.Zero)
+                return "";
+            name = MacInterop.DADiskCopyBSDName(disk);
+            return name == IntPtr.Zero ? "" : (Marshal.PtrToStringUTF8(name) ?? "");
+        }
+        finally
+        {
+            if (name != IntPtr.Zero) MacInterop.Free(name); // malloc'd, not CF
+            if (disk != IntPtr.Zero) MacInterop.CFRelease(disk);
+            if (url != IntPtr.Zero) MacInterop.CFRelease(url);
+        }
     }
 
     private static void Probe(string mount, IntPtr session,
         Dictionary<string, UsbDiskAcc> bySerial)
     {
-        string bsd = Statfs(mount);
+        string bsd = MountToBsd(mount, session);
         if (bsd.Length == 0)
             return;
 
@@ -128,12 +138,6 @@ internal sealed class MacUsbEnumerator : IUsbEnumerator
     {
         int s = bsd.LastIndexOf('s');
         return s > 0 && int.TryParse(bsd[(s + 1)..], out _) ? bsd[..s] : bsd;
-    }
-
-    private static string ReadCStr(byte[] buf, int off)
-    {
-        int end = Array.IndexOf(buf, (byte)0, off);
-        return end < 0 ? "" : Encoding.UTF8.GetString(buf, off, end - off);
     }
 
     private sealed class UsbDiskAcc

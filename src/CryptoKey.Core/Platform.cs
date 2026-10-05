@@ -75,4 +75,18 @@ internal static class Platform
             "Platform services not initialized — call Platform.Init first.");
 
     public static void Init(PlatformServices services) => _services = services;
+
+    /// <summary>
+    /// Swap the bundle after <see cref="Init"/> — only legal while nothing
+    /// has captured <see cref="Services"/> yet (the Mac host upgrades its
+    /// headless bundle to the UI bundle once the UI stack is known to be
+    /// up). The distinct name keeps deliberate swaps visible; a second
+    /// bare Init is exactly the bug it guards against.
+    /// </summary>
+    public static void Reinit(PlatformServices services)
+    {
+        if (_services == null)
+            throw new InvalidOperationException("Platform.Reinit before Init.");
+        _services = services;
+    }
 }
