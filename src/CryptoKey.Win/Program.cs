@@ -449,8 +449,29 @@ internal static class Program
                 or "accept-rollback" or "tpm-bind" or "tpm-unbind" or "recover")
         {
             string cmd = $"vault {sub}";
-            for (int i = 2; i < args.Length; i++)
-                cmd += " " + args[i]; // create size / tpm-bind phrase+flags
+            if (sub is "tpm-bind" or "recover")
+            {
+                // Phrase-carrying verbs never take the phrase from argv — the
+                // process command line is world-readable while running and
+                // lands in shell history. Flags pass; words are refused so a
+                // stray positional can't double up the prompted phrase.
+                if (args.Skip(2).Any(a => !a.StartsWith("--")))
+                    return Fail("the phrase is read at a prompt — don't pass it on the command line");
+                for (int i = 2; i < args.Length; i++)
+                    cmd += " " + args[i];
+                Console.Write(sub == "tpm-bind"
+                    ? "Recovery phrase (authorizes the bind + seals the recovery blob): "
+                    : "Recovery phrase: ");
+                string? p = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(p))
+                    return Fail("recovery phrase required");
+                cmd += " " + p.Trim();
+            }
+            else
+            {
+                for (int i = 2; i < args.Length; i++)
+                    cmd += " " + args[i]; // create size
+            }
             return CryptoKeyCli.SendIpc(cmd);
         }
 

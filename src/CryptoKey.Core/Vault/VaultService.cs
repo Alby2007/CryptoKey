@@ -460,7 +460,9 @@ internal sealed class VaultService : IDisposable
             else
             {
                 vol?.Dispose();
-                if (seq == _opSeq)
+                // Same gate as adoption — a losing sibling open must not
+                // stomp the state a live one just set.
+                if (seq == _opSeq && _vol == null)
                     SetState(err switch
                     {
                         VaultOpenError.NoImage => VaultState.NoImage,
