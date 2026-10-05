@@ -371,10 +371,15 @@ internal static class ConfigStore
     /// </summary>
     public static bool AttestMatches(byte[] secret, KeyConfig config,
         ReadOnlySpan<byte> stored)
-        => CryptographicOperations.FixedTimeEquals(stored,
-               ComputeAttest(secret, config))
-           || CryptographicOperations.FixedTimeEquals(stored,
-               LegacyAttest(secret, config));
+    {
+        // Compute both — a || short-circuit would time-leak which form
+        // matched.
+        bool current = CryptographicOperations.FixedTimeEquals(stored,
+            ComputeAttest(secret, config));
+        bool legacy = CryptographicOperations.FixedTimeEquals(stored,
+            LegacyAttest(secret, config));
+        return current || legacy;
+    }
 
     /// <summary>The pre-canon attestation input — kept for reads only.</summary>
     private static byte[] LegacyAttest(byte[] secret, KeyConfig config)

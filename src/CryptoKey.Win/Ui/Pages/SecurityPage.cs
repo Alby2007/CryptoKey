@@ -341,7 +341,10 @@ internal sealed class SecurityPage : UserControl
         }
 
         // The attestation MAC covers the phrase hash — re-attest now if
-        // the key is present, else the next insert self-heals via rotation.
+        // the key is present. When it can't (key absent or write failed),
+        // flag the change as ours — the next insert's mismatch re-binds
+        // quietly instead of announcing tamper (a webcam snap over our
+        // own edit).
         bool reattested;
         try
         {
@@ -351,6 +354,8 @@ internal sealed class SecurityPage : UserControl
         {
             reattested = false;
         }
+        if (!reattested)
+            _service.MarkConfigDirty();
         _result.ForeColor = Theme.AccentGreen;
         _result.Text = reattested
             ? "Recovery phrase updated — key re-attested."

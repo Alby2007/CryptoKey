@@ -1191,12 +1191,15 @@ internal sealed class GuardService : IDisposable
 /// </summary>
 internal static class VaultIdleGate
 {
-    /// <summary>Seal once: mounted + past the threshold. KeyGone's state
-    /// drop self-latches — no edge flag needed.</summary>
+    /// <summary>Seal once: an open vault (mounted or merely unsealed —
+    /// both hold the volume key + device secret in memory) past the idle
+    /// threshold. An Unsealed vault is one IPC "mount" from readable —
+    /// same exposure, same teardown. KeyGone's state drop self-latches —
+    /// no edge flag needed.</summary>
     public static bool ShouldSeal(int minutes, uint idleMs, VaultState state)
         => minutes > 0
            && idleMs >= (ulong)minutes * 60_000
-           && state == VaultState.Mounted;
+           && state is VaultState.Mounted or VaultState.Unsealed;
 
     /// <summary>
     /// Feed suppression while idle — meaningful only for states where a

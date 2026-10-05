@@ -15,13 +15,15 @@ public class VaultIdleGateTests
     }
 
     [Fact]
-    public void Seal_fires_only_mounted_past_threshold()
+    public void Seal_fires_only_open_states_past_threshold()
     {
         uint justUnder = 1u * 60_000 - 1;
         uint at = 1u * 60_000;
         Assert.False(VaultIdleGate.ShouldSeal(1, justUnder, VaultState.Mounted));
         Assert.True(VaultIdleGate.ShouldSeal(1, at, VaultState.Mounted));
-        Assert.False(VaultIdleGate.ShouldSeal(1, at, VaultState.Unsealed));
+        // Unsealed still holds the volume key + device secret — one IPC
+        // "mount" from readable, so it seals too.
+        Assert.True(VaultIdleGate.ShouldSeal(1, at, VaultState.Unsealed));
         Assert.False(VaultIdleGate.ShouldSeal(1, at, VaultState.Sealed));
         Assert.False(VaultIdleGate.ShouldSeal(1, at, VaultState.NoImage));
     }
