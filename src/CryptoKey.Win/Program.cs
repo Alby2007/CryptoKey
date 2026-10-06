@@ -659,30 +659,10 @@ internal static class Program
     }
 
     /// <summary>
-    /// Standalone sensitive-op gate: an account-bound install demands the
-    /// account password before a local mutation. Installs that never
-    /// enrolled an account pass through — no credential exists to ask for.
+    /// Standalone sensitive-op gate — shared with the core CLI's own
+    /// standalone paths (e.g. `update --apply` with no guard running).
     /// </summary>
-    private static bool RequireAccountAuth()
-    {
-        AuthService auth = AuthService.Current;
-        // A bare CLI process never opened the config — bind it so the
-        // account record (and thus the offline verifier) is visible.
-        try { auth.BindConfig(ConfigStore.Load()); }
-        catch (Exception) { }
-        if (!auth.Gating || auth.Authorized)
-            return true;
-        string? pw = CryptoKeyCli.ReadPassword("Account password: ");
-        if (pw == null)
-        {
-            Console.WriteLine("error: AUTH_REQUIRED");
-            return false;
-        }
-        if (auth.Authorize(pw, out string err))
-            return true;
-        Console.WriteLine($"error: {err}");
-        return false;
-    }
+    private static bool RequireAccountAuth() => CryptoKeyCli.RequireAccountAuth();
 
     /// <summary>Feed a verified device secret into a VaultService for standalone ops.</summary>
     private static bool FeedVerifiedSecret(KeyConfig config, VaultService vault)

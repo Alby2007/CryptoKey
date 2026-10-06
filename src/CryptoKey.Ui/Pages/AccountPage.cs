@@ -91,7 +91,12 @@ internal sealed class AccountPage : Page
                 Kit.V(10, _current, _newPw, _confirmPw, _change)),
             Kit.Section("Sign out", IconData.Quit,
                 "Ends this session — gated commands ask for the password again.",
-                _signOut));
+                _signOut),
+            Kit.Section("Relink", IconData.Key,
+                "Bind a different account — needs the enrolled key, since the " +
+                "verifier write re-attests.",
+                Kit.Btn("Relink a different account", IconData.Person, "ghost",
+                    () => Ctx.ShowAuth(_ => Refresh(), AuthMode.Relink))));
 
         Content = Kit.PageScroll(Kit.V(14,
             Kit.PageHeader("Account", "The identity that gates this dashboard and sensitive commands."),

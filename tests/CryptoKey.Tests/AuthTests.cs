@@ -318,6 +318,50 @@ public class AuthTests : IDisposable
     }
 
     [Fact]
+    public async Task Foreign_signin_is_refused_on_a_bound_install()
+    {
+        // Bound to user-1…
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-1"));
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        string boundHash = auth.Record!.VerifierHash;
+
+        // …a DIFFERENT account's valid sign-in must not silently rebind
+        // the verifier — else the foreign password would gate this box.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-2", email: "x@y.z"));
+        AuthResult r = await auth.SignIn("x@y.z", "other-pw");
+        Assert.False(r.Ok);
+        Assert.Equal(boundHash, auth.Record!.VerifierHash); // still bound to user-1's verifier
+
+        // The key-fenced relink path is the sanctioned escape.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-2", email: "x@y.z"));
+        r = await auth.SignIn("x@y.z", "other-pw", relink: true);
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal("user-2", auth.Record!.UserId);
+    }
+
+    [Fact]
+    public async Task Unconfirmed_foreign_signin_is_also_refused()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-1"));
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        string boundHash = auth.Record!.VerifierHash;
+
+        // The email_not_confirmed proof-of-credentials path carries no user
+        // id — the email claim is checked against the bound record instead.
+        handler.Enqueue(HttpStatusCode.BadRequest,
+            """{"error_code":"email_not_confirmed","msg":"Email not confirmed"}""");
+        AuthResult r = await auth.SignIn("foreign@x.y", "their-pw");
+        Assert.False(r.Ok);
+        Assert.Equal(boundHash, auth.Record!.VerifierHash);
+    }
+
+    [Fact]
     public async Task Offline_unlock_before_any_signin_is_refused()
     {
         var auth = new AuthService(Cfg, new ScriptHandler());
@@ -455,5 +499,22 @@ public class AuthTests : IDisposable
 
         Assert.StartsWith("err malformed auth trailer",
             svc.DispatchCommand("pause |auth !!!notb64!!!"));
+    }
+
+    [Fact]
+    public void Signout_is_gated_and_the_trailer_authorizes_it()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        // signout is a mutator like the rest: no session → AUTH_REQUIRED,
+        // and the trailer arms it inline.
+        Assert.StartsWith("err AUTH_REQUIRED", svc.DispatchCommand("auth signout"));
+        string trailer = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("acct-pw"));
+        Assert.StartsWith("ok", svc.DispatchCommand("auth signout" + trailer));
     }
 }

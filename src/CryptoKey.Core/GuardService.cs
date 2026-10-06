@@ -698,6 +698,8 @@ internal sealed class GuardService : IDisposable
                 && !parts[1].Equals("status", StringComparison.OrdinalIgnoreCase),
             "update" => parts.Length > 1
                 && parts[1].Equals("apply", StringComparison.OrdinalIgnoreCase),
+            "auth" => parts.Length > 1
+                && parts[1].Equals("signout", StringComparison.OrdinalIgnoreCase),
             _ => false,
         };
     }
@@ -903,8 +905,11 @@ internal sealed class GuardService : IDisposable
                 && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5);
             // Account integrity feeds the auth gate: a grafted/edited
             // verifier must NOT be able to authorize ops even though the
-            // key itself still verifies.
-            _auth.SetAttestationClean(check.Attest != AttestState.Mismatch);
+            // key itself still verifies. An in-flight write of our own
+            // (_reattestPending — e.g. a password change's record persist)
+            // expects the mismatch, so it doesn't count as dirty.
+            _auth.SetAttestationClean(
+                check.Attest != AttestState.Mismatch || _reattestPending);
 
             // Announce-then-heal: a mismatch announces as tamper below, then
             // the envelope re-binds to the live config (same secret — no

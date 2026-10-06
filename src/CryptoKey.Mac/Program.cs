@@ -25,7 +25,8 @@ internal static class Program
 
         // cryptokey:// deep link — forward to a live guard, else the GUI
         // carries it as its launch link (reset face on the auth window).
-        if (args[0].StartsWith("cryptokey://", StringComparison.OrdinalIgnoreCase))
+        if (args.Length > 0
+            && args[0].StartsWith("cryptokey://", StringComparison.OrdinalIgnoreCase))
         {
             string url = args[0];
             if (IpcClient.Send("deeplink " + url, 600) != null)

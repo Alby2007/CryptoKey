@@ -98,8 +98,9 @@ internal sealed class AuthService
     /// <summary>
     /// Does this install have an account credential at all? Record OR a
     /// pending record OR a prior session file means "enrolled" — a config
-    /// with its account section deleted still gates ops (fail closed)
-    /// instead of silently reverting to pre-account behavior.
+    /// with its account section deleted still gates ops while a session or
+    /// staging file marks the install (a clean sign-out plus a delete is
+    /// the documented way to remove an account, and then the gate lifts).
     /// </summary>
     public bool Gating =>
         Record != null || TokenStore.Exists || PendingStore.Exists;
@@ -364,13 +365,34 @@ internal sealed class AuthService
     }
 
     /// <summary>
+    /// Identity check for record-binding paths: a bound install is
+    /// single-tenant, so a successful credential response for a DIFFERENT
+    /// account must not silently rebind the verifier — that's how a
+    /// foreign account's password would end up gating this machine. A
+    /// foreign identity goes through the key-fenced relink flow instead
+    /// (<paramref name="allowRebind"/> — the caller enforces key presence).
+    /// </summary>
+    private static bool SameIdentity(AccountRecord bound,
+        (string Id, string Email)? user, string? emailFallback)
+    {
+        // A placeholder id ("unknown" — the unconfirmed-email path writes
+        // one when the response withholds the user object) carries no real
+        // identity: the bound EMAIL is the claim to compare, and the first
+        // confirmed sign-in then upgrades the record to the real id.
+        if (user is { } u && bound.UserId != "unknown")
+            return bound.UserId.Equals(u.Id, StringComparison.Ordinal);
+        return bound.Email.Equals((user?.Email ?? emailFallback ?? "").Trim(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// Establish the session + local verifier after a token-bearing response.
     /// The verifier is re-derived from the password in hand every sign-in —
     /// so a password changed elsewhere takes effect locally on first
     /// successful online sign-in with the NEW password.
     /// </summary>
     private AuthResult Establish(JsonElement root, string password,
-        string? emailFallback)
+        string? emailFallback, bool allowRebind = false)
     {
         AuthTokens? tokens = ParseTokens(root);
         if (tokens == null)
@@ -378,19 +400,28 @@ internal sealed class AuthService
         var user = ParseUser(root);
         lock (_sync)
         {
-            _tokens = tokens;
-            TokenStore.Save(tokens);
+            if (!allowRebind && Record is { } bound
+                && !SameIdentity(bound, user, emailFallback))
+            {
+                return AuthResult.Fail(
+                    "that isn't the account bound to this install — " +
+                    "use Relink to bind a different one");
+            }
+            AccountRecord? prev = _record;
             if (user is { } u)
                 _record = AccountRecord.Create(u.Id, u.Email, password);
             else if (emailFallback != null)
                 _record = AccountRecord.Create(
                     _record?.UserId ?? "unknown", emailFallback, password);
-            _unlocked = true;
             try { PersistLocked(); }
             catch (Exception ex)
             {
+                _record = prev; // keep memory honest with the disk that refused
                 return AuthResult.Fail($"account record save failed: {ex.Message}");
             }
+            _tokens = tokens;
+            TokenStore.Save(tokens);
+            _unlocked = true;
         }
         NoteSuccess();
         return new AuthResult(true, null);
@@ -420,7 +451,7 @@ internal sealed class AuthService
                     $"Sign-up failed ({(int)resp.StatusCode}): " +
                     (ErrorMessage(root) ?? resp.ReasonPhrase));
             }
-            AuthResult r = Establish(root, password, email);
+            AuthResult r = Establish(root, password, email, allowRebind: false);
             if (r.NeedsConfirm)
                 return new AuthResult(true,
                     "Account created — confirm the email Supabase sent, then sign in.",
@@ -436,8 +467,14 @@ internal sealed class AuthService
         }
     }
 
-    /// <summary>Sign in online; on network failure a linked account falls back to the verifier.</summary>
-    public async Task<AuthResult> SignIn(string email, string password)
+    /// <summary>
+    /// Sign in online; on network failure a linked account falls back to the
+    /// verifier. <paramref name="relink"/> permits binding a DIFFERENT
+    /// account — callers must fence that on the enrolled key's presence
+    /// (the relink UI face does).
+    /// </summary>
+    public async Task<AuthResult> SignIn(string email, string password,
+        bool relink = false)
     {
         if (!Configured)
             return OfflineOr(email, password);
@@ -465,6 +502,18 @@ internal sealed class AuthService
                             StringComparison.OrdinalIgnoreCase) == true);
                 if (unconfirmed)
                 {
+                    // Single-tenant: an unconfirmed FOREIGN account still
+                    // can't rebind outside the relink flow — the email is
+                    // the only identity claim the error response carries.
+                    if (!relink && Record is { } bound
+                        && !bound.Email.Equals(email.Trim(),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        NoteFailure();
+                        return AuthResult.Fail(
+                            "that isn't the account bound to this install — " +
+                            "use Relink to bind a different one");
+                    }
                     // GoTrue checks the password BEFORE the confirm gate —
                     // this response proves the credentials are right; it
                     // just withheld the session. Bind the verifier locally
@@ -473,16 +522,18 @@ internal sealed class AuthService
                     NoteSuccess();
                     lock (_sync)
                     {
+                        AccountRecord? prev = _record;
                         _record = AccountRecord.Create(
                             _record?.UserId ?? "unknown",
                             email.Trim(), password);
-                        _unlocked = true;
                         try { PersistLocked(); }
                         catch (Exception ex)
                         {
+                            _record = prev;
                             return AuthResult.Fail(
                                 $"account record save failed: {ex.Message}");
                         }
+                        _unlocked = true;
                     }
                     return new AuthResult(true,
                         "Signed in — email isn't verified yet, so this session " +
@@ -493,7 +544,7 @@ internal sealed class AuthService
                 return AuthResult.Fail(
                     $"Sign-in failed ({(int)resp.StatusCode}): {msg ?? resp.ReasonPhrase}");
             }
-            return Establish(root, password, email);
+            return Establish(root, password, email, relink);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException
             or OperationCanceledException)

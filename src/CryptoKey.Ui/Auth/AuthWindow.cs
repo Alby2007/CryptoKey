@@ -171,8 +171,13 @@ internal sealed class AuthWindow : Window
         _switchLink.FontSize = 12;
         _switchLink.MinHeight = 0;
         _switchLink.Padding = new Thickness(6, 2);
+        _relinkLink = Kit.Btn("Relink a different account", null, "ghost",
+            () => Show(AuthMode.Relink));
+        _relinkLink.FontSize = 12;
+        _relinkLink.MinHeight = 0;
+        _relinkLink.Padding = new Thickness(6, 2);
 
-        _switchRow = Kit.H(6, _switchCaption, _switchLink);
+        _switchRow = Kit.H(6, _switchCaption, _switchLink, _relinkLink);
         _switchRow.HorizontalAlignment = HorizontalAlignment.Center;
 
         _emailField = Field("EMAIL", _email);
@@ -240,6 +245,7 @@ internal sealed class AuthWindow : Window
 
     private readonly Button _forgotLink;
     private readonly Button _switchLink;
+    private readonly Button _relinkLink;
 
     private static Icon LeadIcon(string data) => new(data, 15)
     {
@@ -401,6 +407,10 @@ internal sealed class AuthWindow : Window
         _switchLink.Content = mode == AuthMode.SignIn
             ? Kit.Label("Create one", null) : Kit.Label("Sign in", null);
         _switchRow.IsVisible = mode is AuthMode.SignIn or AuthMode.Create;
+        // Relink (bind a different account, key-fenced) is only meaningful
+        // while a record is bound — and only reachable from the sign-in face.
+        _relinkLink.IsVisible = mode == AuthMode.SignIn
+            && _auth.Record != null;
 
         _back.IsVisible = mode is AuthMode.Forgot
             || (mode == AuthMode.Create && _auth.State == AuthGateState.Locked);
@@ -590,18 +600,20 @@ internal sealed class AuthWindow : Window
         }
     }
 
-    /// <summary>Relink = online sign-in that rewrites the account record.</summary>
+    /// <summary>Relink = online sign-in that rewrites the account record —
+    /// allowed to bind a DIFFERENT account (that's the point), so the
+    /// enrolled key must be present for the re-attest.</summary>
     private Task<AuthResult> Relink(string email, string password)
     {
-        if (_keyPresent?.Invoke() == false)
+        if (_keyPresent?.Invoke() != true)
             return Task.FromResult(AuthResult.Fail(
                 "Insert your enrolled USB key — relinking re-attests the account."));
-        return _auth.SignIn(email, password);
+        return _auth.SignIn(email, password, relink: true);
     }
 
     private Task<AuthResult> Reset(string newPassword)
     {
-        if (_keyPresent?.Invoke() == false)
+        if (_keyPresent?.Invoke() != true)
             return Task.FromResult(AuthResult.Fail(
                 "Insert your enrolled USB key — the password write re-attests the account."));
         if (_tokenHash == null)

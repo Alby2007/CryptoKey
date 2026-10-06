@@ -62,6 +62,9 @@ the app offline (`TryUnlockOffline`), and `SignIn` falls back to it
 automatically when the server is unreachable. Boundaries:
 
 - Only the **linked email** is accepted offline — one account per install.
+- Online sign-in is single-tenant too: a successful sign-in as a
+  *different* account is refused rather than silently rebinding the
+  verifier — binding a new account is the key-fenced **Relink** flow.
 - The verifier authorizes the **app**, not the workstation. It is never a
   lock factor.
 - A password **reset on another device** leaves this install's verifier
@@ -90,10 +93,12 @@ automatically when the server is unreachable. Boundaries:
   quietly). This is why the reset/relink faces say "insert your key".
 
 Deleting the `Account` section is the documented escape: it surfaces as a
-tamper announce on the next verify, heals the envelope to the
-account-free canon, and the account gate returns to
-unenrolled-but-gated — `auth signout` or the Account page's relink flow
-is the way back.
+tamper announce on the next verify and heals the envelope to the
+account-free canon. While `session.dat` or `account.pending.json` still
+marks the install as enrolled, the gate stays closed — sign in (or use
+**Relink** on the Account page / sign-in face, which needs the enrolled
+key) to bind a fresh record. Sign out *first*, and a delete removes the
+account entirely — the gate lifts; the install is simply unenrolled.
 
 ## Setup (Supabase)
 

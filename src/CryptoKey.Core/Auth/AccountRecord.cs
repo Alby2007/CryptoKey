@@ -25,11 +25,16 @@ internal sealed class AccountRecord
     public string VerifierHash { get; set; } = "";
     public int VerifierIterations { get; set; } = VerifierIterationsCurrent;
 
-    /// <summary>All verifier fields populated — an incomplete record fails closed.</summary>
+    /// <summary>
+    /// All verifier fields populated — an incomplete record fails closed.
+    /// Iterations are bounded BOTH ways: too low weakens the verifier, too
+    /// high turns <see cref="VerifyPassword"/> into a hang (a crafted
+    /// pending/grafted record could request ~2^31 rounds of PBKDF2).
+    /// </summary>
     public bool IsComplete
         => UserId.Length > 0 && Email.Length > 0
            && VerifierSalt.Length > 0 && VerifierHash.Length > 0
-           && VerifierIterations >= 1_000;
+           && VerifierIterations is >= 1_000 and <= 4_000_000;
 
     /// <summary>
     /// Build a record fresh from a successful sign-in/up: user identity from
