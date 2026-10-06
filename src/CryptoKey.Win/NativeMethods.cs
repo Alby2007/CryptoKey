@@ -164,6 +164,18 @@ internal static class NativeMethods
         public int Y;
     }
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetCursorPos(out POINT lpPoint);
+
+    internal const uint SPI_GETCLIENTAREAANIMATION = 0x1042;
+
+    /// <summary>"Show animations in Windows" — false means the user asked for reduced motion.</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SystemParametersInfo(uint uiAction, uint uiParam,
+        [MarshalAs(UnmanagedType.Bool)] ref bool pvParam, uint fWinIni);
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct MINMAXINFO
     {

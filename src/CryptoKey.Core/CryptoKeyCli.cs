@@ -64,7 +64,8 @@ internal static class CryptoKeyCli
                     args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                     args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
             case "open":
-                return SendIpc("open");
+                // Optional page: `cryptokey open vault` deep-links the dashboard.
+                return SendIpc(args.Length > 1 ? $"open {args[1]}" : "open");
             case "lock":
                 return SendIpc("lock");
             case "pause":

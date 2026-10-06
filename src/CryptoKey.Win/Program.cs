@@ -100,17 +100,6 @@ internal static class Program
     {
         if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
-        if (config == null)
-        {
-            // First run with no console (double-click, Run dialog) — enroll
-            // needs somewhere to prompt, so give it one on demand.
-            AttachCliConsole(allocIfNeeded: true);
-            Console.WriteLine("No enrolled key — starting enroll first.");
-            if (Enrollment.Run() != 0
-                || !CryptoKeyCli.TryLoadConfig(out config, alertModal: true)
-                || config == null)
-                return 1;
-        }
 
         using IDisposable? singleInstance =
             Platform.Services.SingleInstance.Acquire("CryptoKeyGuard", takeover);
@@ -120,6 +109,8 @@ internal static class Program
             return CryptoKeyCli.SendIpc("open");
         }
 
+        // No config = first run: the onboarding wizard enrolls a key in-app
+        // before the guard starts (the console `enroll` verb still exists).
         return RunApp(config, devMode, openDashboard: true, forceClassic);
     }
 
@@ -198,12 +189,6 @@ internal static class Program
         return 0;
     }
 
-    private static string OpenWindow(AppShell shell)
-    {
-        shell.OpenWindow();
-        return "ok opened";
-    }
-
     /// <summary>
     /// WinExe starts consoleless — a CLI verb run from a shell adopts the
     /// parent's console and rebinds std handles; detached/internal launches
@@ -266,38 +251,14 @@ internal static class Program
     }
 
     // Shared body for the desktop app and the tray-only daemon: the only
-    // difference is whether the dashboard opens on launch.
-    private static int RunApp(KeyConfig config, bool devMode, bool openDashboard,
+    // difference is whether the dashboard opens on launch. A null config
+    // (desktop app, first run) starts with the onboarding wizard.
+    private static int RunApp(KeyConfig? config, bool devMode, bool openDashboard,
         bool forceClassic)
     {
-        ApplicationConfiguration.Initialize();
-        Application.SetColorMode(SystemColorMode.Dark);
-        Animator.Enabled = config.Guard.Animations;
-
-        using var service = new GuardService(config, devMode, forceClassic);
-        using var shell = new AppShell(service, config, devMode);
-        using var ipc = new IpcServer(service.UiDispatcher,
-            line => line.Trim().Equals("open", StringComparison.OrdinalIgnoreCase)
-                ? OpenWindow(shell)
-                : service.DispatchCommand(line));
-        // A UI-thread exception while locked can leave input swallowed behind
-        // a dead overlay — an invisible soft-brick. Fail dead instead: free
-        // the input, then kill the process (hooks die with it anyway).
-        Application.ThreadException += (_, e) =>
-        {
-            Console.WriteLine($"[guard] Fatal UI error: {e.Exception}");
-            try { service.ReleaseInput(); } catch { }
-            Environment.Exit(2);
-        };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
-
-        service.Start();
-        ipc.Start(service.Log);
-        if (openDashboard)
-            shell.OpenWindow();
-        Application.Run();
-        return 0;
+        return WinUi.Run(config, devMode, forceClassic, openDashboard);
     }
 
     /// <summary>

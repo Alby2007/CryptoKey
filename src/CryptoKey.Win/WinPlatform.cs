@@ -36,7 +36,12 @@ internal static class WinPlatform
         Cues = new WinCues(),
         VaultMounts = new DokanVaultMounter(),
         VaultTpm = new WinVaultTpm(),
+        Capabilities = Capabilities,
     };
+
+    public static PlatformCapabilities Capabilities { get; } = new("Windows",
+        Vault: true, Tpm: true, Webcam: true, PrivateDesktop: true, LockPolicies: true,
+        Elevation: true, Shortcuts: true, StartupAtLogin: true);
 }
 
 internal sealed class WinPaths : IPlatformPaths
@@ -156,8 +161,9 @@ internal sealed class ControlDispatcher : IUiDispatcher
         _control.BeginInvoke(work);
     }
 
-    public T Send<T>(Func<T> work)
-        => _control.Invoke(work) ?? throw new InvalidOperationException("dispatcher returned null");
+    // A null result is legitimate (e.g. a UI query whose success value is a
+    // null error string) — pass it through rather than throwing.
+    public T Send<T>(Func<T> work) => (T)_control.Invoke(work)!;
 }
 
 /// <summary>The monitor is itself a Form — it doubles as the dispatch control.</summary>

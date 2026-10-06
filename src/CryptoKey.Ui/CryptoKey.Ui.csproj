@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The shared Avalonia front end: dashboard, onboarding, tray flyout and
+       notifications for BOTH hosts. Platform backends (Win32+Skia on
+       Windows, Avalonia.Desktop on macOS) are chosen by the host; this
+       project only depends on the platform-neutral Avalonia core. -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CryptoKey.Ui</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Both host assemblies are named "cryptokey". -->
+    <InternalsVisibleTo Include="cryptokey" />
+    <InternalsVisibleTo Include="CryptoKey.Ui.Tests" />
+    <ProjectReference Include="..\CryptoKey.Core\CryptoKey.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+  </ItemGroup>
+
+</Project>

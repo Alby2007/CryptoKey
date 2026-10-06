@@ -10,6 +10,8 @@
     <!-- Both host assemblies are named "cryptokey" (Windows exe + Mac binary). -->
     <InternalsVisibleTo Include="cryptokey" />
     <InternalsVisibleTo Include="CryptoKey.Tests" />
+    <InternalsVisibleTo Include="CryptoKey.Ui" />
+    <InternalsVisibleTo Include="CryptoKey.Ui.Tests" />
   </ItemGroup>
 
 </Project>

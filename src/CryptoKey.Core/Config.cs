@@ -116,6 +116,10 @@ internal sealed class GuardSettings
     /// the cosmetic fields): toggling it changes no lock behavior.
     /// </summary>
     public bool UpdateCheckEnabled { get; set; } = true;
+
+    /// <summary>Detached copy — every member is a value type or string, so a
+    /// shallow clone is a full snapshot (the UI reads these off-engine).</summary>
+    public GuardSettings Clone() => (GuardSettings)MemberwiseClone();
 }
 
 internal static class ConfigStore

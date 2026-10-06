@@ -21,6 +21,11 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CryptoKey.Tests" />
     <ProjectReference Include="..\CryptoKey.Core\CryptoKey.Core.csproj" />
+    <ProjectReference Include="..\CryptoKey.Ui\CryptoKey.Ui.csproj" />
+    <!-- Avalonia backend for the shared UI: Win32 windowing + Skia rendering
+         (not Avalonia.Desktop, which would also ship X11/macOS natives). -->
+    <PackageReference Include="Avalonia.Win32" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Skia" Version="11.3.22" />
     <PackageReference Include="DokanNet" Version="2.3.0.3" />
     <PackageReference Include="FlashCap" Version="1.12.0" />
     <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />

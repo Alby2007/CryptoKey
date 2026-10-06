@@ -64,6 +64,9 @@ internal sealed class PlatformServices
 
     /// <summary>TPM-backed pepper protector — null impl where no TPM exists.</summary>
     public required IVaultTpm VaultTpm { get; init; }
+
+    /// <summary>Feature availability for UI gating — defaults to nothing.</summary>
+    public PlatformCapabilities Capabilities { get; init; } = PlatformCapabilities.None;
 }
 
 /// <summary>
