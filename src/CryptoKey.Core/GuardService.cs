@@ -82,20 +82,29 @@ internal sealed class GuardService : IDisposable
     }
 
     /// <summary>
-    /// Surface-reported security events — every kind logs; a "-storm"
-    /// (repeated foreign-desktop switches while locked = scripted attack)
-    /// also alerts and snaps.
+    /// Surface-reported security events — every kind logs; the severe set
+    /// (flap storms, a foreign window on the lock desktop, an unreadable
+    /// input desktop past the gate, a failed OS-lock call) also alerts+snaps.
     /// </summary>
     private void OnSurfaceSecurityEvent(string kind)
     {
         Log($"Security event: {kind}.");
-        if (kind.EndsWith("-storm", StringComparison.Ordinal))
-        {
-            if (_config.Guard.Sounds)
-                Platform.Services.Cues.Alarm();
-            Snap("desktop-flap");
-            Alert("Desktop flap storm", "repeated foreign-desktop switches while locked — workstation locked at OS level");
-        }
+        if (!kind.EndsWith("-storm", StringComparison.Ordinal)
+            && !kind.StartsWith("desktop-intruder", StringComparison.Ordinal)
+            && !kind.StartsWith("input-desktop-unreadable", StringComparison.Ordinal)
+            && !kind.StartsWith("os-lock-failed", StringComparison.Ordinal))
+            return;
+        if (_config.Guard.Sounds)
+            Platform.Services.Cues.Alarm();
+        Snap("surface-security");
+        Alert("Lock defense",
+            kind.StartsWith("desktop-intruder", StringComparison.Ordinal)
+                ? "foreign window on the lock desktop — workstation locked at OS level"
+            : kind.StartsWith("input-desktop-unreadable", StringComparison.Ordinal)
+                ? "input desktop unreadable while locked — workstation locked at OS level"
+            : kind.StartsWith("os-lock-failed", StringComparison.Ordinal)
+                ? "OS lock call failed during a lock-defense escalation"
+            : "repeated foreign-desktop switches while locked — workstation locked at OS level");
     }
 
     private void OnPanic()
@@ -144,6 +153,11 @@ internal sealed class GuardService : IDisposable
     }
 
     public GuardState State { get; private set; } = GuardState.Unlocked;
+
+    // Supervisor-death latch — a true→false Alive transition while locked
+    // is kill-order evidence: fail closed once per transition, Ensure still
+    // respawns. Inert while unlocked (the Locked gate can't hold).
+    private bool _wdWasAlive;
 
     /// <summary>Raised on the UI thread whenever the status snapshot changes.</summary>
     public event Action<StatusSnapshot>? StateChanged;
@@ -362,9 +376,23 @@ internal sealed class GuardService : IDisposable
         try
         {
             if (_config.Guard.Watchdog)
+            {
+                bool alive = _supervisor.Alive;
+                if (FlapPolicy.ShouldEscalateSupervisorDeath(
+                        State == GuardState.Locked, true, _wdWasAlive, alive))
+                {
+                    Log("supervisor lost while locked — fail-closed.");
+                    try { Platform.Services.SystemActions.LockScreen(); }
+                    catch (Exception) { }
+                }
+                _wdWasAlive = alive;
                 _supervisor.Ensure(Environment.ProcessId, _devMode, _forceClassic);
+            }
             else
+            {
                 _supervisor.Stop(); // toggled off mid-run — stand it down
+                _wdWasAlive = false;
+            }
         }
         catch (Exception) { }
     }
@@ -576,7 +604,9 @@ internal sealed class GuardService : IDisposable
                        $"keyVerified={_keyVerifiedNow} " +
                        $"policy={_config.Guard.UnlockPolicy} " +
                        $"watchdog={(s.WatchdogAlive ? "alive" : "down")} " +
+                       $"surface={(_surface.IsOverlay ? "overlay" : "secure")} " +
                        $"build={CryptoKeyCli.BuildStamp} " +
+                       $"elevated={(Platform.Services.Ipc.Elevated ? "yes" : "no")} " +
                        $"vault={(s.Vault == null ? "off" :
                            s.Vault.State.ToString().ToLowerInvariant() +
                            (s.Vault.State == VaultState.Mounted ? $"@{s.Vault.MountPoint}" : ""))} " +

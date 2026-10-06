@@ -158,10 +158,11 @@ internal static class Program
 
     /// <summary>
     /// Waits for the guard process to exit, then switches input back to the
-    /// Default desktop. Killed by <see cref="SecureLockSurface"/> on clean
-    /// disengage — reaching the switch means the guard died while the session
-    /// was (possibly) on the private desktop. Best-effort and silent: it runs
-    /// detached with no console and nobody to report to.
+    /// Default desktop AND OS-locks. Killed by <see cref="SecureLockSurface"/>
+    /// on clean disengage — reaching the fire path means the guard died while
+    /// the session was (possibly) on the private desktop, so the attacker
+    /// lands on real Windows auth instead of a free desktop. Order matters:
+    /// unstrand first (release), then lock.
     /// </summary>
     private static int RunLockWatchdog(int parentPid)
     {
@@ -177,6 +178,14 @@ internal static class Program
             // failure case we're here for, so still try to release.
         }
         Platform.Services.SystemActions.ReleaseInputDesktop();
+        try
+        {
+            Watchdog.Log("lock-watchdog: parent gone while engaged — " +
+                "released input, locked workstation");
+        }
+        catch (Exception) { }
+        try { Platform.Services.SystemActions.LockScreen(); }
+        catch (Exception) { }
         return 0;
     }
 

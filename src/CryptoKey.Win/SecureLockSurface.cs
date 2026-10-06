@@ -39,6 +39,12 @@ internal sealed class SecureLockSurface : ILockSurface
     private volatile bool _surfaceDead;   // Dispose's exit signal for the flap thread
     private readonly FlapCounter _flapCounter = new();
     private bool _stormAnnounced;         // storm edge — alert once per burst, not per flap
+    private readonly UnreadableStreak _unreadable = new(); // blind-input accrual → fail-closed
+    private DateTime _intruderCooldownUntil; // suppress intruder re-escalation ~20s
+    private readonly HashSet<uint> _foreignPids = new(); // dedupe foreign-window events
+    // The sentinel timer lives on the lock thread — created per engagement,
+    // ticks on that thread's pump, disposed in LockThreadMain's finally.
+    private System.Windows.Forms.Timer? _sentinel;
 
     // Created and owned on the lock thread — never touch directly except
     // through InvokeOnLock (or from the lock thread itself).
@@ -206,6 +212,9 @@ internal sealed class SecureLockSurface : ILockSurface
     {
         _flapCounter.Reset();
         _stormAnnounced = false;
+        _unreadable.Reset();
+        _intruderCooldownUntil = DateTime.MinValue;
+        _foreignPids.Clear();
         if (_flapThread != null)
             return; // one thread for the surface's lifetime — re-engage just un-parks it
         _flapThread = new Thread(FlapMonitorMain)
@@ -232,47 +241,67 @@ internal sealed class SecureLockSurface : ILockSurface
                 // AFTER releasing it — handlers must never run inside
                 // _engageSync (Monitor reentrancy would let a callback run
                 // surface teardown on this thread).
-                string? flapEvent = null, stormEvent = null;
-                bool stormNow = false;
+                string? flapEvent = null, stormEvent = null, unreadableEvent = null;
+                bool stormNow = false, osLockNow = false;
                 lock (_engageSync)
                 {
                     if (!_engaged)
                         continue;
                     IntPtr h = NativeMethods.OpenInputDesktop(0, false,
                         NativeMethods.DESKTOP_READOBJECTS);
+                    int openErr = Marshal.GetLastWin32Error();
                     bool openFailed = h == IntPtr.Zero;
                     string? name = null;
                     if (!openFailed)
                     {
                         name = GetDesktopName(h);
                         NativeMethods.CloseDesktop(h);
-                    }
-                    if (!FlapPolicy.IsHostile(name, openFailed))
-                        continue;
-                    if (!_engaged)
-                        continue; // ReleaseInput switched back mid-open — don't fight it
-                    NativeMethods.SwitchDesktop(_hLock);
-                    flapEvent = "desktop-flap";
-                    if (_flapCounter.Record(DateTime.UtcNow))
-                    {
-                        stormNow = true; // stay pinned at OS auth — fires per flap, idempotent
-                        if (!_stormAnnounced)
-                        {
-                            _stormAnnounced = true; // edge only — a sustained attack
-                            stormEvent = "desktop-flap-storm"; // shouldn't push-spam
-                        }
+                        _unreadable.Reset();       // any readable tick re-arms
                     }
                     else
                     {
-                        _stormAnnounced = false; // aged out — a fresh burst re-alerts
+                        // The ACL-deny is the SAS tell — but an indefinitely
+                        // blind monitor is also infinite switching cover.
+                        // ~3s of blindness pins at OS auth, once per streak.
+                        if (_unreadable.RecordUnreadable())
+                        {
+                            unreadableEvent = $"input-desktop-unreadable(err={openErr})";
+                            osLockNow = true;
+                        }
+                    }
+                    if (FlapPolicy.IsHostile(name, openFailed) && _engaged)
+                    {
+                        if (!NativeMethods.SwitchDesktop(_hLock))
+                            flapEvent = $"desktop-flap(reswitch-failed err={Marshal.GetLastWin32Error()})";
+                        else
+                            flapEvent = "desktop-flap";
+                        if (_flapCounter.Record(DateTime.UtcNow))
+                        {
+                            stormNow = true; // stay pinned at OS auth — idempotent
+                            if (!_stormAnnounced)
+                            {
+                                _stormAnnounced = true; // edge only — a sustained
+                                stormEvent = "desktop-flap-storm"; // shouldn't push-spam
+                            }
+                        }
+                        else
+                        {
+                            _stormAnnounced = false; // aged out — a fresh burst re-alerts
+                        }
                     }
                 }
                 if (flapEvent != null)
                     SecurityEvent?.Invoke(flapEvent);
                 if (stormEvent != null)
                     SecurityEvent?.Invoke(stormEvent);
-                if (stormNow)
-                    NativeMethods.LockWorkStation();
+                if (unreadableEvent != null)
+                    SecurityEvent?.Invoke(unreadableEvent);
+                if (stormNow || osLockNow)
+                {
+                    if (!NativeMethods.LockWorkStation())
+                        SecurityEvent?.Invoke(
+                            $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
+                }
             }
             catch (Exception) { }
         }
@@ -347,6 +376,16 @@ internal sealed class SecureLockSurface : ILockSurface
             _form = new LockForm(SystemInformation.VirtualScreen, primary: true);
             PushMirroredState(_form);
             _form.Show();
+            // Foreign-window sentinel: winlogon inherits the session's input
+            // desktop, so SAS-spawned programs (Task Manager, osk, Magnify…)
+            // materialize ON CryptoKeyLock itself — the flap monitor can't
+            // see them (it only classifies the input desktop). EnumWindows
+            // from THIS thread enumerates exactly this desktop's top-level
+            // windows — it's SetThreadDesktop-bound, so no cross-thread
+            // question. Dies with the surface (teardown disposes it).
+            _sentinel = new System.Windows.Forms.Timer { Interval = 400 };
+            _sentinel.Tick += (_, _) => IntruderScan();
+            _sentinel.Start();
             // Signal ready through the queue — it only fires once the pump
             // is actually processing, which the LL hooks require. Setting
             // it synchronously would let Engage switch the session a beat
@@ -370,11 +409,102 @@ internal sealed class SecureLockSurface : ILockSurface
             // teardown path already handled the return.
             if (!_abandoned)
                 ReleaseInput();
+            try { _sentinel?.Stop(); _sentinel?.Dispose(); } catch (Exception) { }
+            _sentinel = null;
             try { _locker?.Dispose(); } catch (Exception) { }
             try { _form?.Dispose(); } catch (Exception) { }
             _form = null;
             _locker = null;
         }
+    }
+
+    /// <summary>
+    /// Lock-thread sentinel tick (~400ms): every foreign top-level window on
+    /// CryptoKeyLock is either conclusive (visible + named + not input
+    /// furniture → intruder → immediate OS lock) or accrued (invisible or
+    /// name-unresolvable → one flap per tick toward the storm latch). Only
+    /// our own pid is structurally expected here; ctfmon/TextInputHost ride
+    /// along legitimately.
+    /// </summary>
+    private void IntruderScan()
+    {
+        if (!_engaged || _form == null)
+            return;
+        string? intruder = null;
+        bool foreignCounted = false;
+        List<uint>? newForeign = null;
+        uint selfPid = (uint)Environment.ProcessId;
+        try
+        {
+            NativeMethods.EnumWindows((h, _) =>
+            {
+                NativeMethods.GetWindowThreadProcessId(h, out uint pid);
+                if (pid == 0 || pid == selfPid)
+                    return true; // ours — lock form + in-proc IME/message windows
+                string? name;
+                try { name = Process.GetProcessById((int)pid).ProcessName; }
+                catch { name = null; } // protected/system or died mid-scan
+                if (name != null && FlapPolicy.IsBenignDesktopResident(name))
+                    return true;
+                if (name != null && intruder == null && NativeMethods.IsWindowVisible(h))
+                    intruder = name; // conclusive — visible named foreign app
+                else if (_foreignPids.Add(pid))
+                    (newForeign ??= new List<uint>()).Add(pid);
+                foreignCounted = true;
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch (Exception) { return; }
+        // Logged once per pid — events fire outside the enum so a handler
+        // can't abort the scan mid-walk.
+        if (newForeign != null)
+            foreach (uint pid in newForeign)
+                SecurityEvent?.Invoke($"desktop-foreign(pid={pid})");
+
+        if (intruder != null)
+        {
+            // The ~20s cooldown prevents an OS-lock/unlock fight while still
+            // re-firing if the window stays open across an OS-unlock.
+            if (DateTime.UtcNow >= _intruderCooldownUntil)
+            {
+                _intruderCooldownUntil = DateTime.UtcNow.AddSeconds(20);
+                SecurityEvent?.Invoke($"desktop-intruder:{intruder}");
+                if (!NativeMethods.LockWorkStation())
+                    SecurityEvent?.Invoke(
+                        $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
+            }
+            return;
+        }
+        if (!foreignCounted)
+            return;
+        // No conclusive window — accrue toward the storm latch. A persistent
+        // invisible foreign thread can still plant hooks reading our phrase
+        // keystrokes, so presence counts even when it can't instant-fire.
+        bool stormNow = false;
+        string? stormEvent = null;
+        lock (_engageSync)
+        {
+            if (!_engaged)
+                return;
+            if (_flapCounter.Record(DateTime.UtcNow))
+            {
+                stormNow = true;
+                if (!_stormAnnounced)
+                {
+                    _stormAnnounced = true;
+                    stormEvent = "desktop-flap-storm";
+                }
+            }
+            else
+            {
+                _stormAnnounced = false;
+            }
+        }
+        if (stormEvent != null)
+            SecurityEvent?.Invoke(stormEvent);
+        if (stormNow && !NativeMethods.LockWorkStation())
+            SecurityEvent?.Invoke(
+                $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
     }
 
     private void PushMirroredState(LockForm f)

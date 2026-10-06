@@ -245,6 +245,24 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool CloseDesktop(IntPtr hDesktop);
 
+    // ---- Windows enumeration (lock-desktop intruder sentinel) ----
+    // EnumWindows called from a thread that's SetThreadDesktop-bound
+    // enumerates exactly that desktop's top-level windows — the lock
+    // thread's scope, no cross-thread handle needed.
+
+    internal delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindowVisible(IntPtr hWnd);
+
     internal const int UOI_NAME = 2;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

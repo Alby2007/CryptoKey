@@ -36,7 +36,7 @@ Hidden/infrastructure modes:
 
 ```console
 cryptokey --set-startup <Off|Normal|Elevated>   # elevated startup helper (UAC helper target)
-cryptokey --lock-watchdog <pid>                 # dead-man's switch spawned per secure engage
+cryptokey --lock-watchdog <pid>                 # per-engage dead-man's switch: parent gone → release input, then LockWorkStation
 cryptokey watchdog --parent <pid>               # persistent guard supervisor (spawned by the guard)
 cryptokey --release-desktop                     # SwitchDesktop → Default escape hatch
                                                 # (while locked, the flap monitor yanks you back —
@@ -69,7 +69,7 @@ read timeout ~5 s.
 | `resume` | `ok resumed` / `err not paused` | |
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
-| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… build=… vault=… update=…` | `watchdog=alive/down` — supervisor liveness; `build` = running guard's version+commit; `update` = pending release tag or `-` |
+| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… surface=… build=… elevated=… vault=… update=…` | `watchdog=alive/down` — supervisor liveness; `surface=secure/overlay` — active lock surface; `build` = running guard's version+commit; `elevated=yes/no` — guard integrity level; `update` = pending release tag or `-` |
 | `update` / `update status` | `ok update v… pending …` / `ok up to date …` | Last check's result |
 | `update check` | `ok checking` | Runs async — result lands on the next `status`/snapshot |
 | `update apply` | `ok update applying …` / `err locked — …` / `err no update pending` | Refused while Locked; stages the signed payload then hands off to it — the staged `apply-update` quits the guard, swaps the install dir, relaunches |

@@ -79,4 +79,86 @@ public class FlapPolicyTests
         c.Reset();
         Assert.False(c.Record(t.AddSeconds(2)));
     }
+
+    // ---- Foreign-window sentinel policy ----
+
+    [Theory]
+    [InlineData("ctfmon")]
+    [InlineData("TextInputHost")]
+    [InlineData("CTFMON")]            // case-insensitive
+    [InlineData("textinputhost")]
+    public void Input_furniture_is_a_benign_resident(string proc)
+        => Assert.True(FlapPolicy.IsBenignDesktopResident(proc));
+
+    [Theory]
+    [InlineData("taskmgr")]           // the CAD→Task-Manager hole
+    [InlineData("Taskmgr")]
+    [InlineData("osk")]
+    [InlineData("OSK")]
+    [InlineData("Magnify")]
+    [InlineData("Narrator")]
+    [InlineData("explorer")]
+    [InlineData("cmd")]
+    public void Foreign_apps_are_not_benign_residents(string proc)
+        => Assert.False(FlapPolicy.IsBenignDesktopResident(proc));
+
+    // ---- Unreadable-input escalation ----
+
+    [Fact]
+    public void Unreadable_streak_does_not_fire_before_the_threshold()
+    {
+        var s = new UnreadableStreak();
+        for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock - 1; i++)
+            Assert.False(s.RecordUnreadable());
+    }
+
+    [Fact]
+    public void Unreadable_streak_fires_exactly_at_the_threshold()
+    {
+        var s = new UnreadableStreak();
+        for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock - 1; i++)
+            s.RecordUnreadable();
+        Assert.True(s.RecordUnreadable());           // tick 10 — the one shot
+        Assert.False(s.RecordUnreadable());          // latched — no repeat
+        Assert.False(s.RecordUnreadable());
+    }
+
+    [Fact]
+    public void Readable_tick_resets_the_unreadable_streak()
+    {
+        var s = new UnreadableStreak();
+        for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock; i++)
+            s.RecordUnreadable();                    // fired + latched
+        s.Reset();                                   // desktop readable again
+        for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock - 1; i++)
+            Assert.False(s.RecordUnreadable());
+        Assert.True(s.RecordUnreadable());           // a new streak can fire again
+    }
+
+    // ---- Supervisor-death fail-closed gate ----
+
+    [Fact]
+    public void Locked_enabled_alive_to_dead_escalates()
+        => Assert.True(FlapPolicy.ShouldEscalateSupervisorDeath(
+            locked: true, enabled: true, wasAlive: true, alive: false));
+
+    [Fact]
+    public void Unlocked_supervisor_death_does_not_escalate()
+        => Assert.False(FlapPolicy.ShouldEscalateSupervisorDeath(
+            locked: false, enabled: true, wasAlive: true, alive: false));
+
+    [Fact]
+    public void Disabled_watchdog_death_does_not_escalate()
+        => Assert.False(FlapPolicy.ShouldEscalateSupervisorDeath(
+            locked: true, enabled: false, wasAlive: true, alive: false));
+
+    [Fact]
+    public void Never_alive_supervisor_does_not_escalate()
+        => Assert.False(FlapPolicy.ShouldEscalateSupervisorDeath(
+            locked: true, enabled: true, wasAlive: false, alive: false));
+
+    [Fact]
+    public void Still_alive_supervisor_does_not_escalate()
+        => Assert.False(FlapPolicy.ShouldEscalateSupervisorDeath(
+            locked: true, enabled: true, wasAlive: true, alive: true));
 }

@@ -202,7 +202,8 @@ internal static class Watchdog
         }
     }
 
-    private static void Log(string message)
+    /// <summary>Internal — the lock-watchdog child (Program.cs) logs its fail-closed fire too.</summary>
+    internal static void Log(string message)
     {
         try
         {

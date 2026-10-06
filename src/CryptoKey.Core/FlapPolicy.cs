@@ -26,6 +26,60 @@ internal static class FlapPolicy
         return !desktopName.Equals(LockDesktop, StringComparison.OrdinalIgnoreCase)
             && !desktopName.Equals("Winlogon", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// ~3s of unreadable input desktop (~300ms ticks) before failing closed.
+    /// OpenInputDesktop ACL-deny is the *normal* SAS tell — a user at CAD
+    /// shouldn't instant-lock — but an indefinitely blind monitor is an
+    /// infinite switching blind spot: at the threshold, pin at OS auth.
+    /// </summary>
+    internal const int UnreadableTicksBeforeLock = 10;
+
+    /// <summary>
+    /// Input furniture that legitimately lands on whatever desktop is
+    /// active (the language pill, the IME host) — winlogon spawning a
+    /// foreign *app* onto the lock desktop is the intruder class; these
+    /// aren't. An intruder verdict requires a resolved name NOT here.
+    /// </summary>
+    public static bool IsBenignDesktopResident(string procName)
+        => procName.Equals("ctfmon", StringComparison.OrdinalIgnoreCase)
+           || procName.Equals("TextInputHost", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Supervisor-death fail-closed gate: locked + enabled + a live supervisor
+    /// that just died = kill-order evidence → pin at OS auth once per
+    /// transition. Unlocked, disabled, or never-alive can't fire.
+    /// </summary>
+    public static bool ShouldEscalateSupervisorDeath(
+        bool locked, bool enabled, bool wasAlive, bool alive)
+        => locked && enabled && wasAlive && !alive;
+}
+
+/// <summary>
+/// Consecutive OpenInputDesktop failures while engaged — fires once at the
+/// threshold, then holds silent until a readable tick resets the streak.
+/// </summary>
+public sealed class UnreadableStreak
+{
+    private int _ticks;
+    private bool _latched;
+
+    /// <summary>Returns true exactly once per streak — at the threshold.</summary>
+    public bool RecordUnreadable()
+    {
+        _ticks++;
+        if (_latched || _ticks < FlapPolicy.UnreadableTicksBeforeLock)
+            return false;
+        _latched = true;
+        return true;
+    }
+
+    /// <summary>A readable tick re-arms the streak.</summary>
+    public void Reset()
+    {
+        _ticks = 0;
+        _latched = false;
+    }
 }
 
 /// <summary>
