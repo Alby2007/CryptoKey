@@ -237,6 +237,16 @@ internal sealed class UiShell : IDisposable
             // reason the session isn't authorized).
             ShowAuth(_ => { }, AuthMode.Reset);
         }
+        else if (url.StartsWith("cryptokey://", StringComparison.OrdinalIgnoreCase))
+        {
+            // Any other cryptokey:// landing (e.g. the confirm-email Site
+            // URL redirect) just needs the gate surfaced — sign in if the
+            // session isn't authorized, else the dashboard.
+            if (AccountGatePassed())
+                OpenWindow();
+            else
+                ShowAuth(_ => { }, AuthMode.SignIn);
+        }
     }
 
     /// <summary>url?<k>=<v>&… — one pair; percent-decoded, null when absent.</summary>
