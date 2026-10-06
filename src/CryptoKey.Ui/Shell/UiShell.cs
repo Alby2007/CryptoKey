@@ -188,6 +188,11 @@ internal sealed class UiShell : IDisposable
     {
         if (_authWin != null)
         {
+            // A forced face (a recovery deep link mid-sign-in) still lands —
+            // swap the open window's face rather than dropping the link.
+            if (mode != null)
+                _authWin.SwitchFace(mode.Value, _pendingDeepLink);
+            _pendingDeepLink = null;
             _authWin.Activate();
             _pendingAuthDone += done;
             return;

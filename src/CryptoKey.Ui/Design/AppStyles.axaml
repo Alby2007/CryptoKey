@@ -161,6 +161,23 @@
     <Setter Property="Padding" Value="10,4" />
     <Setter Property="FontSize" Value="12" />
   </Style>
+  <Style Selector="Button.icon">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Width" Value="28" />
+    <Setter Property="Height" Value="28" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="{DynamicResource Radius.Sm}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.TextDim}" />
+  </Style>
+  <Style Selector="Button.icon:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource Brush.Hairline}" />
+    <Setter Property="Foreground" Value="{DynamicResource Brush.Text}" />
+  </Style>
+  <Style Selector="Button.icon:pressed">
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
 
   <!-- Sidebar navigation -->
   <Style Selector="Button.nav">

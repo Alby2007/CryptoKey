@@ -161,4 +161,74 @@ public class AuthWindowTests : IDisposable
         Assert.Contains("Forgot password", ghostTexts);
         w.Close();
     }
+
+    private static TextBox Box(Window w, string watermark)
+        => w.GetVisualDescendants().OfType<TextBox>()
+            .First(b => b.Watermark == watermark);
+
+    [AvaloniaFact]
+    public void Eye_toggle_reveals_then_masks_the_password()
+    {
+        var w = Show(AuthMode.SignIn);
+        TextBox pw = Box(w, "Password");
+        var eye = w.GetVisualDescendants().OfType<Button>()
+            .First(b => b.Classes.Contains("icon"));
+        Assert.Equal('●', pw.PasswordChar);
+
+        eye.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Assert.Equal('\0', pw.PasswordChar);
+
+        eye.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Assert.Equal('●', pw.PasswordChar);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Strength_meter_appears_on_create_only()
+    {
+        var w = Show(AuthMode.Create);
+        Assert.NotEmpty(w.GetVisualDescendants().OfType<StrengthMeter>());
+        w.Close();
+
+        var w2 = Show(AuthMode.SignIn);
+        Assert.Empty(w2.GetVisualDescendants().OfType<StrengthMeter>());
+        w2.Close();
+    }
+
+    [AvaloniaFact]
+    public async void Failed_submit_surfaces_a_danger_banner()
+    {
+        // Unconfigured AuthService — SignIn fails without touching a network.
+        var w = Show(AuthMode.SignIn);
+        SetBox(w, "email", "a@b.c");
+        SetBox(w, "password", "whatever");
+        Button? next = Primary(w);
+        Assert.NotNull(next);
+        Assert.True(next!.IsEnabled);
+        next.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        await Task.Delay(100);
+        Harness.Pump(TimeSpan.FromMilliseconds(100));
+
+        var banner = w.GetVisualDescendants().OfType<Banner>()
+            .Where(b => b.IsVisible).ToList();
+        Assert.NotEmpty(banner);
+        Assert.Contains("error", Box(w, "Password").Classes);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Key_faces_show_the_usb_chip()
+    {
+        var w = Show(AuthMode.Reset, keyPresent: () => false, tokenHash: "t");
+        var chips = w.GetVisualDescendants().OfType<StatusChip>().ToList();
+        Assert.NotEmpty(chips);
+        var chipText = chips[0].GetVisualDescendants().OfType<TextBlock>()
+            .Select(t => t.Text).FirstOrDefault(t => t?.Contains("key") == true);
+        Assert.Equal("Insert your USB key to finish", chipText);
+        w.Close();
+
+        var w2 = Show(AuthMode.SignIn);
+        Assert.Empty(w2.GetVisualDescendants().OfType<StatusChip>());
+        w2.Close();
+    }
 }
