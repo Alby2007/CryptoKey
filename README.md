@@ -208,13 +208,13 @@ Enroll **generates** your recovery phrase — 20 Crockford Base32 characters
 (`XXXXX-XXXXX-XXXXX-XXXXX`, ~100 bits, no ambiguous glyphs) — shows it
 once, and asks you to retype it. Case, dashes, and O/0 or I-L/1 slips are
 forgiven on entry. It's the failsafe when the key isn't available, and the
-Security tab can regenerate it — authorized either by the current phrase
+Key & Recovery page can regenerate it — authorized either by the current phrase
 or by a verified enrolled key. Upgraded installs: **legacy passphrases no
 longer verify** — attach your enrolled key and regenerate the phrase on
-the Security tab. (Under `Key + phrase` the old passphrase can't unlock
-at all, so the Security tab is unreachable — run `cryptokey enroll` from
+the Key & Recovery page. (Under `Key + phrase` the old passphrase can't unlock
+at all, so the Key & Recovery page is unreachable — run `cryptokey enroll` from
 another logged-in session to migrate.) If the drive's keyfile is ever
-wiped, the Security tab's **Repair keyfile** button re-arms it —
+wiped, the Key & Recovery page's **Repair keyfile** button re-arms it —
 deliberately user-gated rather than automatic.
 
 ## Warnings / known limits

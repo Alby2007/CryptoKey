@@ -113,6 +113,52 @@ internal static class MacInstall
     /// <summary>True when the LaunchAgent is registered.</summary>
     public static bool IsInstalled() => File.Exists(PlistPath);
 
+    /// <summary>
+    /// The UI's "start at login" toggle — quiet variant of the CLI verbs:
+    /// no prompts, no console output, returns null or the error. Enabling
+    /// makes sure the installed payload exists first (the plist points at
+    /// it); the agent loads at next login — it is deliberately NOT
+    /// bootstrapped now (the current process is already the guard).
+    /// </summary>
+    public static string? SetAutostart(bool enabled)
+    {
+        try
+        {
+            Directory.CreateDirectory(PlistDir);
+            uint uid = MacInterop.getuid();
+            string domain = $"gui/{uid}";
+            if (!enabled)
+            {
+                RunQuiet("/bin/launchctl", "bootout", $"{domain}/{Label}");
+                if (File.Exists(PlistPath))
+                    File.Delete(PlistPath);
+                return null;
+            }
+
+            string? source = SelfExePath();
+            if (source == null)
+                return "Can't enable autostart from a 'dotnet' run — publish and install first.";
+            if (Path.GetFullPath(source) != Path.GetFullPath(InstalledExe))
+            {
+                Directory.CreateDirectory(InstallDir);
+                Directory.CreateDirectory(LogDir);
+                string sourceDir = Path.GetDirectoryName(source)!;
+                CopyPayload(source, sourceDir,
+                    File.Exists(Path.Combine(sourceDir, "CryptoKey.Core.dll")));
+                RunQuiet("/bin/chmod", "755", InstalledExe);
+            }
+            File.WriteAllText(PlistPath, BuildPlist());
+            // If an older plist is already loaded, drop it so next login
+            // picks up the fresh file.
+            RunQuiet("/bin/launchctl", "bootout", $"{domain}/{Label}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+    }
+
     /// <summary>Single-file payload = copy the exe; folder payload = copy siblings too.</summary>
     private static void CopyPayload(string exe, string sourceDir, bool folderPayload)
     {

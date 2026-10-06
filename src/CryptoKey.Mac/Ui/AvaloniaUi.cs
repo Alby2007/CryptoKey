@@ -30,39 +30,4 @@ internal sealed class AvaloniaUiDispatcher : IUiDispatcher, IAppLifetime
             as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
 }
 
-/// <summary>
-/// The Avalonia Application for the guard. Startup runs once the platform
-/// backend is live so NSApplication/NSWindow handles exist for shielding
-/// level + activation policy calls.
-/// </summary>
-internal sealed class MacApp : Application
-{
-    /// <summary>Set before AppBuilder.Start — runs on the UI thread at ready.</summary>
-    internal static Action? OnStartup;
 
-    /// <summary>
-    /// 1x1 off-screen anchor: Screens enumeration needs a live TopLevel, and
-    /// the tray needs a stable app window. Never visible.
-    /// </summary>
-    internal static Window? Anchor { get; private set; }
-
-    public override void Initialize()
-        => Styles.Add(new Avalonia.Themes.Fluent.FluentTheme());
-
-    public override void OnFrameworkInitializationCompleted()
-    {
-        base.OnFrameworkInitializationCompleted();
-        Anchor = new Window
-        {
-            Width = 1,
-            Height = 1,
-            Opacity = 0,
-            ShowInTaskbar = false,
-            SystemDecorations = SystemDecorations.None,
-            Topmost = false,
-            Position = new PixelPoint(-32000, -32000),
-        };
-        Anchor.Show();
-        Dispatcher.UIThread.Post(() => OnStartup?.Invoke());
-    }
-}

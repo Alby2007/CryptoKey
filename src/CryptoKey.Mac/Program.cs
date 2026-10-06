@@ -1,19 +1,22 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Threading;
+using CryptoKey.Ui;
 
 namespace CryptoKey;
 
 /// <summary>
-/// macOS host entry point. Phase 2 is headless: `cryptokey`/`guard` run the
-/// pump on the main thread with the capture+tap lock surface — no dashboard
-/// or tray yet (Phase 3). Shared verbs come from <see cref="CryptoKeyCli"/>.
+/// macOS host entry point. Bare `cryptokey` is the desktop app — dashboard,
+/// menu-bar tray and guard in one Avalonia process; `cryptokey guard` is
+/// the tray-only daemon and `--headless` forces the windowless pump.
+/// Shared verbs come from <see cref="CryptoKeyCli"/>.
 /// </summary>
 internal static class Program
 {
     private sealed class HostVerbs : IHostVerbs
     {
         public int RunGuard(bool devMode, bool takeover, bool forceClassic)
-            => Guard(devMode, takeover, headless: false);
+            => Guard(devMode, takeover, headless: false, openDashboard: false);
     }
 
     private static int Main(string[] args)
@@ -21,11 +24,12 @@ internal static class Program
         Platform.Init(MacPlatform.Services);
 
         // Bare `cryptokey` (optionally --dev/--takeover/--headless) = the
-        // daemon. Avalonia tier by default; --headless forces the pump path.
+        // desktop app. Avalonia tier by default; --headless forces the pump.
         if (args.Length == 0 || args[0].StartsWith("--"))
             return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
-                args.Contains("--headless", StringComparer.OrdinalIgnoreCase));
+                args.Contains("--headless", StringComparer.OrdinalIgnoreCase),
+                openDashboard: true);
 
         // Shared verbs: enroll, status, guard, open, lock, pause, resume,
         // quit, watchdog.
@@ -53,11 +57,11 @@ internal static class Program
         }
     }
 
-    private static int Guard(bool devMode, bool takeover, bool headless)
+    private static int Guard(bool devMode, bool takeover, bool headless, bool openDashboard)
     {
         if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
-        if (config == null)
+        if (config == null && !openDashboard)
         {
             Console.WriteLine("No enrolled key. Run 'cryptokey enroll' first.");
             return 1;
@@ -74,24 +78,46 @@ internal static class Program
         if (devMode)
             Console.WriteLine("DEV MODE: panic exit is Ctrl+Opt+Shift+F12.");
 
+        if (config == null && headless)
+        {
+            // The headless pump can't run the onboarding wizard — the
+            // console enroll verb is the no-UI path.
+            Console.WriteLine("No enrolled key — run 'cryptokey enroll', or " +
+                "launch 'cryptokey' without --headless for the wizard.");
+            return 1;
+        }
+
         if (!headless)
         {
             try
             {
-                return GuardWithUi(config, devMode);
+                // config == null lands here only on the desktop path — the
+                // wizard enrolls before the guard starts.
+                return GuardWithUi(config, devMode, openDashboard);
             }
             catch (Exception ex)
             {
                 // UI stack failed — security outranks chrome: run headless.
+                // With no config that still means enroll on the console.
+                if (config == null)
+                {
+                    Console.WriteLine(
+                        $"UI unavailable ({ex.Message}) — run 'cryptokey enroll'.");
+                    return 1;
+                }
                 Console.WriteLine(
                     $"UI unavailable ({ex.Message}) — running headless.");
             }
         }
-        return GuardHeadless(config, devMode);
+        return GuardHeadless(config!, devMode);
     }
 
-    /// <summary>Avalonia tier: Dispatcher is the pump, shielding windows + tray.</summary>
-    private static int GuardWithUi(KeyConfig config, bool devMode)
+    /// <summary>
+    /// Avalonia tier: the shared app (CryptoKeyApp) on the main thread —
+    /// dashboard, menu-bar tray, notifications — with the guard engine in
+    /// the same process (engine events are already on this thread).
+    /// </summary>
+    private static int GuardWithUi(KeyConfig? config, bool devMode, bool openDashboard)
     {
         var ui = new AvaloniaUiDispatcher();
         var lockUi = new LockWindowCtl();
@@ -101,27 +127,74 @@ internal static class Program
 
         GuardService? service = null;
         IpcServer? ipc = null;
-        MacApp.OnStartup = () =>
+        UiShell? shell = null;
+        int exitCode = 0;
+        var host = new MacUiHost();
+
+        void StartGuard(KeyConfig cfg)
         {
-            MacInterop.HideFromDock(); // daemon — no Dock icon
-            service = StartBackend(config, devMode, out ipc);
-            MacTray.Install(service);
-        };
-        try
-        {
-            AppBuilder.Configure<MacApp>()
-                .UsePlatformDetect()
-                .WithInterFont()
-                .StartWithClassicDesktopLifetime(Array.Empty<string>(),
-                    ShutdownMode.OnExplicitShutdown);
-            return 0;
+            service = new GuardService(cfg, devMode, forceClassic: false);
+            ipc = new IpcServer(service.UiDispatcher, line =>
+            {
+                // 'open' is a UI verb — the dashboard is this process, so
+                // route it straight to the shell instead of the engine.
+                string[] parts = line.Trim().Split(' ', 2,
+                    StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length > 0
+                    && parts[0].Equals("open", StringComparison.OrdinalIgnoreCase))
+                {
+                    Route route = Routes.Parse(parts.Length > 1 ? parts[1] : null);
+                    UiRuntime.Post(() => shell?.OpenWindow(route));
+                    return "ok opened";
+                }
+                return service.DispatchCommand(line);
+            });
+            service.Start();
+            ipc.Start(service.Log);
+
+            var client = new GuardClient(service, cfg, devMode, UiRuntime.Post);
+            shell = new UiShell(client, host);
+            UiRuntime.InstallCrashPolicy(client.Log, () => shell?.CloseWindows());
+            if (openDashboard)
+                shell.OpenWindow();
         }
-        finally
+
+        UiRuntime.Run(b => b.UsePlatformDetect(), _ =>
         {
-            MacApp.OnStartup = null;
-            try { ipc?.Dispose(); } catch (Exception) { }
-            try { service?.Dispose(); } catch (Exception) { }
-        }
+            // Daemon by default — the Dock icon appears only while a real
+            // window is up (dashboard or the first-run wizard).
+            MacInterop.HideFromDock();
+            if (config != null)
+            {
+                StartGuard(config);
+                return;
+            }
+
+            // First run: the wizard enrolls a key before the guard starts —
+            // Dock icon up while a real window is showing.
+            MacInterop.SetDockVisible(true);
+            var wizard = new OnboardingWindow(host, firstRun: true,
+                (flow, configure) => Task.Run(() => flow.Commit(configure)));
+            wizard.Closed += (_, _) =>
+            {
+                if (wizard.Enrolled
+                    && CryptoKeyCli.TryLoadConfig(out KeyConfig? fresh, alertModal: true)
+                    && fresh != null)
+                {
+                    StartGuard(fresh);
+                }
+                else
+                {
+                    exitCode = 1;
+                    UiRuntime.Shutdown();
+                }
+            };
+            wizard.Show();
+        });
+
+        try { ipc?.Dispose(); } catch (Exception) { }
+        try { service?.Dispose(); } catch (Exception) { }
+        return exitCode;
     }
 
     /// <summary>Headless tier: MacPump main thread, capture+tap lock only.</summary>
@@ -178,7 +251,7 @@ internal static class Program
         Platform.Reinit(MacPlatform.UiServices(ui, lockUi));
         var surfaceBox = new MacLockSurface(devMode, lockUi);
         surface = surfaceBox;
-        MacApp.OnStartup = () =>
+        UiRuntime.Run(b => b.UsePlatformDetect(), _ =>
         {
             MacInterop.HideFromDock();
             // Worker thread — a sleep on the UI thread would freeze the
@@ -205,17 +278,8 @@ internal static class Program
                 ui.Post(ui.Exit);
             })
             { IsBackground = true }.Start();
-        };
-        try
-        {
-            AppBuilder.Configure<MacApp>()
-                .UsePlatformDetect()
-                .WithInterFont()
-                .StartWithClassicDesktopLifetime(Array.Empty<string>(),
-                    ShutdownMode.OnExplicitShutdown);
-            return 0;
-        }
-        finally { MacApp.OnStartup = null; }
+        });
+        return 0;
     }
 
     private static void Usage()

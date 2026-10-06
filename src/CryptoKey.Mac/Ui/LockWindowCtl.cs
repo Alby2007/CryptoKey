@@ -1,3 +1,4 @@
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Platform;
 using Avalonia.Threading;
@@ -65,11 +66,37 @@ internal sealed class LockWindowCtl
         done.Wait(TimeSpan.FromSeconds(1));
     }
 
+    private Window? _anchor;
+
+    /// <summary>
+    /// 1x1 off-screen anchor: Screens enumeration needs a live TopLevel and
+    /// a lock can engage with no dashboard open. Created lazily, never
+    /// shown usefully.
+    /// </summary>
+    private Window Anchor()
+    {
+        if (_anchor == null)
+        {
+            _anchor = new Window
+            {
+                Width = 1,
+                Height = 1,
+                Opacity = 0,
+                ShowInTaskbar = false,
+                SystemDecorations = SystemDecorations.None,
+                Topmost = false,
+                Position = new PixelPoint(-32000, -32000),
+            };
+            _anchor.Show();
+        }
+        return _anchor;
+    }
+
     private void DoOpen()
     {
-        if (_open || MacApp.Anchor == null)
+        if (_open)
             return;
-        foreach (Screen s in MacApp.Anchor.Screens.All)
+        foreach (Screen s in Anchor().Screens.All)
         {
             var w = new LockWindow
             {

@@ -254,4 +254,30 @@ internal static class MacInterop
         if (app != IntPtr.Zero)
             ObjcMsgSendLong(app, Sel("setActivationPolicy:"), 1);
     }
+
+    /// <summary>
+    /// Accessory (no Dock icon) while headless, Regular while the dashboard
+    /// is open — the standard agent-app pattern.
+    /// </summary>
+    internal static void SetDockVisible(bool visible)
+    {
+        IntPtr app = ObjcMsgSend(objc_getClass("NSApplication"), Sel("sharedApplication"));
+        if (app != IntPtr.Zero)
+            ObjcMsgSendLong(app, Sel("setActivationPolicy:"), visible ? 0 : 1);
+    }
+
+    /// <summary>NSWorkspace.accessibilityDisplayShouldReduceMotion.</summary>
+    internal static bool PrefersReducedMotion()
+    {
+        try
+        {
+            IntPtr ws = ObjcMsgSend(objc_getClass("NSWorkspace"), Sel("sharedWorkspace"));
+            if (ws == IntPtr.Zero)
+                return false;
+            // BOOL is a signed char — the low byte of the return register.
+            return (ObjcMsgSend(ws, Sel("accessibilityDisplayShouldReduceMotion"))
+                    .ToInt64() & 0xFF) != 0;
+        }
+        catch (Exception) { return false; }
+    }
 }

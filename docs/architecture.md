@@ -9,7 +9,7 @@ share the same binary and config (the diagram shows the Windows host —
 ```mermaid
 flowchart TD
     A[cryptokey ...] --> B{argv}
-    B -->|"bare / open"| GUI["Dashboard app<br/>guard + AppShell + pages"]
+    B -->|"bare / open"| GUI["Desktop app<br/>guard thread + Avalonia dashboard"]
     B -->|"guard"| GRD["Tray daemon<br/>guard only, console hidden"]
     B -->|"status / lock / pause / resume / quit"| CLI["CLI client<br/>one line over the pipe, exit"]
     B -->|"enroll"| ENR["Enroll CLI<br/>writes keyfile + config, pings guard"]
@@ -25,9 +25,9 @@ Two important consequences:
   A second GUI launch doesn't start a second guard — it pipes `open` to the
   running one. `--takeover` waits on the mutex (up to ~30 s) for the
   elevated-restart handoff.
-- **No service process.** The daemon is a WinForms app with its console
-  hidden; autostart launches `cryptokey.exe guard` via the Run key or a
-  scheduled task.
+- **No service process.** The daemon is a WinExe with its console hidden;
+  autostart launches `cryptokey.exe guard` via the Run key or a scheduled
+  task.
 
 ## Component map
 
@@ -41,8 +41,8 @@ flowchart LR
         SRF["ILockSurface"]
         KV["KeyVerifier<br/>envelope + hash checks"]
         CS["ConfigStore<br/>atomic config.json I/O"]
-        TRAY["TrayApp<br/>NotifyIcon"]
-        UI["AppShell + pages<br/>dashboard"]
+        TRAY["UiShell tray<br/>TrayIcon + flyout"]
+        UI["CryptoKey.Ui<br/>Avalonia dashboard"]
         SUP["Supervisor<br/>mutex probe + spawn + stop"]
     end
 
@@ -67,16 +67,18 @@ flowchart LR
 ```
 
 `GuardService` is the only stateful coordinator — everything else is a
-device it drives. The dashboard, tray, settings pages, and IPC commands all
-consume the same `_config` instance and the same event surface
-(`StateChanged` snapshots + `LogWritten` activity lines).
+device it drives. On Windows it now lives on its own engine thread; the
+Avalonia front end talks to it through `GuardClient`, which marshals every
+command/mutation onto the engine thread and hands back immutable snapshots
+(`StatusSnapshot`/`SettingsView`).
 
 ## Threading model
 
 | Thread | Owns | Rules |
 |---|---|---|
-| **UI thread** | `GuardService`, monitor callbacks (marshaled via `BeginInvoke`), config mutation, rotation bookkeeping | Must never block on USB I/O while hooks may be installed — rotation writes go to a worker |
-| **WMI worker** (`UsbMonitor`) | `Win32_DiskDrive` enumeration | Polls off-pump so a slow WMI query can't stall hooks; results marshal to the UI thread |
+| **Avalonia UI thread** | Dashboard, tray, flyout, wizard — `CryptoKey.Ui` | Never runs engine work; a UI exception is logged and windows close — the guard is unaffected |
+| **Engine thread** (WinForms pump) | `GuardService`, monitor callbacks, config mutation, rotation bookkeeping | Must never block on USB I/O while hooks may be installed — rotation writes go to a worker |
+| **WMI worker** (`UsbMonitor`) | `Win32_DiskDrive` enumeration | Polls off-pump so a slow WMI query can't stall hooks; results marshal to the engine thread |
 | **Lock thread** (secure mode, per engage) | `SetThreadDesktop` → `InputLocker` LL hooks → `LockForm` → own message pump | STA. Created fresh every engage; teardown closes the form and joins |
 | **Rotation worker** | `RotateKeyfiles` — pure file I/O on a pre-built envelope | Reads no mutable config; logs back via `BeginInvoke` |
 | **Phrase worker** | PBKDF2 verify (600k iterations; count stored per-config) | Hook returns instantly; result marshaled back to UI; the char[] attempt is wiped after verify |
@@ -197,7 +199,8 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `Config.cs` | `KeyConfig`/`GuardSettings`, hashing, attestation, save + `.bak` mirror + third-copy fallback, `RotateSecret` |
 | `RecoveryPhrase.cs` | Generated 20-char Crockford Base32 credential: `Generate`, `Normalize`, `IsValid` — the only user credential, stored hash-only |
 | `AtomicFile.cs` | Durability primitive: tmp → device flush → rename (`FlushFileBuffers` / `F_FULLFSYNC` gated at runtime) — used by config, backup, keyfile, policy writes |
-| `Enrollment.cs` | Drive selection, phrase display/confirm, keyfile + config write, `reenrolled` ping |
+| `Enrollment.cs` / `EnrollmentFlow.cs` | Console adapter / the state machine behind it — drive selection, phrase confirm, keyfile + config write; the GUI wizard drives the same flow |
+| `DesignTokens.cs` / `KeyArt.cs` / `PlatformCapabilities.cs` | One visual identity (ARGB tokens + shared key geometry) and a per-host capability record the UI gates features on |
 | `ILockSurface.cs` | Lock abstraction: `Engage`/`Disengage`/`ReleaseInput`, tier marker (`IsOverlay`), `EngageError`, setters |
 | `IpcServer.cs` / `IpcClient.cs` | Accept loop + dispatch marshal / one-shot CLI transport |
 | `Watchdog.cs` | `Watchdog.Run` — heartbeat/respawn/OS-lock role + `Supervisor` — guard-side liveness probe, spawn, stop |
@@ -232,7 +235,21 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `TrayIcons.cs` | Runtime badge renderer; `BuildIcoBytes` also produces the committed `app.ico` |
 | `Vault/DokanVaultFileSystem.cs` | `IDokanOperations` adapter — translates driver callbacks to `VaultVolume`, maps results to `NtStatus` (tamper → `CrcError`) |
 | `Vault/DokanMount.cs` | `IVaultMounter`/`IVaultMount` over DokanNet — mount thread, driver-presence probe, drive-letter selection, force-dismount |
-| `TrayApp.cs`, `Ui/` | NotifyIcon, AppShell, dashboard/settings/security/vault/log pages, theming |
+| `EngineHost.cs` / `WinUi.cs` / `WinUiHost.cs` | The seam: engine thread + `GuardService` bootstrap, process composition, `IUiHost` shell integration |
+| `Ui/LockForm.cs` / `Ui/KeyArtRenderer.cs` | The lock card (classic overlay + secure desktop host it) / GDI renderer for the shared `KeyArt` key visual |
+| `Theme.cs` / `Ui/Glyphs.cs` / `TrayIcons.cs` | GDI palette/fonts/paint helpers (token-derived), Segoe glyph table, tray + app icon renderer |
+
+### `src/CryptoKey.Ui` — shared front end (Avalonia 11)
+
+| File | Role |
+|---|---|
+| `Design/` | `Palette`/`Motion` + `AppStyles.axaml` — the design system installed over the tokens |
+| `Controls/` | `Kit` control factory (chips, rows, `HoldButton`, `SettingCombo`, toasts), `KeyVisual` (the animated key), `Icon` |
+| `Shell/` | `CryptoKeyApp` + `UiRuntime` (loop + UI crash policy), `MainWindow` (sidebar + status rail), `UiShell` (tray + flyout + notifications), `TrayFlyout`, `NotificationCenter` |
+| `Pages/` | Home, Key & Recovery, Vault, Protection, Alerts, Activity, General, About — pages read snapshots; all writes go through `GuardClient.UpdateSettings` |
+| `Wizard/` | `OnboardingWindow` — first-run + re-enroll over `EnrollmentFlow` |
+| `Services/` | `GuardClient` (the only engine door), `IUiHost` (per-OS shell integration), `Routes` |
+| `Presenters/` | `HomePresenter`/`VaultPresenter`/activity parsing — pure snapshot→view-state, unit-tested |
 
 ### `src/CryptoKey.Mac` — macOS host (`cryptokey`, Avalonia 11)
 
@@ -243,9 +260,10 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `MacUsbEnumerator.cs` | `/Volumes` → `statfs` → `DADiskCreateFromBSDName` — removable + serial per mount, grouped per whole disk |
 | `KeychainProtector.cs` | AES-GCM wrap key in the login Keychain (device-only accessible); entropy → AAD |
 | `MacLockSurface.cs` | `CGEventTap` on its own run-loop thread + `CGDisplayCapture` + fixed char buffer; engage fails closed via `CGSession -suspend` |
-| `Ui/` | `MacApp` + `AvaloniaUiDispatcher`, `LockWindowCtl`/`LockWindow` (per-screen shielding cards), `MacTray` (menu-bar verbs → `DispatchCommand`) |
-| `MacInstall.cs` | `install`/`uninstall` — payload copy to `~/Applications/CryptoKey`, LaunchAgent plist + `launchctl bootstrap` |
-| `Program.cs` | `Platform.Init` + argv dispatch — UI tier by default, `--headless` pump fallback, hidden `uitest` smoke |
+| `Ui/` | `AvaloniaUiDispatcher`, `LockWindowCtl`/`LockWindow` (per-screen shielding cards in the shared design language — `KeyVisual`, token palette) |
+| `MacUiHost.cs` | `IUiHost` — LaunchAgent autostart toggle, Dock icon while the dashboard is open, `open` shell-outs; the shared `UiShell` owns the menu-bar tray |
+| `MacInstall.cs` | `install`/`uninstall` — payload copy to `~/Applications/CryptoKey`, LaunchAgent plist + `launchctl bootstrap`; `SetAutostart` is the quiet UI toggle |
+| `Program.cs` | `Platform.Init` + argv dispatch — `CryptoKeyApp` tier by default (dashboard, tray, first-run wizard), `--headless` pump fallback, hidden `uitest` smoke |
 
 `tests/CryptoKey.Tests` (xUnit, `net9.0`) covers the pure security
 invariants — rotation chain (incl. `keepPrev` orphan-proofing),
@@ -259,3 +277,8 @@ bundle — both set in a module initializer before any test code runs, so
 the ambient can't be captured too early. The interactive layer
 (`SecureLockSurface`/`SwitchDesktop`, pipe ACLs, WMI) stays manual — CI
 agents are non-interactive.
+
+`tests/CryptoKey.Ui.Tests` (xUnit + Avalonia.Headless) pins the front-end
+safety invariants: page construction and refresh never persist config or
+start timers, hold-to-confirm fires only on a real pointer hold, disabled
+destructive buttons can't fire, and presenters render state honestly.

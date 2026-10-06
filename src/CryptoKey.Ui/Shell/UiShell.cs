@@ -38,7 +38,9 @@ internal sealed class UiShell : IDisposable
         _statusItem = new NativeMenuItem("CryptoKey") { IsEnabled = false };
         _keyItem = new NativeMenuItem("") { IsEnabled = false };
         var open = Item("Open CryptoKey", () => OpenWindow(Route.Home));
-        var quick = Item("Quick panel…", ShowFlyout);
+        // The flyout is a Windows/Linux tray idiom — on macOS the native
+        // menu IS the quick panel.
+        var quick = mac ? null : Item("Quick panel…", ShowFlyout);
         _lockItem = Item("Lock now", () => _client.Lock());
         _pauseItem = new NativeMenuItem("Pause auto-lock") { Menu = new NativeMenu() };
         foreach (int mins in PauseChoices)
@@ -56,17 +58,21 @@ internal sealed class UiShell : IDisposable
         _quitItem = Item("Quit CryptoKey", Quit);
 
         var menu = new NativeMenu();
-        foreach (NativeMenuItemBase it in new NativeMenuItemBase[]
+        foreach (NativeMenuItemBase? it in new NativeMenuItemBase?[]
                  {
                      _statusItem, _keyItem, new NativeMenuItemSeparator(), open, quick,
                      new NativeMenuItemSeparator(), _lockItem, _pauseItem, _resumeItem, settings,
                      new NativeMenuItemSeparator(), _quitItem,
                  })
-            menu.Items.Add(it);
+        {
+            if (it != null)
+                menu.Items.Add(it);
+        }
 
         _tray = new TrayIcon { Menu = menu, ToolTipText = "CryptoKey" };
         // Left-click opens the flyout (Windows/Linux; macOS always shows the menu).
-        _tray.Clicked += (_, _) => ToggleFlyout();
+        if (!mac)
+            _tray.Clicked += (_, _) => ToggleFlyout();
         TrayIcon.SetIcons(Application.Current!, new TrayIcons { _tray });
 
         _client.StateChanged += OnState;

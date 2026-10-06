@@ -58,7 +58,19 @@ internal static class MacPlatform
             // macFUSE is the eventual mount engine — vault stays image-only for now.
             VaultMounts = new NullVaultMounter(),
             VaultTpm = NullVaultTpm.Shared,
+            Capabilities = Capabilities,
         };
+
+    /// <summary>
+    /// What the macOS host can actually do — the dashboard gates on this:
+    /// capture+tap IS the strong lock tier (no private-desktop split), and
+    /// vault mounting, webcam captures, lock policies and elevation are
+    /// Windows-only for now.
+    /// </summary>
+    public static PlatformCapabilities Capabilities { get; } = new("macOS",
+        Vault: false, Tpm: false, Webcam: false, PrivateDesktop: false,
+        LockPolicies: false, Elevation: false, Shortcuts: false,
+        StartupAtLogin: true);
 }
 
 internal sealed class MacPaths : IPlatformPaths
