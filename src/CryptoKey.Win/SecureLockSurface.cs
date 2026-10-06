@@ -345,6 +345,13 @@ internal sealed class SecureLockSurface : ILockSurface
                     if (!NativeMethods.LockWorkStation())
                         SecurityEvent?.Invoke(
                             $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
+                    else
+                        // Arm the same cooldown the sentinel uses — this OS-lock
+                        // is ours, and the self-inflicted-blindness suppression
+                        // depends on every own lock marking it. Armed only on
+                        // success: a failed call means the session isn't on
+                        // Winlogon, so later blind ticks are genuinely suspect.
+                        _osLockCooldownUntil = DateTime.UtcNow.AddSeconds(20);
                 }
             }
             catch (Exception) { }

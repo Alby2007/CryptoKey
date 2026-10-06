@@ -173,9 +173,16 @@ internal sealed class GuardService : IDisposable
     public event Action<string, string>? Notification;
 
     private readonly RingBuffer<string> _activity = new(200);
+    // Lock-thread security events call Log off the engine thread — the ring
+    // is documented single-thread, so all pushes AND the backfill snapshot
+    // go through this gate (a torn read would look like a missing event).
+    private readonly object _activitySync = new();
 
-    /// <summary>Recent log lines, oldest first (for UI backfill).</summary>
-    public IReadOnlyList<string> RecentActivity => _activity;
+    /// <summary>Recent log lines, oldest first (for UI backfill) — a snapshot.</summary>
+    public IReadOnlyList<string> RecentActivity
+    {
+        get { lock (_activitySync) return _activity.ToList(); }
+    }
 
     /// <summary>Marshals work onto the pump the monitor owns (IPC dispatch goes through it).</summary>
     public IUiDispatcher UiDispatcher => _ui;
@@ -1383,7 +1390,8 @@ internal sealed class GuardService : IDisposable
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         Console.WriteLine(line);
-        _activity.Push(line);
+        lock (_activitySync)
+            _activity.Push(line);
         try
         {
             Directory.CreateDirectory(ConfigStore.ConfigDir);
@@ -1404,9 +1412,10 @@ internal sealed class GuardService : IDisposable
             if (!File.Exists(LogPath))
                 return;
             string[] lines = File.ReadAllLines(LogPath);
-            foreach (string line in lines.TakeLast(60))
-                if (!string.IsNullOrWhiteSpace(line))
-                    _activity.Push(line);
+            lock (_activitySync)
+                foreach (string line in lines.TakeLast(60))
+                    if (!string.IsNullOrWhiteSpace(line))
+                        _activity.Push(line);
         }
         catch (Exception) { }
     }
