@@ -40,8 +40,8 @@ internal sealed class SecureLockSurface : ILockSurface
     private readonly FlapCounter _flapCounter = new();
     private bool _stormAnnounced;         // storm edge — alert once per burst, not per flap
     private readonly UnreadableStreak _unreadable = new(); // blind-input accrual → fail-closed
-    private DateTime _intruderCooldownUntil; // suppress intruder re-escalation ~20s
-    private readonly HashSet<uint> _foreignPids = new(); // dedupe foreign-window events
+    private DateTime _osLockCooldownUntil; // suppress sustained-presence OS-lock spam ~20s
+    private readonly HashSet<uint> _foreignPids = new(); // live foreign pids — dedupe + prune
     // The sentinel timer lives on the lock thread — created per engagement,
     // ticks on that thread's pump, disposed in LockThreadMain's finally.
     private System.Windows.Forms.Timer? _sentinel;
@@ -213,7 +213,7 @@ internal sealed class SecureLockSurface : ILockSurface
         _flapCounter.Reset();
         _stormAnnounced = false;
         _unreadable.Reset();
-        _intruderCooldownUntil = DateTime.MinValue;
+        _osLockCooldownUntil = DateTime.MinValue;
         _foreignPids.Clear();
         if (_flapThread != null)
             return; // one thread for the surface's lifetime — re-engage just un-parks it
@@ -433,6 +433,7 @@ internal sealed class SecureLockSurface : ILockSurface
         string? intruder = null;
         bool foreignCounted = false;
         List<uint>? newForeign = null;
+        var seenForeign = new HashSet<uint>();
         uint selfPid = (uint)Environment.ProcessId;
         try
         {
@@ -444,17 +445,31 @@ internal sealed class SecureLockSurface : ILockSurface
                 string? name;
                 try { name = Process.GetProcessById((int)pid).ProcessName; }
                 catch { name = null; } // protected/system or died mid-scan
-                if (name != null && FlapPolicy.IsBenignDesktopResident(name))
-                    return true;
-                if (name != null && intruder == null && NativeMethods.IsWindowVisible(h))
-                    intruder = name; // conclusive — visible named foreign app
-                else if (_foreignPids.Add(pid))
-                    (newForeign ??= new List<uint>()).Add(pid);
+                switch (FlapPolicy.ClassifyForeignWindow(
+                            NativeMethods.IsWindowVisible(h), name))
+                {
+                    case FlapPolicy.ForeignWindowVerdict.Benign:
+                        return true; // input furniture — not foreign at all
+                    case FlapPolicy.ForeignWindowVerdict.Intruder:
+                        // Visible foreign window — conclusive even when the
+                        // name won't resolve (protected/elevated process):
+                        // nothing legit paints on a private desktop.
+                        intruder ??= name ?? $"pid={pid}";
+                        break;
+                    default:
+                        if (_foreignPids.Add(pid))
+                            (newForeign ??= new List<uint>()).Add(pid);
+                        break;
+                }
+                seenForeign.Add(pid);
                 foreignCounted = true;
                 return true;
             }, IntPtr.Zero);
         }
         catch (Exception) { return; }
+        // Drop pids that vanished — a reused pid re-logs as a new foreign
+        // window rather than hiding behind a dead one's entry.
+        _foreignPids.IntersectWith(seenForeign);
         // Logged once per pid — events fire outside the enum so a handler
         // can't abort the scan mid-walk.
         if (newForeign != null)
@@ -465,9 +480,9 @@ internal sealed class SecureLockSurface : ILockSurface
         {
             // The ~20s cooldown prevents an OS-lock/unlock fight while still
             // re-firing if the window stays open across an OS-unlock.
-            if (DateTime.UtcNow >= _intruderCooldownUntil)
+            if (DateTime.UtcNow >= _osLockCooldownUntil)
             {
-                _intruderCooldownUntil = DateTime.UtcNow.AddSeconds(20);
+                _osLockCooldownUntil = DateTime.UtcNow.AddSeconds(20);
                 SecurityEvent?.Invoke($"desktop-intruder:{intruder}");
                 if (!NativeMethods.LockWorkStation())
                     SecurityEvent?.Invoke(
@@ -502,9 +517,16 @@ internal sealed class SecureLockSurface : ILockSurface
         }
         if (stormEvent != null)
             SecurityEvent?.Invoke(stormEvent);
-        if (stormNow && !NativeMethods.LockWorkStation())
-            SecurityEvent?.Invoke(
-                $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
+        // Sustained presence isn't an active switch storm — the same ~20s
+        // cooldown as the intruder path keeps a persistent window from
+        // spamming LockWorkStation every tick while it sits there.
+        if (stormNow && DateTime.UtcNow >= _osLockCooldownUntil)
+        {
+            _osLockCooldownUntil = DateTime.UtcNow.AddSeconds(20);
+            if (!NativeMethods.LockWorkStation())
+                SecurityEvent?.Invoke(
+                    $"os-lock-failed(err={Marshal.GetLastWin32Error()})");
+        }
     }
 
     private void PushMirroredState(LockForm f)

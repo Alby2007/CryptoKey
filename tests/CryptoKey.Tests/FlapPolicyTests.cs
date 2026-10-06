@@ -102,6 +102,40 @@ public class FlapPolicyTests
     public void Foreign_apps_are_not_benign_residents(string proc)
         => Assert.False(FlapPolicy.IsBenignDesktopResident(proc));
 
+    // ---- Sentinel verdicts ----
+
+    [Fact]
+    public void Visible_foreign_window_is_an_intruder()
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Intruder,
+            FlapPolicy.ClassifyForeignWindow(visible: true, "taskmgr"));
+
+    [Fact]
+    public void Visible_name_unresolvable_window_is_still_an_intruder()
+        // Protected/elevated processes resolve no name — visibility alone
+        // is conclusive; nothing legit paints on a private desktop.
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Intruder,
+            FlapPolicy.ClassifyForeignWindow(visible: true, null));
+
+    [Fact]
+    public void Invisible_foreign_window_is_inconclusive()
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Inconclusive,
+            FlapPolicy.ClassifyForeignWindow(visible: false, "taskmgr"));
+
+    [Fact]
+    public void Invisible_unnamed_window_is_inconclusive()
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Inconclusive,
+            FlapPolicy.ClassifyForeignWindow(visible: false, null));
+
+    [Fact]
+    public void Furniture_is_benign_even_when_visible()
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Benign,
+            FlapPolicy.ClassifyForeignWindow(visible: true, "ctfmon"));
+
+    [Fact]
+    public void Furniture_is_benign_when_invisible()
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Benign,
+            FlapPolicy.ClassifyForeignWindow(visible: false, "TextInputHost"));
+
     // ---- Unreadable-input escalation ----
 
     [Fact]

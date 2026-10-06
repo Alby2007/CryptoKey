@@ -45,6 +45,32 @@ internal static class FlapPolicy
         => procName.Equals("ctfmon", StringComparison.OrdinalIgnoreCase)
            || procName.Equals("TextInputHost", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Sentinel verdict for one foreign top-level window on the lock desktop.</summary>
+    public enum ForeignWindowVerdict
+    {
+        /// <summary>Input furniture — skip entirely (not even "foreign").</summary>
+        Benign,
+        /// <summary>Visible foreign window — conclusive intruder, named or not.</summary>
+        Intruder,
+        /// <summary>Invisible or otherwise inconclusive — accrues toward the storm latch.</summary>
+        Inconclusive,
+    }
+
+    /// <summary>
+    /// One foreign window's sentinel verdict. A VISIBLE foreign top-level
+    /// window is conclusive even when the process name won't resolve
+    /// (protected/elevated) — nothing legit paints on a private desktop.
+    /// Invisible windows are inconclusive: a hidden thread can still plant
+    /// hooks, but it can't act as an intruder surface.
+    /// </summary>
+    public static ForeignWindowVerdict ClassifyForeignWindow(
+        bool visible, string? procName)
+    {
+        if (procName != null && IsBenignDesktopResident(procName))
+            return ForeignWindowVerdict.Benign;
+        return visible ? ForeignWindowVerdict.Intruder : ForeignWindowVerdict.Inconclusive;
+    }
+
     /// <summary>
     /// Supervisor-death fail-closed gate: locked + enabled + a live supervisor
     /// that just died = kill-order evidence → pin at OS auth once per
