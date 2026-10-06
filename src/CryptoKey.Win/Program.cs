@@ -18,6 +18,13 @@ internal static class Program
         // status, guard, watchdog all reach ConfigStore/Platform.Services.
         Platform.Init(WinPlatform.Services);
 
+        // WinExe allocates no console — a verb launched from a shell adopts
+        // the parent's so CLI output/prompts work; internal launches fail
+        // the attach and stay consoleless. Verbs whose output/interaction
+        // IS the point get a console of their own on demand.
+        if (args.Length > 0)
+            AttachCliConsole(allocIfNeeded: OutputVerbs.Contains(args[0]));
+
         // Elevated helper: the parent app spawns this with runas when a
         // startup-mode change needs admin rights (scheduled-task writes).
         if (args.Length >= 1 && args[0].Equals("--set-startup", StringComparison.OrdinalIgnoreCase))
@@ -95,6 +102,9 @@ internal static class Program
             return 1;
         if (config == null)
         {
+            // First run with no console (double-click, Run dialog) — enroll
+            // needs somewhere to prompt, so give it one on demand.
+            AttachCliConsole(allocIfNeeded: true);
             Console.WriteLine("No enrolled key — starting enroll first.");
             if (Enrollment.Run() != 0
                 || !CryptoKeyCli.TryLoadConfig(out config, alertModal: true)
@@ -166,7 +176,6 @@ internal static class Program
     /// </summary>
     private static int RunLockWatchdog(int parentPid)
     {
-        HideConsoleIfOwned();
         try
         {
             using var parent = Process.GetProcessById(parentPid);
@@ -195,21 +204,41 @@ internal static class Program
         return "ok opened";
     }
 
-    // A double-clicked console app owns its console; hiding it makes the exe
-    // feel like a normal windowed app. A console shared with a shell stays.
-    private static void HideConsoleIfOwned()
+    /// <summary>
+    /// WinExe starts consoleless — a CLI verb run from a shell adopts the
+    /// parent's console and rebinds std handles; detached/internal launches
+    /// (watchdog, apply-update, runas helpers) have no parent console, so
+    /// the attach just fails and the verb runs output-free. Interactive or
+    /// print-oriented verbs (<see cref="OutputVerbs"/>) fall back to
+    /// <c>AllocConsole</c> — a console appears only when a verb needs one.
+    /// </summary>
+    private static bool _consoleAttached;
+
+    /// <summary>Verbs whose output or prompts ARE the product — they get a
+    /// console even launched consoleless. Fire-and-forget actions (lock,
+    /// quit, guard, watchdog…) never allocate one.</summary>
+    private static readonly HashSet<string> OutputVerbs = new(
+        StringComparer.OrdinalIgnoreCase)
+        { "enroll", "install", "status", "help", "update", "vault", "sign-release" };
+
+    private static void AttachCliConsole(bool allocIfNeeded = false)
     {
+        bool attached = NativeMethods.AttachConsole(NativeMethods.ATTACH_PARENT_PROCESS);
+        // Redirected output flows through the pipe without a console —
+        // never pop one for a spawned/piped invocation (e.g. the install
+        // self-check running `cryptokey status` with captured stdout).
+        if (!attached && allocIfNeeded && !Console.IsOutputRedirected)
+            attached = NativeMethods.AllocConsole();
+        if (!attached)
+            return;
+        _consoleAttached = true;
         try
         {
-            var ids = new uint[2];
-            uint count = NativeMethods.GetConsoleProcessList(ids, (uint)ids.Length);
-            if (count <= 1)
-                NativeMethods.ShowWindow(NativeMethods.GetConsoleWindow(), NativeMethods.SW_HIDE);
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+            Console.SetIn(new StreamReader(Console.OpenStandardInput()));
         }
-        catch (Exception)
-        {
-            // Not a console host (or enumeration failed) — nothing to hide.
-        }
+        catch (Exception) { }
     }
 
     private static int Guard(bool devMode, bool takeover, bool forceClassic)
@@ -237,13 +266,10 @@ internal static class Program
     }
 
     // Shared body for the desktop app and the tray-only daemon: the only
-    // difference is whether the dashboard opens on launch. Hiding the console
-    // matters most here — both autostart modes invoke `guard`, and without
-    // this a console window pops up at every login.
+    // difference is whether the dashboard opens on launch.
     private static int RunApp(KeyConfig config, bool devMode, bool openDashboard,
         bool forceClassic)
     {
-        HideConsoleIfOwned();
         ApplicationConfiguration.Initialize();
         Application.SetColorMode(SystemColorMode.Dark);
         Animator.Enabled = config.Guard.Animations;
@@ -850,6 +876,8 @@ internal static class Program
     /// <summary>[Y/n] prompt — a redirected/piped stdin counts as yes.</summary>
     private static bool Ask(string question)
     {
+        if (!_consoleAttached)
+            return false; // no console to answer in — never auto-confirm
         Console.Write($"{question} [Y/n] ");
         string? ans = Console.ReadLine();
         return ans == null || ans.Trim().Length == 0
@@ -939,11 +967,8 @@ internal static class Program
 
     private static int SetStartupMode(StartupMode mode)
     {
-        // runas gives this console-app helper a console nobody reads — hide it.
-        HideConsoleIfOwned();
         try
-        {
-            StartupManager.SetMode(mode);
+        {            StartupManager.SetMode(mode);
             return 0;
         }
         catch (Exception ex)

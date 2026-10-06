@@ -4,7 +4,7 @@
 
 ```console
 cryptokey                        # dashboard app: guard + UI (add --dev, --takeover, --classic)
-cryptokey guard                  # tray daemon, console hidden (same flags)
+cryptokey guard                  # tray daemon (same flags)
 cryptokey enroll                 # enroll the inserted removable drive — generates the recovery
                                  # phrase (shown once, retyped to confirm); creates shortcuts
 cryptokey open                   # raise the dashboard on the running guard
@@ -31,6 +31,12 @@ cryptokey sign-release           # maintainer tooling: --gen-key <pem> |
                                  # <publishDir> <key.pem> [tag] → zip + signed manifest
 cryptokey help                   # usage
 ```
+
+`cryptokey.exe` is a GUI-subsystem binary — a desktop launch never creates a
+console window. A verb run from a shell attaches to the parent's console for
+output and prompts; interactive/output verbs launched without one (Run dialog,
+shortcut) allocate a console on demand. Note PowerShell won't wait on a
+GUI-subsystem exe — output still prints, the prompt just returns early.
 
 Hidden/infrastructure modes:
 

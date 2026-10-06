@@ -98,17 +98,20 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DestroyIcon(IntPtr hIcon);
 
-    internal const int SW_HIDE = 0;
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-    [DllImport("kernel32.dll")]
-    internal static extern IntPtr GetConsoleWindow();
+    // WinExe starts consoleless — a CLI verb run from a shell adopts the
+    // parent's console; detached/internal launches just fail this.
+    internal const uint ATTACH_PARENT_PROCESS = unchecked((uint)-1);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    internal static extern uint GetConsoleProcessList(uint[] lpidProcessList, uint dwProcessCount);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool AttachConsole(uint dwProcessId);
+
+    // On-demand console for interactive verbs launched without one (Run
+    // dialog, a shortcut) — a console only ever appears when a verb needs
+    // to prompt, never for a GUI launch.
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool AllocConsole();
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern uint RegisterWindowMessage(string lpString);

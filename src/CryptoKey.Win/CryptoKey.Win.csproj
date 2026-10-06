@@ -1,7 +1,10 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- GUI subsystem: no console is ever allocated, so there's no window
+         to flash then hide. CLI verbs re-attach to the parent's console
+         on demand (Program.AttachCliConsole). -->
+    <OutputType>WinExe</OutputType>
     <AssemblyName>cryptokey</AssemblyName>
     <TargetFramework>net9.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
