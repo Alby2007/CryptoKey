@@ -40,6 +40,7 @@ internal sealed class GuardService : IDisposable
     private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
     private bool _staleKeyPresent;     // a previous-generation file is on the drive
     private DateTime? _cooldownUntil;  // phrase-input freeze deadline
+    private bool _unlockDeferLogged;   // "Unlock deferred" logged once per stretch
     private AttestState _lastAttest;   // dedup for the legacy-format log line
 
     public GuardService(KeyConfig config, bool devMode, bool forceClassic)
@@ -1269,6 +1270,7 @@ internal sealed class GuardService : IDisposable
             return;
         _pausedUntil = null;
         _failedAttempts = 0;
+        _unlockDeferLogged = false; // fresh lock session — next deferral logs once
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         _vault.KeyGone(); // the vault seals with the session — before the surface drops
         Log($"LOCKED — {reason}.");
@@ -1324,13 +1326,19 @@ internal sealed class GuardService : IDisposable
         // Disengage returns input (and the input desktop) before teardown.
         // If the session couldn't be switched back, the surface stays alive
         // and functional — keep State locked so the phrase path still
-        // works and the next unlock retries the switch.
+        // works and the next unlock retries the switch. The retry loop is
+        // what eventually lands it — log the deferral once per stretch.
         if (!_surface.Disengage())
         {
-            Log("Unlock deferred — could not switch back to the input desktop.");
+            if (!_unlockDeferLogged)
+            {
+                _unlockDeferLogged = true;
+                Log("Unlock deferred — could not switch back to the input desktop.");
+            }
             _surface.SetStatus("Couldn't return to your desktop — try again.");
             return;
         }
+        _unlockDeferLogged = false;
         Platform.Services.LockPolicies.Restore(Log);
         Log("Unlocked.");
         SetState(GuardState.Unlocked);

@@ -214,7 +214,7 @@ stamp agree.
 | Keyfile | `<drive>:\.cryptokey` (+ `.tmp` transient) |
 | Mutex | `Local\CryptoKeyGuard` |
 | Pipe | `\\.\pipe\cryptokey-ctl` |
-| Secure desktop | `WinSta0\CryptoKeyLock` |
+| Secure desktop | `WinSta0\CryptoKeyLock` (suffixed `-N` for process life when a squatter survives engage-time eviction) |
 | Run value | `HKCU\...\Run\CryptoKey` |
 | Scheduled task | `CryptoKey` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` (REG_SZ, same JSON) |

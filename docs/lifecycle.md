@@ -57,9 +57,10 @@ sequenceDiagram
     GS->>SS: Engage()
     SS->>WIN: OpenInputDesktop → _hInput (before anything switches)
     SS->>WIN: GetUserObjectInformation(_hInput, UOI_NAME)<br/>"Winlogon" → bail → classic fallback
-    SS->>WIN: CreateDesktop("CryptoKeyLock") → _hLock (kept for process life)
+    SS->>WIN: CreateDesktop("CryptoKeyLock"[-N]) → _hLock (kept for process life)
     SS->>LT: spawn · SetApartmentState(STA)
     LT->>WIN: SetThreadDesktop(_hLock) — first statement
+    LT->>LT: evict squatters: WM_CLOSE → 600 ms → kill → verify<br/>foreign survivor → _squatterResident → abandon name, retry as -N
     LT->>LT: InputLocker.Lock() → LL keyboard+mouse hooks
     LT->>LT: LockForm.Show() + mirrored state
     LT-->>SS: _ready via message queue (pump-proven, 5 s timeout)
@@ -71,8 +72,17 @@ sequenceDiagram
 
 Ordering invariants:
 
-- `_hInput` is captured **before** `CreateDesktop` and **reused** across
-  retries — it's the verified way home.
+- `_hInput` is captured **before** any switch and re-opened per attempt — a
+  squatter retry's teardown closed the stale handle, and the session is
+  still on the input desktop so a fresh open lands home. A non-zero handle
+  from a previous stranded engage is never re-opened over.
+- **Squatter eviction runs between `SetThreadDesktop` and any window/hook
+  of ours** — `CreateDesktop` reopens the same named object, so a foreign
+  process parked on it (e.g. a CAD-spawned Task Manager) persists across
+  engagements. `WM_CLOSE` → 600 ms grace → `Kill` → verify; an unkillable
+  squatter sets `_squatterResident`, the engage abandons the desktop name
+  entirely and retries once on a fresh `CryptoKeyLock-N` — clean by
+  construction — before falling back to the overlay.
 - The watchdog exists **before** `SwitchDesktop` — a crash during the
   switch is exactly what it covers.
 - `_engaged` is only set after `SwitchDesktop` succeeds — it's the
@@ -88,7 +98,7 @@ tick takes `_engageSync`, so `Disengage`'s switch-back is never misread.
 
 | Input desktop | Class | Action |
 |---|---|---|
-| `CryptoKeyLock` | healthy | none |
+| the active lock desktop (`CryptoKeyLock`, or `CryptoKeyLock-N` after a squatter-survival rename — exact match, no prefix matching) | healthy | none |
 | `Winlogon` by name, or open fails (SAS ACL-deny tell) | legit — CAD/UAC | skip, not counted; input returns on its own |
 | anything else — `Default`, attacker desktops | hostile flap | `SwitchDesktop(_hLock)` + `SecurityEvent("desktop-flap")`; ≥3 in 10s → `"desktop-flap-storm"` + `LockWorkStation` |
 

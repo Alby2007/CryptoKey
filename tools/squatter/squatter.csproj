@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- Top-level Main is already STA; declare it so WinForms never has to infer. -->
+    <DisableWinFormsOutputType>no</DisableWinFormsOutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>squatter</AssemblyName>
+  </PropertyGroup>
+
+</Project>

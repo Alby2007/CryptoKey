@@ -16,6 +16,14 @@ namespace CryptoKey;
 /// Disengage switches back FIRST, then tears the lock thread down.
 /// ReleaseInput (fail-dead, any thread) switches back and unhooks without
 /// waiting on anything.
+///
+/// Squatter eviction: CreateDesktop REOPENS the named object, so a foreign
+/// process parked on CryptoKeyLock (a CAD-spawned Task Manager) persists
+/// across engagements and would trip the intruder sentinel forever —
+/// looping the user through OS-locks. The lock thread evicts squatters
+/// before any of our windows/hooks exist (WM_CLOSE → kill → verify); an
+/// unkillable one abandons the name entirely and retries on a fresh
+/// "CryptoKeyLock-N" — definitionally clean.
 /// </summary>
 internal sealed class SecureLockSurface : ILockSurface
 {
@@ -23,7 +31,11 @@ internal sealed class SecureLockSurface : ILockSurface
     public event Action? PanicRequested;
     public event Action<string>? SecurityEvent;
 
-    private const string DesktopName = "CryptoKeyLock";
+    // The active lock desktop's name — starts at the shared base name; a
+    // surviving squatter suffixes it. Read by the flap monitor per tick.
+    private string _desktopName = FlapPolicy.LockDesktop;
+    private int _nameSuffix;
+    private volatile bool _squatterResident; // set by the lock thread's eviction pass
 
     private readonly bool _devMode;
     private readonly object _engageSync = new(); // Engage/Disengage single-flight
@@ -114,65 +126,84 @@ internal sealed class SecureLockSurface : ILockSurface
         if (_lockThread?.IsAlive == true)
             return true;
 
-        // Capture the user's input desktop BEFORE anything can switch —
-        // without this there is no guaranteed way back. Kept across retries:
-        // a non-zero handle is the verified "home" from a previous engage
-        // that never made it back — re-capturing now could grab the lock
-        // desktop itself and lose the way home.
-        if (_hInput == IntPtr.Zero)
+        // Up to two attempts: a squatter that survives the eviction pass is
+        // abandoned WITH its desktop object — a fresh-named desktop is clean
+        // by construction (the squatter stays stranded on the old object,
+        // which dies with it). Second failure falls back to the overlay.
+        for (int attempt = 1; ; attempt++)
         {
-            _hInput = NativeMethods.OpenInputDesktop(0, false,
-                NativeMethods.DESKTOP_SWITCHDESKTOP | NativeMethods.DESKTOP_READOBJECTS);
+            // Capture the user's input desktop BEFORE anything can switch —
+            // without this there is no guaranteed way back. Re-captured per
+            // attempt: a failed attempt's teardown closes the handle, and
+            // the session is still on the input desktop then (we never
+            // switched), so a fresh open lands home again.
             if (_hInput == IntPtr.Zero)
             {
-                _engageError = "OpenInputDesktop failed";
-                return false;
+                _hInput = NativeMethods.OpenInputDesktop(0, false,
+                    NativeMethods.DESKTOP_SWITCHDESKTOP | NativeMethods.DESKTOP_READOBJECTS);
+                if (_hInput == IntPtr.Zero)
+                {
+                    _engageError = "OpenInputDesktop failed";
+                    return false;
+                }
+                // The user is on the Winlogon SAS screen (Ctrl+Alt+Del) — yanking
+                // them out of it is wrong, and switching back to it later is
+                // equally wrong. Bail to the classic overlay for this lock.
+                string? deskName = GetDesktopName(_hInput);
+                if (deskName != null && deskName.Equals("Winlogon", StringComparison.OrdinalIgnoreCase))
+                {
+                    _engageError = "input desktop is Winlogon (secure attention screen up)";
+                    CloseInputHandle();
+                    return false;
+                }
             }
-            // The user is on the Winlogon SAS screen (Ctrl+Alt+Del) — yanking
-            // them out of it is wrong, and switching back to it later is
-            // equally wrong. Bail to the classic overlay for this lock.
-            string? deskName = GetDesktopName(_hInput);
-            if (deskName != null && deskName.Equals("Winlogon", StringComparison.OrdinalIgnoreCase))
-            {
-                _engageError = "input desktop is Winlogon (secure attention screen up)";
-                CloseInputHandle();
-                return false;
-            }
-        }
 
-        if (_hLock == IntPtr.Zero)
-        {
-            _hLock = NativeMethods.CreateDesktop(DesktopName, IntPtr.Zero, IntPtr.Zero,
-                0, NativeMethods.DESKTOP_ALL, IntPtr.Zero);
             if (_hLock == IntPtr.Zero)
             {
-                _engageError = "CreateDesktop failed";
-                CloseInputHandle();
+                _hLock = NativeMethods.CreateDesktop(_desktopName, IntPtr.Zero, IntPtr.Zero,
+                    0, NativeMethods.DESKTOP_ALL, IntPtr.Zero);
+                if (_hLock == IntPtr.Zero)
+                {
+                    _engageError = "CreateDesktop failed";
+                    CloseInputHandle();
+                    return false;
+                }
+            }
+
+            _squatterResident = false;
+            _ready.Reset();
+            _engageError = null;
+            _abandoned = false;
+            _lockThread = new Thread(LockThreadMain)
+            {
+                IsBackground = true,
+                Name = "CryptoKey.Lock",
+            };
+            _lockThread.SetApartmentState(ApartmentState.STA);
+            _lockThread.Start();
+
+            if (!_ready.Wait(5000))
+            {
+                _engageError ??= "lock thread timed out";
+                TearDownLockThread();
                 return false;
             }
-        }
-
-        _ready.Reset();
-        _engageError = null;
-        _abandoned = false;
-        _lockThread = new Thread(LockThreadMain)
-        {
-            IsBackground = true,
-            Name = "CryptoKey.Lock",
-        };
-        _lockThread.SetApartmentState(ApartmentState.STA);
-        _lockThread.Start();
-
-        if (!_ready.Wait(5000))
-        {
-            _engageError ??= "lock thread timed out";
-            TearDownLockThread();
-            return false;
-        }
-        if (_engageError != null)
-        {
-            TearDownLockThread();
-            return false;
+            if (_engageError != null)
+            {
+                bool occupied = _squatterResident;
+                TearDownLockThread();
+                if (occupied && attempt < 2)
+                {
+                    // Unkillable squatter — drop our handle to the shared
+                    // object and reopen under a unique name.
+                    NativeMethods.CloseDesktop(_hLock);
+                    _hLock = IntPtr.Zero;
+                    _desktopName = $"{FlapPolicy.LockDesktop}-{++_nameSuffix}";
+                    continue;
+                }
+                return false;
+            }
+            break;
         }
 
         // The watchdog must exist BEFORE the session switches — a crash
@@ -265,11 +296,24 @@ internal sealed class SecureLockSurface : ILockSurface
                         // ~3s of blindness pins at OS auth, once per streak.
                         if (_unreadable.RecordUnreadable())
                         {
-                            unreadableEvent = $"input-desktop-unreadable(err={openErr})";
-                            osLockNow = true;
+                            if (DateTime.UtcNow < _osLockCooldownUntil)
+                            {
+                                // Our own LockWorkStation put the session on
+                                // Winlogon — this streak is self-inflicted,
+                                // not an intruder. Keep counting but don't
+                                // fire; ReleaseLatch leaves it armed so a
+                                // genuinely stuck blind monitor fires on the
+                                // first tick after the cooldown.
+                                _unreadable.ReleaseLatch();
+                            }
+                            else
+                            {
+                                unreadableEvent = $"input-desktop-unreadable(err={openErr})";
+                                osLockNow = true;
+                            }
                         }
                     }
-                    if (FlapPolicy.IsHostile(name, openFailed) && _engaged)
+                    if (FlapPolicy.IsHostile(name, openFailed, _desktopName) && _engaged)
                     {
                         if (!NativeMethods.SwitchDesktop(_hLock))
                             flapEvent = $"desktop-flap(reswitch-failed err={Marshal.GetLastWin32Error()})";
@@ -358,6 +402,18 @@ internal sealed class SecureLockSurface : ILockSurface
                 _ready.Set();
                 return;
             }
+            // Evict squatters before our hooks/form exist — a foreign process
+            // parked on the shared desktop object (CAD-spawned Task Manager
+            // survives across engagements) would trip the sentinel forever.
+            // The session is still on the input desktop, so the squatter
+            // dies silently before the lock is ever visible.
+            EvictSquatters();
+            if (_squatterResident)
+            {
+                _engageError = "lock desktop occupied";
+                _ready.Set();
+                return;
+            }
             _locker = new InputLocker(_devMode);
             _locker.PassphraseSubmitted += s => PassphraseSubmitted?.Invoke(s);
             _locker.PanicRequested += () => PanicRequested?.Invoke();
@@ -416,6 +472,79 @@ internal sealed class SecureLockSurface : ILockSurface
             _form = null;
             _locker = null;
         }
+    }
+
+    /// <summary>
+    /// Engage-time eviction on the lock thread (SetThreadDesktop-bound, so
+    /// EnumWindows sees exactly this desktop): every foreign top-level
+    /// window gets a graceful WM_CLOSE, survivors' pids get killed, and if
+    /// anything foreign still remains the desktop is declared occupied —
+    /// the caller abandons the name and retries on a fresh object.
+    /// Blocking sleeps are free here: the pump isn't running and nothing of
+    /// ours exists on this desktop yet.
+    /// </summary>
+    private void EvictSquatters()
+    {
+        uint selfPid = (uint)Environment.ProcessId;
+        List<ForeignWindow> squatters = CollectForeignWindows(selfPid);
+        if (squatters.Count == 0)
+            return; // clean — the common path adds one enum to engage
+        // Graceful first — WM_CLOSE targets each of this desktop's hwnds
+        // (one process can own several top-level windows here): a pid whose
+        // only windows are here exits; one with windows elsewhere just loses
+        // the squatter windows. One event per pid — not per hwnd.
+        foreach (var grp in squatters.GroupBy(s => s.Pid))
+        {
+            foreach (ForeignWindow s in grp)
+                NativeMethods.PostMessage(s.Hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            string? name = grp.First().Name;
+            SecurityEvent?.Invoke($"desktop-eviction-close:{name ?? $"pid={grp.Key}"}");
+        }
+        Thread.Sleep(600); // close grace — pump isn't up, blocking is free
+
+        List<ForeignWindow> survivors = CollectForeignWindows(selfPid);
+        if (survivors.Count == 0)
+            return;
+        // Ignored a graceful close on a private desktop — kill the pids.
+        // ACCESS_DENIED on protected/elevated is expected, not an error.
+        foreach (uint pid in survivors.Select(s => s.Pid).Distinct())
+        {
+            string? name = survivors.FirstOrDefault(s => s.Pid == pid)?.Name;
+            try { Process.GetProcessById((int)pid).Kill(); } catch (Exception) { }
+            SecurityEvent?.Invoke($"desktop-eviction-kill:{name ?? $"pid={pid}"}");
+        }
+        Thread.Sleep(300);
+
+        if (CollectForeignWindows(selfPid).Count > 0)
+            _squatterResident = true; // unkillable — caller renames the desktop
+    }
+
+    /// <summary>A foreign top-level window on the lock desktop.</summary>
+    private sealed record ForeignWindow(IntPtr Hwnd, uint Pid, string? Name);
+
+    /// <summary>All non-benign top-level windows here (our pid excluded).</summary>
+    private static List<ForeignWindow> CollectForeignWindows(uint selfPid)
+    {
+        var found = new List<ForeignWindow>();
+        try
+        {
+            NativeMethods.EnumWindows((h, _) =>
+            {
+                NativeMethods.GetWindowThreadProcessId(h, out uint pid);
+                if (pid == 0 || pid == selfPid)
+                    return true;
+                string? name;
+                try { name = Process.GetProcessById((int)pid).ProcessName; }
+                catch { name = null; } // protected/system or died mid-scan
+                if (FlapPolicy.ClassifyForeignWindow(
+                        NativeMethods.IsWindowVisible(h), name)
+                    != FlapPolicy.ForeignWindowVerdict.Benign)
+                    found.Add(new ForeignWindow(h, pid, name));
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch (Exception) { }
+        return found;
     }
 
     /// <summary>

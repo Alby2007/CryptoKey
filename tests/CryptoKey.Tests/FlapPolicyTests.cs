@@ -6,27 +6,52 @@ public class FlapPolicyTests
 {
     [Fact]
     public void Own_lock_desktop_is_healthy()
-        => Assert.False(FlapPolicy.IsHostile("CryptoKeyLock", openFailed: false));
+        => Assert.False(FlapPolicy.IsHostile("CryptoKeyLock", openFailed: false, "CryptoKeyLock"));
 
     [Fact]
     public void Winlogon_is_legit_sas_not_a_flap()
-        => Assert.False(FlapPolicy.IsHostile("Winlogon", openFailed: false));
+        => Assert.False(FlapPolicy.IsHostile("Winlogon", openFailed: false, "CryptoKeyLock"));
 
     [Fact]
     public void Failed_open_is_the_sas_acl_tell_not_a_flap()
-        => Assert.False(FlapPolicy.IsHostile(null, openFailed: true));
+        => Assert.False(FlapPolicy.IsHostile(null, openFailed: true, "CryptoKeyLock"));
 
     [Fact]
     public void Default_desktop_is_hostile()
-        => Assert.True(FlapPolicy.IsHostile("Default", openFailed: false));
+        => Assert.True(FlapPolicy.IsHostile("Default", openFailed: false, "CryptoKeyLock"));
 
     [Fact]
     public void Attacker_created_desktop_is_hostile()
-        => Assert.True(FlapPolicy.IsHostile("pwned", openFailed: false));
+        => Assert.True(FlapPolicy.IsHostile("pwned", openFailed: false, "CryptoKeyLock"));
 
     [Fact]
     public void Unnameable_open_desktop_is_hostile()
-        => Assert.True(FlapPolicy.IsHostile(null, openFailed: false));
+        => Assert.True(FlapPolicy.IsHostile(null, openFailed: false, "CryptoKeyLock"));
+
+    // ---- Suffixed lock-desktop names (squatter retry) ----
+
+    [Fact]
+    public void Active_suffixed_name_is_healthy()
+        // Retry on CryptoKeyLock-N must not trip the monitor on its own name.
+        => Assert.False(FlapPolicy.IsHostile("CryptoKeyLock-1", openFailed: false, "CryptoKeyLock-1"));
+
+    [Fact]
+    public void Suffixed_name_is_case_insensitive_like_the_base()
+        => Assert.False(FlapPolicy.IsHostile("cryptokeylock-2", openFailed: false, "CryptoKeyLock-2"));
+
+    [Fact]
+    public void Lookalike_name_still_reads_hostile()
+        // Exact match only — a hostile CryptoKeyLock-evil must not whitelist.
+        => Assert.True(FlapPolicy.IsHostile("CryptoKeyLock-evil", openFailed: false, "CryptoKeyLock"));
+
+    [Fact]
+    public void Non_active_suffixed_name_reads_hostile()
+        // An abandoned squatter desktop becoming input is a flap, not home.
+        => Assert.True(FlapPolicy.IsHostile("CryptoKeyLock-1", openFailed: false, "CryptoKeyLock"));
+
+    [Fact]
+    public void Base_name_reads_hostile_once_we_renamed()
+        => Assert.True(FlapPolicy.IsHostile("CryptoKeyLock", openFailed: false, "CryptoKeyLock-1"));
 
     [Fact]
     public void Two_flaps_is_not_a_storm()
@@ -167,6 +192,19 @@ public class FlapPolicyTests
         for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock - 1; i++)
             Assert.False(s.RecordUnreadable());
         Assert.True(s.RecordUnreadable());           // a new streak can fire again
+    }
+
+    [Fact]
+    public void Released_latch_refires_on_the_next_unreadable_tick()
+    {
+        // The flap monitor suppresses firing while its own OS-lock holds the
+        // session on Winlogon — ReleaseLatch keeps the streak armed so the
+        // first unreadable tick after the cooldown still escalates.
+        var s = new UnreadableStreak();
+        for (int i = 0; i < FlapPolicy.UnreadableTicksBeforeLock; i++)
+            s.RecordUnreadable();                    // fired + latched
+        s.ReleaseLatch();                            // suppressed — stay armed
+        Assert.True(s.RecordUnreadable());           // tick 11 refires
     }
 
     // ---- Supervisor-death fail-closed gate ----

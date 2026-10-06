@@ -14,16 +14,22 @@ namespace CryptoKey;
 /// </summary>
 internal static class FlapPolicy
 {
-    /// <summary>Matches <see cref="SecureLockSurface"/>'s private desktop.</summary>
+    /// <summary>
+    /// Base name of <see cref="SecureLockSurface"/>'s private desktop — the
+    /// surface may suffix it (-1, -2…) when a squatter survives eviction on
+    /// the shared object, so callers always pass the *active* name.
+    /// </summary>
     internal const string LockDesktop = "CryptoKeyLock";
 
-    public static bool IsHostile(string? desktopName, bool openFailed)
+    /// <param name="lockDesktopName">The active lock desktop's exact name —
+    /// exact match only; a hostile "CryptoKeyLock-evil" must not whitelist.</param>
+    public static bool IsHostile(string? desktopName, bool openFailed, string lockDesktopName)
     {
         if (openFailed)
             return false; // Winlogon ACL-deny — the SAS tell
         if (desktopName == null)
             return true; // a readable desktop we can't name is still foreign
-        return !desktopName.Equals(LockDesktop, StringComparison.OrdinalIgnoreCase)
+        return !desktopName.Equals(lockDesktopName, StringComparison.OrdinalIgnoreCase)
             && !desktopName.Equals("Winlogon", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -99,6 +105,13 @@ public sealed class UnreadableStreak
         _latched = true;
         return true;
     }
+
+    /// <summary>
+    /// The caller chose not to act on the firing (e.g. our own OS-lock is
+    /// the reason the desktop is unreadable) — un-latch so the next
+    /// unreadable tick re-fires instead of the streak staying silent.
+    /// </summary>
+    public void ReleaseLatch() => _latched = false;
 
     /// <summary>A readable tick re-arms the streak.</summary>
     public void Reset()

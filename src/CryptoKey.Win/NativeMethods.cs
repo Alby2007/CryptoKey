@@ -278,6 +278,14 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool IsWindowVisible(IntPtr hWnd);
 
+    // Squatter eviction — graceful close before Process.Kill.
+
+    internal const uint WM_CLOSE = 0x0010;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
     internal const int UOI_NAME = 2;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
