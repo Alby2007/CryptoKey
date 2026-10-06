@@ -455,9 +455,41 @@ internal sealed class AuthService
 
             if (!resp.IsSuccessStatusCode)
             {
-                NoteFailure();
                 string? msg = root.ValueKind == JsonValueKind.Object
                     ? ErrorMessage(root) : null;
+                bool unconfirmed =
+                    root.ValueKind == JsonValueKind.Object
+                    && (root.TryGetProperty("error_code", out JsonElement ec)
+                            && ec.GetString() == "email_not_confirmed"
+                        || msg?.Contains("not confirmed",
+                            StringComparison.OrdinalIgnoreCase) == true);
+                if (unconfirmed)
+                {
+                    // GoTrue checks the password BEFORE the confirm gate —
+                    // this response proves the credentials are right; it
+                    // just withheld the session. Bind the verifier locally
+                    // and unlock (no tokens — a real session lands on the
+                    // first post-confirmation sign-in).
+                    NoteSuccess();
+                    lock (_sync)
+                    {
+                        _record = AccountRecord.Create(
+                            _record?.UserId ?? "unknown",
+                            email.Trim(), password);
+                        _unlocked = true;
+                        try { PersistLocked(); }
+                        catch (Exception ex)
+                        {
+                            return AuthResult.Fail(
+                                $"account record save failed: {ex.Message}");
+                        }
+                    }
+                    return new AuthResult(true,
+                        "Signed in — email isn't verified yet, so this session " +
+                        "runs on the local verifier until you confirm it.",
+                        Offline: true);
+                }
+                NoteFailure();
                 return AuthResult.Fail(
                     $"Sign-in failed ({(int)resp.StatusCode}): {msg ?? resp.ReasonPhrase}");
             }

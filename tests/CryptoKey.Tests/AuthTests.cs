@@ -294,6 +294,30 @@ public class AuthTests : IDisposable
     }
 
     [Fact]
+    public async Task Unverified_email_signin_binds_the_verifier_locally()
+    {
+        // email_not_confirmed only fires after GoTrue checked the password —
+        // it's proof of credentials with a withheld session, not a failure.
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.BadRequest,
+            """{"error_code":"email_not_confirmed","msg":"Email not confirmed"}""");
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+
+        AuthResult r = await auth.SignIn("a@b.c", "pw-123456");
+        Assert.True(r.Ok, r.Error);
+        Assert.True(r.Offline);
+        Assert.True(auth.Authorized);
+        Assert.Equal(AuthGateState.OfflineUnlocked, auth.State);
+
+        // The record it wrote verifies the same password — and a later
+        // confirmed sign-in upgrades it to a real session.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.Equal(AuthGateState.Online, auth.State);
+    }
+
+    [Fact]
     public async Task Offline_unlock_before_any_signin_is_refused()
     {
         var auth = new AuthService(Cfg, new ScriptHandler());

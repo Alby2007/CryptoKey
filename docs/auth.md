@@ -41,6 +41,10 @@ rest of the session.
   entropy-tagged so a session blob can't be swapped for a keyfile blob)
   and rewrites the **local verifier**: a PBKDF2-SHA256(password, salt,
   600,000) record inside `config.json` — never the password itself.
+  An `email_not_confirmed` rejection is the one failure still treated as
+  success: GoTrue checks the password before the confirm gate, so that
+  response proves the credentials — the session then runs verifier-only
+  (offline-equivalent) until the first confirmed sign-in lands tokens.
 - **Refresh** (`/token?grant_type=refresh_token`) — the engine's slow tick
   renews tokens inside 10 minutes of expiry; a rejected refresh ends the
   session, a network failure keeps it (grace).
