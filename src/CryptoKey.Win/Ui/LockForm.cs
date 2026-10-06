@@ -188,15 +188,11 @@ internal sealed class LockForm : Form
     private void PaintSecondary(Graphics g)
     {
         float cx = Width / 2f, cy = Height / 2f;
-        float r = 34f + MathF.Sin(_phase) * 2f;
-        Theme.DrawGlow(g, cx, cy, r, Theme.WithAlpha(Theme.AccentRed, 60), 4);
-        using var pen = new Pen(Theme.AccentRed, 4f);
-        g.DrawEllipse(pen, cx - r, cy - r, r * 2, r * 2);
-        Theme.DrawIcon(g, Glyphs.Lock, 26f, Theme.AccentRed,
-            new RectangleF(cx - r, cy - r, r * 2, r * 2));
+        KeyArtRenderer.Draw(g, new RectangleF(cx - 110f, cy - 64f, 220f, 96f),
+            eject: 1.0, Theme.AccentRed, _phase);
         using var brush = new SolidBrush(Theme.WithAlpha(Theme.TextDim, 180));
         g.DrawString("CRYPTOKEY", BrandFont, brush,
-            new RectangleF(0, cy + r + 14f, Width, 26f), Center);
+            new RectangleF(0, cy + 52f, Width, 26f), Center);
     }
 
     private void PaintPrimary(Graphics g)
@@ -227,15 +223,10 @@ internal sealed class LockForm : Form
             g.DrawString(DateTime.Now.ToString("dddd, MMMM d"), DateFont, brush,
                 new RectangleF(card.X, y + 44f, card.Width, 20f), Center);
 
-        // Padlock ring — breathing.
-        float ringR = 46f + MathF.Sin(_phase) * 2.5f;
-        float ringY = card.Y + 158f;
-        Theme.DrawGlow(g, cx, ringY, ringR,
-            Theme.WithAlpha(Theme.AccentRed, (int)(80 + MathF.Sin(_phase) * 30 + 30)));
-        using (var ringPen = new Pen(Theme.AccentRed, 5f))
-            g.DrawEllipse(ringPen, cx - ringR, ringY - ringR, ringR * 2, ringR * 2);
-        Theme.DrawIcon(g, Glyphs.Lock, 34f, Theme.AccentRed,
-            new RectangleF(cx - ringR, ringY - ringR, ringR * 2, ringR * 2));
+        // The signature element: the key ejected from its port, ring and
+        // LED breathing in the locked color.
+        KeyArtRenderer.Draw(g, new RectangleF(cx - 140f, card.Y + 88f, 280f, 122f),
+            eject: 1.0, Theme.AccentRed, _phase);
 
         // Title + status.
         using (var brush = new SolidBrush(Theme.Text))

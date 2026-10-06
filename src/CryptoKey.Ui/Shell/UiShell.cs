@@ -52,7 +52,7 @@ internal sealed class UiShell : IDisposable
             }));
         }
         _resumeItem = Item("Resume", () => _client.Resume());
-        var settings = Item("Settings…", () => OpenWindow(Route.Protection));
+        var settings = Item("Settings…", () => OpenWindow(Route.General));
         _quitItem = Item("Quit CryptoKey", Quit);
 
         var menu = new NativeMenu();

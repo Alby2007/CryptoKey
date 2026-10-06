@@ -137,7 +137,11 @@ internal sealed class LockWindowCtl
         }
     }
 
-    public void SetAnimations(bool enabled) => _animations = enabled;
+    public void SetAnimations(bool enabled)
+    {
+        _animations = enabled;
+        Ui.Motion.SetSetting(enabled);
+    }
 
     private void FrozenTick(object? sender, EventArgs e)
     {

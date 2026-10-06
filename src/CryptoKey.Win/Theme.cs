@@ -5,20 +5,25 @@ namespace CryptoKey;
 /// <summary>Shared palette, fonts, and paint helpers for the whole app.</summary>
 internal static class Theme
 {
-    public static readonly Color Bg          = Color.FromArgb(0x0A, 0x0E, 0x14);
-    public static readonly Color BgDeep      = Color.FromArgb(0x06, 0x09, 0x0E);
-    public static readonly Color Panel       = Color.FromArgb(0x12, 0x18, 0x21); // legacy alias
-    public static readonly Color Surface     = Color.FromArgb(0x12, 0x18, 0x21);
-    public static readonly Color SurfaceHigh = Color.FromArgb(0x1A, 0x22, 0x30);
-    public static readonly Color Border      = Color.FromArgb(0x26, 0x2E, 0x3B);
-    public static readonly Color Text        = Color.FromArgb(0xE8, 0xED, 0xF5);
-    public static readonly Color TextDim     = Color.FromArgb(0x93, 0xA1, 0xB5);
-    public static readonly Color AccentRed   = Color.FromArgb(0xFF, 0x3B, 0x4E);
-    public static readonly Color AccentGreen = Color.FromArgb(0x00, 0xE6, 0x76);
-    public static readonly Color AccentAmber = Color.FromArgb(0xFF, 0xB0, 0x20);
+    // Palette resolves from DesignTokens — the same source the Avalonia
+    // front end uses, so GDI surfaces stay in lockstep with the app.
+    private static Color C(uint argb) => Color.FromArgb(
+        DesignTokens.A(argb), DesignTokens.R(argb), DesignTokens.G(argb), DesignTokens.B(argb));
 
-    /// <summary>Interactive accent — follows the user's Windows accent color.</summary>
-    public static readonly Color Accent = LoadSystemAccent();
+    public static readonly Color Bg          = C(DesignTokens.Carbon);
+    public static readonly Color BgDeep      = C(DesignTokens.CarbonDeep);
+    public static readonly Color Panel       = C(DesignTokens.Surface); // legacy alias
+    public static readonly Color Surface     = C(DesignTokens.Surface);
+    public static readonly Color SurfaceHigh = C(DesignTokens.RaisedHigh);
+    public static readonly Color Border      = C(DesignTokens.Hairline);
+    public static readonly Color Text        = C(DesignTokens.Text);
+    public static readonly Color TextDim     = C(DesignTokens.TextDim);
+    public static readonly Color AccentRed   = C(DesignTokens.Locked);
+    public static readonly Color AccentGreen = C(DesignTokens.Armed);
+    public static readonly Color AccentAmber = C(DesignTokens.Paused);
+
+    /// <summary>Interactive accent — the brand signal cyan.</summary>
+    public static readonly Color Accent = C(DesignTokens.Signal);
 
     public const int Radius = 10;
     public const int RadiusSmall = 6;
@@ -46,22 +51,7 @@ internal static class Theme
         catch (Exception) { return null; }
     }
 
-    private static Color LoadSystemAccent()
-    {
-        try
-        {
-            object? v = Microsoft.Win32.Registry.GetValue(
-                @"HKEY_CURRENT_USER\Software\Microsoft\Windows\DWM", "AccentColor", null);
-            if (v is int dword)
-            {
-                // Registry stores AABBGGRR; Color.FromArgb wants R,G,B bytes.
-                return Color.FromArgb(255,
-                    dword & 0xFF, (dword >> 8) & 0xFF, (dword >> 16) & 0xFF);
-            }
-        }
-        catch (Exception) { }
-        return Color.FromArgb(0x4C, 0xC2, 0xFF);
-    }
+
 
     // ---- Paint helpers ----
 

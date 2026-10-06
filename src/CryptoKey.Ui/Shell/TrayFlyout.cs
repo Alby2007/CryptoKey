@@ -78,7 +78,7 @@ internal sealed class TrayFlyout : Window
         var settings = new Button { Classes = { "ghost", "small" }, Content = new Icon(IconData.Settings, 16) };
         ToolTip.SetTip(settings, "Settings");
         Kit.AutomationName(settings, "Settings");
-        settings.Click += (_, _) => { Hide(); open(Route.Protection); };
+        settings.Click += (_, _) => { Hide(); open(Route.General); };
         Grid.SetColumn(settings, 1);
         footer.Children.Add(settings);
         var quitBtn = new Button { Classes = { "ghost", "small" }, Content = new Icon(IconData.Quit, 16) };

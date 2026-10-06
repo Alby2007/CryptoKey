@@ -13,6 +13,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="CryptoKey.Tests" />
     <ProjectReference Include="..\CryptoKey.Core\CryptoKey.Core.csproj" />
+    <ProjectReference Include="..\CryptoKey.Ui\CryptoKey.Ui.csproj" />
   </ItemGroup>
 
   <ItemGroup>
