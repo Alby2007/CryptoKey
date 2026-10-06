@@ -229,6 +229,7 @@ internal sealed class VaultPage : Page
             Kit.SetLabel(_mount, v.MountText, f.State == VaultState.Mounted ? IconData.Pause : IconData.Play);
             _open.IsEnabled = v.OpenEnabled;
             Kit.SetLabel(_open, v.OpenEnabled ? $"Open {f.MountPoint}" : "Open in file manager", IconData.Folder);
+            _close.IsEnabled = v.CloseEnabled;
 
             _autoMount.IsChecked = f.AutoMount;
             _autoMount.IsEnabled = v.AutoMountEnabled;
@@ -280,6 +281,13 @@ internal sealed class VaultPage : Page
     private async void CreateVault()
     {
         int size = (int)_size.Value;
+        // No mount driver → the vault can't become usable — fail before an
+        // image is created, not after (the banner shows the same gap).
+        if (_facts?.DriverPresent == false)
+        {
+            Report($"Create failed — {_facts.DriverHint ?? "the Dokany driver isn't installed, so the vault couldn't mount anyway"}");
+            return;
+        }
         _create.IsEnabled = false;
         // Enabling is part of create: the service only consumes the verified
         // secret once VaultEnabled is on, so arm it and give the next poll a
@@ -297,6 +305,9 @@ internal sealed class VaultPage : Page
         }
         string? err = await Client.Query<string?>((s, cfg) =>
         {
+            // Re-check at engine time — the facts snapshot may be stale.
+            if (!s.Vault.DriverPresent)
+                return s.Vault.DriverHint ?? "the Dokany driver isn't installed — the vault can't mount without it";
             if (!s.Vault.TryCreate(size, out string e))
                 return e;
             cfg.Guard.VaultSizeMb = size;
@@ -318,6 +329,8 @@ internal sealed class VaultPage : Page
                 v.TryUnmount(out string _);
                 return null;
             }
+            if (v.State == VaultState.Sealed)
+                return v.TryUnseal(out string ue) ? null : ue; // explicit reopen — lifts the user-seal
             return v.TryMount(out string e) ? null : e;
         });
         Report(err);
@@ -333,9 +346,11 @@ internal sealed class VaultPage : Page
 
     private async void CloseVault()
     {
-        // Dismount only — the volume stays unsealed (volKey in memory) for an
-        // instant remount; pulling the key drops it for real.
-        await Client.Run((s, _) => s.Vault.TryUnmount(out string _));
+        // A real close: dismount AND drop the volume key — sealed. The latch
+        // holds for the session, so auto-open can't resurrect it on the next
+        // verify tick; Unseal (or a key pull/reinsert) brings it back.
+        string? err = await Client.Query<string?>((s, _) => s.Vault.TrySeal(out string e) ? null : e);
+        Report(err, "Vault closed — Unseal or reinsert the key to reopen.");
         Refresh();
     }
 

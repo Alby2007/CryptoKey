@@ -519,6 +519,114 @@ public class VaultTests : IDisposable
     }
 
     [Fact]
+    public void User_seal_holds_against_generation_edge()
+    {
+        // A user-initiated Close must not be resurrected by the next feed:
+        // a fresh-generation verify would otherwise reopen the sealed image
+        // immediately (no throttle on that path).
+        string path = Img();
+        KeyConfig c = VaultConfig(path);
+        var mounter = new TestMounter();
+        using var vault = new VaultService(c, mounter, _ => { });
+
+        vault.KeyVerified(TestDisk.RandomSecret(), 1);
+        Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+
+        Assert.True(vault.TrySeal(out string serr), serr);
+        Assert.Equal(VaultState.Sealed, vault.State);
+
+        vault.KeyVerified(TestDisk.RandomSecret(), 2); // rotation edge
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Sealed, vault.State); // held — not reopened
+    }
+
+    [Fact]
+    public void User_seal_holds_against_same_gen_reverify()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+
+        Assert.True(vault.TrySeal(out _));
+        vault.KeyVerified(secret.ToArray(), 1); // same-gen poll re-verify
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Sealed, vault.State);
+        Assert.True(vault.SecretHeld); // secret stays held — Unseal can use it
+    }
+
+    [Fact]
+    public void TryUnseal_reopens_a_user_sealed_vault()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+
+        Assert.True(vault.TrySeal(out _));
+        Assert.Equal(VaultState.Sealed, vault.State);
+
+        Assert.True(vault.TryUnseal(out string uerr), uerr);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State); // reopened + auto-mounted
+    }
+
+    [Fact]
+    public void KeyGone_lifts_the_user_seal()
+    {
+        // The seal holds for the session — a key pull is the session edge.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+
+        Assert.True(vault.TrySeal(out _));
+        vault.KeyGone();
+        Assert.Equal(VaultState.Sealed, vault.State);
+
+        vault.KeyVerified(secret.ToArray(), 1); // key back — auto-open resumes
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+    }
+
+    [Fact]
+    public void User_seal_works_from_needs_driver()
+    {
+        // The reported bug: create without Dokany lands on NeedsDriver and
+        // "Close vault" was a silent no-op. TrySeal must actually seal it.
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new NoDriverMounter(), _ => { });
+
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out _));
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.NeedsDriver, vault.State);
+
+        Assert.True(vault.TrySeal(out string serr), serr);
+        Assert.Equal(VaultState.Sealed, vault.State);
+
+        vault.KeyVerified(TestDisk.RandomSecret(), 2); // stays sealed on re-verify
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Sealed, vault.State);
+    }
+
+    [Fact]
     public void Rotation_slide_keeps_both_generations_openable()
     {
         string path = Img();

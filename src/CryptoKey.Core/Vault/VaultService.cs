@@ -65,6 +65,7 @@ internal sealed class VaultService : IDisposable
     private int _unmountSeq;           // bumped on TryUnmount — a mount issued before it drops
     private Task? _pendingOps;         // in-flight unseal/auto-mount chain (for CLI/test waits)
     private long _lastOpenAttempt;     // TickCount64 — paces the transient-failure retry
+    private bool _sealedByUser;        // TrySeal latched — auto-open suppressed until session edge
 
     /// <summary>Raised (on the caller's thread) whenever <see cref="State"/> changes.</summary>
     public event Action? StatusChanged;
@@ -163,12 +164,14 @@ internal sealed class VaultService : IDisposable
             bool retryOpen = false;
             if (_secretGen == gen && _secret != null)
             {
-                // Same secret re-verifying — normally a no-op (a manual
-                // Close-vault must hold for the rest of the session).
+                // Same secret re-verifying — normally a no-op. A manual
+                // Close-vault holds for the rest of the session — the
+                // _sealedByUser latch keeps both open paths suppressed.
                 // Exception: a Sealed/Corrupt state may be a transient read
                 // failure — retry throttled so a real dead-seal isn't
                 // re-read every poll.
-                retryOpen = _vol == null && ImageExists
+                retryOpen = !_sealedByUser
+                    && _vol == null && ImageExists
                     && _state is VaultState.Sealed or VaultState.Corrupt
                         or VaultState.TpmLocked
                     && (_pendingOps?.IsCompleted ?? true)
@@ -202,13 +205,16 @@ internal sealed class VaultService : IDisposable
             {
                 SetState(VaultState.NoImage);
             }
-            else if (_vol == null && ImageExists && _state != VaultState.RolledBack)
+            else if (_vol == null && ImageExists && _state != VaultState.RolledBack
+                     && !_sealedByUser)
             {
                 // Sealed image — unwrap under the verified secret. The heavy
                 // part (two 4 MiB manifest slots + JSON) runs off the
                 // caller's thread so the guard's UI pump doesn't stall.
                 // RolledBack is excluded: a detected rollback holds until the
                 // user accepts it — no paced-retry flap while awaiting that.
+                // A user-sealed image waits too — only an explicit open or
+                // a fresh key session lifts that latch.
                 if (!QueueOpenLocked(held, prevHeld, seq))
                 {
                     if (!retryOpen)
@@ -629,6 +635,7 @@ internal sealed class VaultService : IDisposable
             _pepper?.Dispose();     // machine pepper dies with the session too
             _pepper = null;
             NeedsRebind = false;
+            _sealedByUser = false; // the user-seal holds for the session only
             if (_state == VaultState.Disabled)
                 return;
             SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
@@ -658,6 +665,7 @@ internal sealed class VaultService : IDisposable
             ++_opSeq; // any pending open against a prior image is stale now
             _pepper?.Dispose(); // a fresh image is never bound — stale pepper out
             _pepper = null;
+            _sealedByUser = false; // the seal intent dies with the old image
             try
             {
                 _vol = VaultVolume.Create(ImagePath, sizeMb, _secret.Bytes, _secretGen);
@@ -693,6 +701,7 @@ internal sealed class VaultService : IDisposable
             ++_opSeq;
             _pepper?.Dispose(); // same: the new image starts unbound
             _pepper = null;
+            _sealedByUser = false; // reformatted image — the old seal is moot
             try
             {
                 if (File.Exists(ImagePath))
@@ -791,6 +800,76 @@ internal sealed class VaultService : IDisposable
     }
 
     /// <summary>
+    /// User-initiated close: dismount AND drop the volume key — a real seal,
+    /// not just an unmount. The latch holds for the rest of the session:
+    /// same-secret re-verifies and generation edges both stay suppressed
+    /// until a key event (<see cref="KeyGone"/>) or an explicit open
+    /// (<see cref="TryUnseal"/>). Otherwise the auto-open path would
+    /// resurrect the image on the next verify tick and "Close" would
+    /// appear to do nothing.
+    /// </summary>
+    public bool TrySeal(out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_state == VaultState.Disabled)
+            {
+                error = "vault is disabled";
+                return false;
+            }
+            _unmountSeq++; // fence an in-flight auto-mount, as TryUnmount does
+            ++_opSeq;      // and a pending open's commit drops
+            DismountLocked();
+            CloseVolumeLocked();
+            // CloseVolumeLocked drops the pepper only with a live volume —
+            // a phrase-held pepper outlives _vol == null; clear it here too.
+            _pepper?.Dispose();
+            _pepper = null;
+            _sealedByUser = true;
+            SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
+            _log("Vault closed — sealed until the next key event or an explicit open.");
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Explicit reopen of a sealed image under the held secret — the
+    /// inverse of <see cref="TrySeal"/>; also clears the user-seal latch
+    /// so ordinary auto-open semantics resume from here.
+    /// </summary>
+    public bool TryUnseal(out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_vol != null)
+            {
+                error = "already unsealed";
+                return false;
+            }
+            if (!ImageExists)
+            {
+                error = "no vault image";
+                return false;
+            }
+            if (_secret == null)
+            {
+                error = "vault is sealed — insert your key";
+                return false;
+            }
+            _sealedByUser = false;
+            if (!QueueOpenLocked(_secret, _prevSecret, ++_opSeq))
+            {
+                error = "reopen failed — see the log";
+                return false;
+            }
+            _log("Vault unsealing on request.");
+            return true;
+        }
+    }
+
+    /// <summary>
     /// The user accepted a rolled-back image: ratchet the attested epoch
     /// DOWN to the image's seq (the only downward move — user-gated), then
     /// re-open under the held secret. Requires the verified key in memory.
@@ -822,6 +901,7 @@ internal sealed class VaultService : IDisposable
             }
             _configMutated?.Invoke();
             _rejectedSeq = 0;
+            _sealedByUser = false; // an explicit accept lifts the user-seal
             SetState(VaultState.Sealed);
             // Re-open now — the seq-compare passes, so the image adopts and
             // auto-mount resumes. A failed peek lands on the normal
@@ -1052,6 +1132,7 @@ internal sealed class VaultService : IDisposable
             CryptographicOperations.ZeroMemory(pepper);
             // The pepper is now held — the queued open skips the TPM call.
             NeedsRebind = true;
+            _sealedByUser = false; // an explicit unlock lifts the user-seal
             SetState(VaultState.Sealed); // honest mid-state; the open lands next
             QueueOpenLocked(_secret, _prevSecret, _opSeq);
             _log("Vault unlocked via recovery phrase — re-bind to this " +

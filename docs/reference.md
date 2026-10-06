@@ -17,6 +17,7 @@ cryptokey vault create [mb]      # create the encrypted image (IPC when a guard 
 cryptokey vault status           # image state, key-slot generations, driver presence
 cryptokey vault mount            # IPC: mount now (guard running); standalone: foreground mount, Enter dismounts
 cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
+cryptokey vault seal / unseal    # IPC: close the vault (drop the volume key — holds for the session) / reopen it
 cryptokey vault delete           # delete the image entirely (IPC when a guard runs; destructive)
 cryptokey vault accept-rollback  # ratify a vault image that reads older than the attested epoch
 cryptokey vault tpm-bind [--strict]  # bind the image to this machine's TPM (prompts for the recovery phrase)
@@ -84,6 +85,7 @@ read timeout ~5 s.
 | `vault tpm-unbind` | `ok vault unbound` / `err …` | Re-wraps slots pepperless + deletes the TPM key |
 | `vault recover <phrase>` | `ok vault unlocked via recovery phrase` / `err …` | Opens a `tpmlocked` vault via the sealed recovery blob |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
+| `vault seal` / `vault unseal` | `ok vault sealed` / `ok vault unsealing` / `err …` | Seal dismounts AND drops the volume key — auto-open stays suppressed until a key event or `unseal` |
 | `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |

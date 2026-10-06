@@ -163,6 +163,13 @@ two consecutive rotations, or a rotation while no verified session holds
 either secret — is sealed **permanently** — the volume key exists nowhere
 else, by design.
 
+A manual **Close vault** is a real seal, not just a dismount: the service
+drops the volume key and latches auto-open off for the rest of the
+session — rotation edges and same-secret re-verifies stay suppressed until
+the key leaves the session (`KeyGone`) or an explicit Unseal asks for it
+back. The window rules still apply: a vault user-sealed through two
+rotations is permanently sealed, same as a key-absent one.
+
 Independently of the key window, `VaultEpoch` rides inside the attestation
 canon as the vault's monotonic witness: the service checkpoints the
 manifest seq at every open/close/reformat boundary, so an image swapped

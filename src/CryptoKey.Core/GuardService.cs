@@ -659,7 +659,7 @@ internal sealed class GuardService : IDisposable
     private string DispatchVault(string[] parts)
     {
         if (parts.Length < 2)
-            return "err usage: vault status|mount|unmount|create [mb]";
+            return "err usage: vault status|mount|unmount|seal|unseal|create [mb]";
         switch (parts[1].ToLowerInvariant())
         {
             case "status":
@@ -686,6 +686,14 @@ internal sealed class GuardService : IDisposable
                 if (_vault.State is not (VaultState.Mounted or VaultState.Unsealed))
                     return "err not mounted";
                 return _vault.TryUnmount(out _) ? "ok unmounted" : "err unmount failed";
+            case "seal":
+            case "close":
+                // Dismount AND drop the volume key — holds for the session.
+                return _vault.TrySeal(out string sErr)
+                    ? "ok vault sealed" : $"err {sErr}";
+            case "unseal":
+                return _vault.TryUnseal(out string unErr)
+                    ? "ok vault unsealing" : $"err {unErr}";
             case "create":
                 int mb = parts.Length > 2 && int.TryParse(parts[2], out int m)
                     ? m : _config.Guard.VaultSizeMb;

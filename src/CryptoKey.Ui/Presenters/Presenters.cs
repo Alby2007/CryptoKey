@@ -201,6 +201,7 @@ internal sealed record VaultView(
     bool MountEnabled,
     bool MountIsAcceptRollback,
     bool OpenEnabled,
+    bool CloseEnabled,
     bool ShowUsage,
     double UsageFraction,
     string UsageText,
@@ -291,8 +292,12 @@ internal static class VaultPresenter
         else
         {
             (badge, tone, title, detail) = ("SEALED", Tone.Neutral, "Sealed",
-                "Insert your key to unlock the vault.");
+                f.KeyVerified
+                    ? "Closed for this session — Unseal to reopen it, or " +
+                      "pull and reinsert the key."
+                    : "Insert your key to unlock the vault.");
             actions = true;
+            mountVisible = f.KeyVerified; // "Unseal" — reopen under the held secret
         }
 
         bool mounted = f.State == VaultState.Mounted;
@@ -308,6 +313,7 @@ internal static class VaultPresenter
         {
             VaultState.Mounted => "Dismount",
             VaultState.RolledBack => "Accept rolled-back state",
+            VaultState.Sealed => "Unseal",
             _ => "Mount",
         };
 
@@ -361,13 +367,19 @@ internal static class VaultPresenter
             MountVisible: mountVisible,
             MountText: mountText,
             MountEnabled: f.State is VaultState.Unsealed or VaultState.Mounted
-                or VaultState.NeedsDriver or VaultState.RolledBack,
+                or VaultState.NeedsDriver or VaultState.RolledBack
+                || (f.State == VaultState.Sealed && f.KeyVerified),
             MountIsAcceptRollback: f.State == VaultState.RolledBack,
             OpenEnabled: mounted,
+            // Something open to close — a user-seal on Sealed would be a no-op.
+            CloseEnabled: f.State is VaultState.Unsealed or VaultState.Mounted
+                or VaultState.NeedsDriver,
             ShowUsage: mounted,
             UsageFraction: frac,
             UsageText: usageText,
-            DriverNote: !f.DriverPresent && f.ImageExists ? f.DriverHint ?? "Dokany driver missing" : null,
+            // Warn before create too — a first-timer with no image must see
+            // the driver gap before clicking Create, not after.
+            DriverNote: !f.DriverPresent ? f.DriverHint ?? "Dokany driver missing" : null,
             ReformatEnabled: f.KeyVerified,
             DeleteEnabled: f.ImageExists,
             AutoMountEnabled: f.Enabled,
