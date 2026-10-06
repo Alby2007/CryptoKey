@@ -18,6 +18,10 @@ internal sealed class VaultPage : UserControl
     private readonly Badge _stateBadge;
     private readonly Label _stateText;
     private readonly Label _detailText;
+    private readonly CardPanel _vaultCard;
+    private readonly CardPanel _setCard;
+    private readonly TableLayoutPanel _vInner;
+    private readonly TableLayoutPanel _sInner;
     private readonly UsageBar _usage;
     private readonly Label _usageText;
     private readonly Slider _size;
@@ -65,27 +69,28 @@ internal sealed class VaultPage : UserControl
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
         // ---- Card 1: vault state + controls ----
-        var vaultCard = new CardPanel
+        _vaultCard = new CardPanel
         {
             Title = "Encrypted vault",
             Glyph = Glyphs.Vault,
             Dock = DockStyle.Top,
-            Height = 248,
+            Height = 218,
             Margin = new Padding(0, 0, 0, 10),
         };
-        var vInner = new TableLayoutPanel
+        _vInner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f));
-        vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 26f));
-        vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
-        vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f));
-        vInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f)); // usage — collapsed when unmounted
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 46f)); // action row
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 24f)); // driver note — collapses when hidden
+        _vInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         var stateRow = new TableLayoutPanel
         {
@@ -107,7 +112,7 @@ internal sealed class VaultPage : UserControl
         };
         stateRow.Controls.Add(_stateBadge, 0, 0);
         stateRow.Controls.Add(_stateText, 1, 0);
-        vInner.Controls.Add(stateRow, 0, 0);
+        _vInner.Controls.Add(stateRow, 0, 0);
 
         _detailText = new Label
         {
@@ -117,7 +122,7 @@ internal sealed class VaultPage : UserControl
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
         };
-        vInner.Controls.Add(_detailText, 0, 1);
+        _vInner.Controls.Add(_detailText, 0, 1);
 
         var usageRow = new TableLayoutPanel
         {
@@ -140,7 +145,7 @@ internal sealed class VaultPage : UserControl
         };
         usageRow.Controls.Add(_usage, 0, 0);
         usageRow.Controls.Add(_usageText, 1, 0);
-        vInner.Controls.Add(usageRow, 0, 2);
+        _vInner.Controls.Add(usageRow, 0, 2);
 
         _createRow = new TableLayoutPanel
         {
@@ -176,7 +181,7 @@ internal sealed class VaultPage : UserControl
         _createRow.Controls.Add(_sizeText, 0, 0);
         _createRow.Controls.Add(_size, 1, 0);
         _createRow.Controls.Add(_createBtn, 2, 0);
-        vInner.Controls.Add(_createRow, 0, 3);
+        _vInner.Controls.Add(_createRow, 0, 3);
 
         _mountedRow = new TableLayoutPanel
         {
@@ -219,15 +224,16 @@ internal sealed class VaultPage : UserControl
         _mountedRow.Controls.Add(_mountBtn, 0, 0);
         _mountedRow.Controls.Add(_openBtn, 1, 0);
         _mountedRow.Controls.Add(closeBtn, 2, 0);
-        vInner.Controls.Add(_mountedRow, 0, 4);
+        // Shares the action cell with _createRow — the two are mutually
+        // exclusive (ShowCreate/ShowMounted toggle visibility).
+        _vInner.Controls.Add(_mountedRow, 0, 3);
 
         _driverNote = new Label
         {
             Font = Theme.UIFont(8f),
             ForeColor = Theme.AccentAmber,
             AutoSize = false,
-            Dock = DockStyle.Bottom,
-            Height = 16,
+            Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
             Cursor = Cursors.Hand,
         };
@@ -236,18 +242,18 @@ internal sealed class VaultPage : UserControl
             try { Process.Start(new ProcessStartInfo("https://dokan-dev.github.io") { UseShellExecute = true }); }
             catch (Exception) { }
         };
-        vInner.Controls.Add(_driverNote, 0, 4);
-        vaultCard.Controls.Add(vInner);
+        _vInner.Controls.Add(_driverNote, 0, 4);
+        _vaultCard.Controls.Add(_vInner);
 
         // ---- Card 2: settings ----
-        var setCard = new CardPanel
+        _setCard = new CardPanel
         {
             Title = "Vault settings",
             Glyph = Glyphs.Settings,
             Dock = DockStyle.Top,
-            Height = 335,
+            Height = 400,
         };
-        var sInner = new TableLayoutPanel
+        _sInner = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
@@ -255,8 +261,14 @@ internal sealed class VaultPage : UserControl
             BackColor = Theme.Surface,
             Padding = new Padding(0),
         };
-        for (int i = 0; i < 8; i++)
-            sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 8f));
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f)); // auto-mount toggle
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 40f)); // drive letter
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f)); // image path
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f)); // idle-seal slider
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f)); // TPM row A (collapses when hidden)
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 38f)); // TPM row B (collapses when hidden)
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Absolute, 44f)); // danger zone
+        _sInner.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // footer note
 
         _autoMount = new ToggleSwitch
         {
@@ -270,7 +282,7 @@ internal sealed class VaultPage : UserControl
             ConfigStore.Save(_config);
             _service.MarkConfigDirty();
         };
-        sInner.Controls.Add(_autoMount, 0, 0);
+        _sInner.Controls.Add(_autoMount, 0, 0);
 
         var letterRow = new TableLayoutPanel
         {
@@ -306,7 +318,7 @@ internal sealed class VaultPage : UserControl
         };
         letterRow.Controls.Add(MidLabel("Drive letter"), 0, 0);
         letterRow.Controls.Add(_letter, 1, 0);
-        sInner.Controls.Add(letterRow, 0, 1);
+        _sInner.Controls.Add(letterRow, 0, 1);
 
         var pathRow = new TableLayoutPanel
         {
@@ -347,7 +359,7 @@ internal sealed class VaultPage : UserControl
         pathRow.Controls.Add(MidLabel("Image file"), 0, 0);
         pathRow.Controls.Add(_imagePath, 1, 0);
         pathRow.Controls.Add(openFolder, 2, 0);
-        sInner.Controls.Add(pathRow, 0, 2);
+        _sInner.Controls.Add(pathRow, 0, 2);
 
         // Idle seal — "Seal vault after idle" slider (0 = off, same call as
         // the idle lock: a surprise dismount mid-open-file is hostile UX).
@@ -398,7 +410,7 @@ internal sealed class VaultPage : UserControl
         idleSealRow.Controls.Add(MidLabel("Seal vault after idle"), 0, 0);
         idleSealRow.Controls.Add(_idleSeal, 1, 0);
         idleSealRow.Controls.Add(_idleSealValue, 2, 0);
-        sInner.Controls.Add(idleSealRow, 0, 3);
+        _sInner.Controls.Add(idleSealRow, 0, 3);
 
         // Machine binding — the TPM gates the image to this machine + user.
         // Row A: label | phrase field | primary action (bind/recover/re-bind).
@@ -432,7 +444,7 @@ internal sealed class VaultPage : UserControl
         _tpmRowA.Controls.Add(MidLabel("Machine binding"), 0, 0);
         _tpmRowA.Controls.Add(_tpmPhrase, 1, 0);
         _tpmRowA.Controls.Add(_tpmBtn, 2, 0);
-        sInner.Controls.Add(_tpmRowA, 0, 4);
+        _sInner.Controls.Add(_tpmRowA, 0, 4);
 
         // Row B: strict toggle | unbind button.
         _tpmRowB = new TableLayoutPanel
@@ -463,7 +475,7 @@ internal sealed class VaultPage : UserControl
         _tpmRowB.Controls.Add(new Panel(), 0, 0); // spacer under the label
         _tpmRowB.Controls.Add(_tpmStrict, 1, 0);
         _tpmRowB.Controls.Add(_tpmUnbind, 2, 0);
-        sInner.Controls.Add(_tpmRowB, 0, 5);
+        _sInner.Controls.Add(_tpmRowB, 0, 5);
 
         var dangerRow = new TableLayoutPanel
         {
@@ -497,7 +509,7 @@ internal sealed class VaultPage : UserControl
         dangerRow.Controls.Add(MidLabel("Danger zone"), 0, 0);
         dangerRow.Controls.Add(_reformatBtn, 1, 0);
         dangerRow.Controls.Add(_deleteBtn, 2, 0);
-        sInner.Controls.Add(dangerRow, 0, 6);
+        _sInner.Controls.Add(dangerRow, 0, 6);
 
         var vaultNote = new Label
         {
@@ -510,11 +522,11 @@ internal sealed class VaultPage : UserControl
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
         };
-        sInner.Controls.Add(vaultNote, 0, 7);
-        setCard.Controls.Add(sInner);
+        _sInner.Controls.Add(vaultNote, 0, 7);
+        _setCard.Controls.Add(_sInner);
 
-        layout.Controls.Add(vaultCard, 0, 0);
-        layout.Controls.Add(setCard, 0, 1);
+        layout.Controls.Add(_vaultCard, 0, 0);
+        layout.Controls.Add(_setCard, 0, 1);
         Controls.Add(layout);
 
         UpdateSizeText();
@@ -765,6 +777,7 @@ internal sealed class VaultPage : UserControl
         _imagePath.Text = v.ImagePath;
         _driverNote.Text = v.DriverPresent ? "" : v.DriverHint ?? "";
         _driverNote.Visible = !v.DriverPresent && imageExists;
+        _vInner.RowStyles[4].Height = _driverNote.Visible ? 24 : 0;
 
         // States, in priority order.
         if (!_config.Guard.VaultEnabled)
@@ -849,6 +862,11 @@ internal sealed class VaultPage : UserControl
         }
         _usage.Visible = v.State == VaultState.Mounted;
         _usageText.Visible = v.State == VaultState.Mounted;
+        _vInner.RowStyles[2].Height = v.State == VaultState.Mounted ? 30 : 0;
+        // Card hugs its live rows: 56 chrome + state/detail/action + live rows.
+        _vaultCard.Height = 164
+            + (v.State == VaultState.Mounted ? 30 : 0)
+            + (_driverNote.Visible ? 24 : 0);
 
         _mountBtn.Text = v.State switch
         {
@@ -866,6 +884,10 @@ internal sealed class VaultPage : UserControl
         // Machine-binding rows — live only with an image + the feature on.
         bool tpmShown = _config.Guard.VaultEnabled && imageExists;
         _tpmRowA.Visible = _tpmRowB.Visible = tpmShown;
+        _sInner.RowStyles[4].Height = tpmShown ? 44 : 0;
+        _sInner.RowStyles[5].Height = tpmShown ? 38 : 0;
+        // 318 = chrome + always-live rows + footer note; TPM rows add 82.
+        _setCard.Height = 318 + (tpmShown ? 82 : 0);
         if (tpmShown)
         {
             bool open = v.State is VaultState.Unsealed or VaultState.Mounted
