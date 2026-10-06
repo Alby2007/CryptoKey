@@ -48,11 +48,16 @@ internal static class Program
 
         // Dev/internal: writes the app icon (committed as app.ico) using the
         // same renderer as the tray — badge in the system accent color.
+        // `bmp` emits classic DIB frames for maximum shell compatibility.
         if (args.Length >= 2 && args[0].Equals("--export-icon", StringComparison.OrdinalIgnoreCase))
         {
-            File.WriteAllBytes(args[1],
-                TrayIcons.BuildIcoBytes(Theme.Accent, TrayIcons.ShellSizes));
-            Console.WriteLine($"Wrote {args[1]} ({TrayIcons.ShellSizes.Length} PNG frames).");
+            bool bmp = args.Length >= 3
+                && args[2].Equals("bmp", StringComparison.OrdinalIgnoreCase);
+            byte[] ico = bmp
+                ? TrayIcons.BuildIcoBytesBmp(Theme.Accent, TrayIcons.ShellSizes)
+                : TrayIcons.BuildIcoBytes(Theme.Accent, TrayIcons.ShellSizes);
+            File.WriteAllBytes(args[1], ico);
+            Console.WriteLine($"Wrote {args[1]} ({TrayIcons.ShellSizes.Length} {(bmp ? "DIB" : "PNG")} frames).");
             return 0;
         }
 
