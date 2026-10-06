@@ -39,6 +39,8 @@ internal sealed class AccountPage : Page
     };
     private readonly Button _change;
     private readonly Button _signOut;
+    private readonly Panel _linked;
+    private readonly Panel _unlinked;
 
     public AccountPage(PageContext ctx) : base(ctx)
     {
@@ -50,9 +52,27 @@ internal sealed class AccountPage : Page
         _signOut = Kit.Btn("Sign out", IconData.Quit, "danger",
             () => _ = SignOut());
 
-        Content = Kit.PageScroll(Kit.V(14,
-            Kit.PageHeader("Account", "The identity that gates this dashboard and sensitive commands."),
-            _banner,
+        var create = Kit.Btn("Create account", IconData.Person, "primary",
+            () => Ctx.ShowAuth(_ => Refresh(), AuthMode.Create));
+        var signIn = Kit.Btn("Sign in to an existing account", IconData.Key, "ghost",
+            () => Ctx.ShowAuth(_ => Refresh(), AuthMode.SignIn));
+
+        _unlinked = Kit.V(14,
+            Kit.Section("No account linked", IconData.Person,
+                "This install isn't bound to an account — sensitive commands stay open " +
+                "until one is.",
+                Kit.H(10, create, signIn)),
+            Kit.Section("What an account is", IconData.Shield, null,
+                Kit.V(10,
+                    Kit.Txt(
+                        "An optional gate for the CryptoKey dashboard and sensitive " +
+                        "commands — never a workstation lock factor.", "body"),
+                    Kit.Txt(
+                        "Pulling your USB key still locks this machine with or without a " +
+                        "sign-in, and the recovery phrase still unlocks it. The account " +
+                        "adds a second gate on the app surface only.", "body", "dim"))));
+
+        _linked = Kit.V(14,
             Kit.Section("Signed in", IconData.Person, null,
                 Kit.Row("Email", "The account bound to this install.", _who),
                 Kit.Row("User ID", null, _uid),
@@ -71,7 +91,13 @@ internal sealed class AccountPage : Page
                 Kit.V(10, _current, _newPw, _confirmPw, _change)),
             Kit.Section("Sign out", IconData.Quit,
                 "Ends this session — gated commands ask for the password again.",
-                _signOut)));
+                _signOut));
+
+        Content = Kit.PageScroll(Kit.V(14,
+            Kit.PageHeader("Account", "The identity that gates this dashboard and sensitive commands."),
+            _banner,
+            _unlinked,
+            _linked));
     }
 
     private void UpdateChangeGate()
@@ -99,6 +125,8 @@ internal sealed class AccountPage : Page
             AuthGateState.Locked => Tone.Warn,
             _ => Tone.Neutral,
         });
+        _linked.IsVisible = rec != null;
+        _unlinked.IsVisible = rec == null;
         bool noConfig = !auth.Configured;
         _banner.IsVisible = noConfig;
         if (noConfig)

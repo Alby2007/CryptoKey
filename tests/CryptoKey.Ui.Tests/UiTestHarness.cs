@@ -64,6 +64,7 @@ internal static class Harness
         Navigate = _ => { },
         Owner = () => null,
         OpenOnboarding = () => { },
+        ShowAuth = (_, _) => { },
     };
 
     /// <summary>Run the UI dispatcher for real time — timers fire, posts drain.</summary>

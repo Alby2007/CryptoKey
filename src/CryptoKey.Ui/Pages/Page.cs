@@ -12,6 +12,7 @@ internal sealed class PageContext
     public required Action<Route> Navigate { get; init; }
     public required Func<Window?> Owner { get; init; }
     public required Action OpenOnboarding { get; init; }
+    public required Action<Action<bool>, AuthMode?> ShowAuth { get; init; }
 
     public PlatformCapabilities Caps => Host.Capabilities;
 }

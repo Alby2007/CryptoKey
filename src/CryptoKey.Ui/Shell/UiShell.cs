@@ -264,7 +264,7 @@ internal sealed class UiShell : IDisposable
         }
         if (_window == null)
         {
-            _window = new MainWindow(_client, _host, OpenOnboarding);
+            _window = new MainWindow(_client, _host, OpenOnboarding, ShowAuth);
             _window.Closed += (_, _) =>
             {
                 _window = null;

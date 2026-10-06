@@ -34,7 +34,8 @@ internal sealed class MainWindow : Window
 
     public Route Current { get; private set; } = Route.Home;
 
-    public MainWindow(GuardClient client, IUiHost host, Action openOnboarding)
+    public MainWindow(GuardClient client, IUiHost host, Action openOnboarding,
+        Action<Action<bool>, AuthMode?> showAuth)
     {
         Title = "CryptoKey";
         Width = 1100;
@@ -56,6 +57,7 @@ internal sealed class MainWindow : Window
             Navigate = Navigate,
             Owner = () => this,
             OpenOnboarding = openOnboarding,
+            ShowAuth = showAuth,
         };
 
         // ---- Sidebar ----

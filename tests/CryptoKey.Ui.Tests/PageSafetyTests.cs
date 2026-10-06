@@ -46,6 +46,7 @@ public class PageSafetyTests
                 {
                     Client = c.Client, Host = c.Host, Navigate = c.Navigate, Owner = c.Owner,
                     OpenOnboarding = c.OpenOnboarding, Toast = (_, _) => toasts++,
+                    ShowAuth = (_, _) => { },
                 }
                 : throw new InvalidOperationException();
 
