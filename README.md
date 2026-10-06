@@ -108,6 +108,7 @@ cryptokey pause 10      # pause auto-lock for 10 minutes (default 5)
 cryptokey resume        # end a pause early
 cryptokey quit          # stop the running guard (refused while locked)
 cryptokey update        # check for a newer signed release; --apply installs it
+cryptokey auth status   # account gate state (signed in / locked / unenrolled)
 ```
 
 Flags:
@@ -174,6 +175,35 @@ design while locked).
 
 `--dev` enables the emergency exit combo **Ctrl+Alt+Shift+F12**.
 **Always use `--dev` during development and testing.**
+
+## Account (optional cloud identity)
+
+A **Supabase Auth** account (email + password) gates the dashboard and the
+sensitive commands — pause/resume/quit, vault mutators, `update apply`,
+and the in-app settings — without ever touching the lock itself. The USB
+key and recovery phrase remain the only things that unlock a locked PC,
+and the guard engages and holds a lock with no account, no session, and
+no network. See [`docs/auth.md`](docs/auth.md) for the full model.
+
+Setup: drop `supabase.json` beside the exe (copy `supabase.example.json`)
+with your project's `projectUrl` and **anon** key — the anon key is meant
+to ship in clients; CryptoKey uses GoTrue auth only, no tables/RLS.
+Under Auth → URL Configuration add the `cryptokey://recover` redirect so
+password-reset emails deep-link back into the app.
+
+- **First run** shows the create-account screen before the wizard; a
+  signed-in account enrolls into `config.json` via a pending staging file.
+- **Offline grace**: after one online sign-in, the same password unlocks
+  the dashboard while offline — a local PBKDF2 verifier in the
+  keyfile-attested config (grafting a foreign verifier trips the next key
+  verify and refuses the password path entirely).
+- **Sessions** persist in `session.dat` (DPAPI/Keychain-sealed); bearer
+  tokens refresh automatically and expire gracefully.
+- **CLI**: a gated verb answers `AUTH_REQUIRED`; retry prompts for the
+  account password masked — it rides the pipe as a `|auth` trailer and is
+  never logged, persisted, or placed on argv.
+- **`cryptokey auth status`** reports the gate; **Account** page in the
+  dashboard has sign-out, change password, and relink.
 
 ## macOS
 

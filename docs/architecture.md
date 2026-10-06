@@ -108,6 +108,10 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | `watchdog.log` (+ `.1`) | `%APPDATA%\CryptoKey\` | Supervisor's own log — separate file, same 256 KB rotation |
 | `lockpolicies.json` | `%APPDATA%\CryptoKey\` | Per-policy priors while locked — kind + raw value verbatim (legacy backups were plain `int?` and still load) — flushed tmp→rename; deleted on restore; a stale file self-heals at next `Start` |
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
+| `session.dat` | `%APPDATA%\CryptoKey\` | Supabase bearer pair, protector-sealed (DPAPI/Keychain, entropy-tagged) — the account session, never in `config.json` |
+| `account.pending.json` | `%APPDATA%\CryptoKey\` | Pre-enrollment account staging — created before `config.json` exists, folded into `KeyConfig.Account` at commit |
+| `supabase.json` | beside the exe | `{projectUrl, anonKey}` — the Supabase project wiring (anon key is public-by-design); missing = auth UI banners, guard unaffected |
+| `cryptokey://` | `HKCU\Software\Classes\cryptokey` | URL scheme → the running exe (deep links forward over the pipe); macOS: a minimal `CryptoKey.app` wrapper + `lsregister` |
 | `captures\*.cap` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — DPAPI-sealed per user+machine, newest 50 kept |
 | `vault.ckv` | `%LOCALAPPDATA%\CryptoKey\` (configurable) | CKVAULT1 encrypted volume image — dual header pages (checksummed) + dual manifest slots + AES-GCM chunks; session-scoped Dokan mount only while the key verifies. Manifest seq fences against the attested `VaultEpoch` — an older image gates at `RolledBack` until explicitly ratified |
 | Registry / Task Scheduler | `HKCU\...\Run\CryptoKey`, task `CryptoKey` | Startup modes — validated by content, not just presence |
@@ -218,6 +222,10 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `Vault/VaultService.cs` | Lifecycle owner — consumes verified secrets from the guard, unseals/mounts on verify, force-dismounts on `KeyGone`, slides key slots on rotation |
 | `UpdateChecker.cs` | GitHub-Releases channel: `releases/latest` check, sha256sums manifest parse, signature + tag-binding + hash verification, `.part`-atomic download, safe extract to staging |
 | `ReleaseSigning.cs` | ECDSA-P256 release manifest signing — pinned public key, P1363 r‖s, gen-key/sign helpers for `sign-release` |
+| `Auth/AuthService.cs` | The one account authority — GoTrue REST (signup/token/recover/verify/user/logout), session lifecycle, offline-grace verifier, local throttle, the `Authorize` gate for mutating ops |
+| `Auth/AccountRecord.cs` | `config.json`'s account section — identity + PBKDF2-SHA256(600k) verifier, inside the keyfile attestation MAC via `\|accounthash=` |
+| `Auth/TokenStore.cs` | `session.dat` — protector-sealed bearer persistence, corrupt/foreign → no session |
+| `Auth/SupabaseConfig.cs` | `supabase.json` loader — env override → beside-exe → beside-config |
 
 ### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
 
@@ -250,7 +258,8 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `Design/` | `Palette`/`Motion` + `AppStyles.axaml` — the design system installed over the tokens |
 | `Controls/` | `Kit` control factory (chips, rows, `HoldButton`, `SettingCombo`, toasts), `KeyVisual` (the animated key), `Icon` |
 | `Shell/` | `CryptoKeyApp` + `UiRuntime` (loop + UI crash policy), `MainWindow` (sidebar + status rail), `UiShell` (tray + flyout + notifications), `TrayFlyout`, `NotificationCenter` |
-| `Pages/` | Home, Key & Recovery, Vault, Protection, Alerts, Activity, General, About — pages read snapshots; all writes go through `GuardClient.UpdateSettings` |
+| `Pages/` | Home, Key & Recovery, Vault, Protection, Alerts, Activity, Account, General, About — pages read snapshots; all writes go through `GuardClient.UpdateSettings` |
+| `Auth/` | `AuthWindow` — create / sign-in / forgot / reset / relink faces on the wizard chrome; `UiShell.EnsureAuth` gates the dashboard + tray mutators on it |
 | `Wizard/` | `OnboardingWindow` — first-run + re-enroll over `EnrollmentFlow` |
 | `Services/` | `GuardClient` (the only engine door), `IUiHost` (per-OS shell integration), `Routes` |
 | `Presenters/` | `HomePresenter`/`VaultPresenter`/activity parsing — pure snapshot→view-state, unit-tested |

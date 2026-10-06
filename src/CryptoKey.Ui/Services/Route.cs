@@ -13,6 +13,7 @@ internal enum Route
     Protection,
     Alerts,
     Activity,
+    Account,
     General,
     About,
 }
@@ -22,7 +23,7 @@ internal static class Routes
     public static readonly Route[] Primary =
         { Route.Home, Route.Key, Route.Vault, Route.Protection, Route.Alerts, Route.Activity };
 
-    public static readonly Route[] Secondary = { Route.General, Route.About };
+    public static readonly Route[] Secondary = { Route.Account, Route.General, Route.About };
 
     public static string Title(Route r) => r switch
     {
@@ -32,6 +33,7 @@ internal static class Routes
         Route.Protection => "Protection",
         Route.Alerts => "Alerts & Evidence",
         Route.Activity => "Activity",
+        Route.Account => "Account",
         Route.General => "General",
         Route.About => "About",
         _ => r.ToString(),
@@ -45,6 +47,7 @@ internal static class Routes
         Route.Protection => IconData.Shield,
         Route.Alerts => IconData.Bell,
         Route.Activity => IconData.Activity,
+        Route.Account => IconData.Person,
         Route.General => IconData.Settings,
         Route.About => IconData.Info,
         _ => IconData.Info,

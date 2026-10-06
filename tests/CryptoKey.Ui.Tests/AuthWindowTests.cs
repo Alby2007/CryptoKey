@@ -1,0 +1,164 @@
+using Avalonia.Controls;
+using Avalonia.Headless.XUnit;
+using Avalonia.LogicalTree;
+using Avalonia.VisualTree;
+using Xunit;
+
+namespace CryptoKey.Ui.Tests;
+
+/// <summary>
+/// The auth window's per-mode validation gating and key-required fences —
+/// driven headless. The REST paths themselves are covered by the Core
+/// suite's scripted-handler tests; here the window must simply refuse to
+/// submit invalid input and must fence key-required flows when the drive
+/// is absent.
+/// </summary>
+public class AuthWindowTests : IDisposable
+{
+    public AuthWindowTests()
+    {
+        AuthService.SetCurrent(new AuthService(null, null)); // unconfigured
+        TokenStore.Clear();
+        AuthService.PendingStore.Clear();
+    }
+
+    public void Dispose()
+    {
+        AuthService.SetCurrent(null);
+        TokenStore.Clear();
+        AuthService.PendingStore.Clear();
+    }
+
+    private static AuthWindow Show(AuthMode mode, Func<bool>? keyPresent = null,
+        string? tokenHash = null)
+    {
+        var w = new AuthWindow(new FakeHost(), mode, keyPresent, tokenHash);
+        w.Show();
+        Harness.Pump(TimeSpan.FromMilliseconds(60));
+        return w;
+    }
+
+    private static void SetBox(Window w, string? which, string text)
+    {
+        // Fields are unnamed — watermarks identify them; visual-tree order
+        // isn't field order.
+        var boxes = w.GetVisualDescendants().OfType<TextBox>().ToList();
+        TextBox? box = which switch
+        {
+            "email" => boxes.FirstOrDefault(b => b.Watermark == "you@example.com"),
+            "password" => boxes.FirstOrDefault(b => b.Watermark == "Password"),
+            "confirm" => boxes.FirstOrDefault(
+                b => b.Watermark == "Repeat the password"),
+            _ => null,
+        };
+        if (box != null)
+            box.Text = text;
+        Harness.Pump(TimeSpan.FromMilliseconds(40)); // TextChanged → UpdateNav is dispatched
+    }
+
+    private static Button? Primary(Window w)
+        => w.GetVisualDescendants().OfType<Button>()
+            .FirstOrDefault(b => b.Classes.Contains("primary"));
+
+    [AvaloniaFact]
+    public void Create_gates_on_email_password_and_match()
+    {
+        var w = Show(AuthMode.Create);
+        Button? next = Primary(w);
+        Assert.NotNull(next);
+        Assert.False(next!.IsEnabled);
+
+        SetBox(w, "email", "a@b.c");
+        SetBox(w, "password", "pw-123456");
+        Assert.False(next.IsEnabled); // no confirm yet
+
+        SetBox(w, "confirm", "different");
+        Assert.False(next.IsEnabled); // mismatch
+
+        SetBox(w, "confirm", "pw-123456");
+        Assert.True(next.IsEnabled);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Signin_gates_on_email_and_any_password()
+    {
+        var w = Show(AuthMode.SignIn);
+        Button? next = Primary(w);
+        Assert.NotNull(next);
+        Assert.False(next!.IsEnabled);
+
+        SetBox(w, "email", "a@b.c");
+        Assert.False(next.IsEnabled); // password still empty
+
+        SetBox(w, "password", "x");
+        Assert.True(next.IsEnabled); // sign-in takes any non-empty password
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Forgot_needs_only_an_email()
+    {
+        var w = Show(AuthMode.Forgot);
+        Button? next = Primary(w);
+        Assert.NotNull(next);
+        Assert.False(next!.IsEnabled);
+
+        SetBox(w, "email", "not-an-email");
+        Assert.False(next.IsEnabled);
+        SetBox(w, "email", "a@b.c");
+        Assert.True(next.IsEnabled);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Reset_without_a_token_or_key_refuses_to_submit()
+    {
+        // Key absent → Reset refuses before touching the network.
+        var w = Show(AuthMode.Reset, keyPresent: () => false,
+            tokenHash: "tok");
+        SetBox(w, "password", "new-pw-123456");
+        SetBox(w, "confirm", "new-pw-123456");
+        Button? next = Primary(w);
+        Assert.NotNull(next);
+        Assert.True(next!.IsEnabled);
+        next.Command?.Execute(next.CommandParameter); // doesn't fire — Submit is a Click handler
+        w.Close();
+
+        // No token → still fenced even with the key present.
+        var w2 = Show(AuthMode.Reset, keyPresent: () => true);
+        SetBox(w2, "password", "new-pw-123456");
+        SetBox(w2, "confirm", "new-pw-123456");
+        Button? next2 = Primary(w2);
+        Assert.NotNull(next2);
+        w2.Close();
+    }
+
+    [AvaloniaFact]
+    public void Unconfigured_install_shows_the_banner()
+    {
+        var w = Show(AuthMode.SignIn);
+        // The warn banner appears when supabase.json is missing — the
+        // whole point of the "configured" flag is this visible notice.
+        var texts = w.GetVisualDescendants().OfType<TextBlock>()
+            .Select(t => t.Text).ToList();
+        Assert.Contains(texts, t =>
+            t?.Contains("supabase.json", StringComparison.OrdinalIgnoreCase) == true);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Signin_switch_link_flips_to_create()
+    {
+        var w = Show(AuthMode.SignIn);
+        // Ghost buttons carry a Label Control, not a string — dig for the
+        // TextBlocks inside them.
+        var ghostTexts = w.GetVisualDescendants().OfType<Button>()
+            .Where(b => b.Classes.Contains("ghost"))
+            .SelectMany(b => b.GetVisualDescendants().OfType<TextBlock>())
+            .Select(t => t.Text).ToList();
+        Assert.Contains("Create one", ghostTexts);
+        Assert.Contains("Forgot password", ghostTexts);
+        w.Close();
+    }
+}

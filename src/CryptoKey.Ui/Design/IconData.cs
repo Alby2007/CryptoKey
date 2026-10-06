@@ -58,6 +58,7 @@ internal static class IconData
     public const string Link = "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71 M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71";
     public const string FileKey = "M14 2v5a1 1 0 0 0 1 1h5 M4 12v6 M4 14h2 M9.65 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v4 M2,20 A2,2 0 1 0 6,20 A2,2 0 1 0 2,20 Z";
     public const string Wrench = "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z";
+    public const string Person = "M12,4 A4,4 0 1 0 12,12 A4,4 0 1 0 12,4 Z M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8";
     public const string ArrowRight = "M5 12h14 M12 5 l7 7-7 7";
     public const string ArrowLeft = "M12 19 l-7-7 7-7 M19 12H5";
     public const string Printer = "M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2 M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6 M7,14 H17 A1,1 0 0 1 18,15 V21 A1,1 0 0 1 17,22 H7 A1,1 0 0 1 6,21 V15 A1,1 0 0 1 7,14 Z";

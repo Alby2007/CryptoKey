@@ -227,6 +227,7 @@ internal sealed class MainWindow : Window
                 Route.Protection => new ProtectionPage(_ctx),
                 Route.Alerts => new AlertsPage(_ctx),
                 Route.Activity => new ActivityPage(_ctx),
+                Route.Account => new AccountPage(_ctx),
                 Route.General => new GeneralPage(_ctx),
                 Route.About => new AboutPage(_ctx),
                 _ => new HomePage(_ctx),

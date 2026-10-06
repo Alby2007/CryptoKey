@@ -20,6 +20,7 @@ internal sealed class GuardService : IDisposable
     private ILockSurface _surface;
     private readonly Supervisor _supervisor;
     private readonly VaultService _vault;
+    private readonly AuthService _auth;
     private System.Threading.Timer? _watchdogTimer;
 
     private UsbDisk? _lastDisk;
@@ -56,6 +57,12 @@ internal sealed class GuardService : IDisposable
         _vault = new VaultService(config, Platform.Services.VaultMounts, Log,
             MarkConfigDirty, Platform.Services.VaultTpm);
         _vault.StatusChanged += OnVaultStatusChanged;
+        // The account is an app/dashboard gate — the guard never waits on
+        // it. Binding here keeps the record's config copy authoritative and
+        // arms record-change → re-attest on the next key verify.
+        _auth = AuthService.Current;
+        _auth.BindConfig(config);
+        _auth.RecordPersisted += OnAuthRecordPersisted;
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
@@ -265,6 +272,19 @@ internal sealed class GuardService : IDisposable
         WatchdogTick();
         IdleTick();
         UpdateTick();
+        _auth.TickRefresh(); // renews expiring bearer tokens (~50 min)
+    }
+
+    /// <summary>
+    /// An authorized account op rewrote the record (password change, link,
+    /// recovery) — the keyfile's attestation MAC covers it, so flag the
+    /// next verify to re-bind quietly. The ops that persist records all
+    /// require the key present anyway.
+    /// </summary>
+    private void OnAuthRecordPersisted()
+    {
+        MarkConfigDirty();
+        Log("Account record updated — the keyfile re-attests on the next verify.");
     }
 
     /// <summary>A newer release found by the periodic check — apply is user-gated.</summary>
@@ -523,7 +543,9 @@ internal sealed class GuardService : IDisposable
             _config.RotationCount = fresh.RotationCount;
             _config.LastRotationUtc = fresh.LastRotationUtc;
             _config.VaultEpoch = fresh.VaultEpoch;
+            _config.Account = fresh.Account;
             _config.Guard = fresh.Guard;
+            _auth.BindConfig(_config);
             _monitor.SetTargetSerial(fresh.DeviceSerial); // also triggers a re-check
             _monitor.SetPollInterval(fresh.Guard.PollIntervalMs);
             _failedAttempts = 0;
@@ -568,16 +590,51 @@ internal sealed class GuardService : IDisposable
                 : new VaultStatus(_vault.State, _vault.MountPoint),
             _pendingUpdate?.TagName);
 
-    /// <summary>Pipe command dispatch — must be called on the UI thread.</summary>
+    /// <summary>
+    /// Pipe command dispatch — must be called on the UI thread. Mutating
+    /// commands are account-gated when the install has an account
+    /// credential: a trailing "|auth &lt;b64 password&gt;" satisfies the
+    /// check inline, a live dashboard session satisfies it implicitly.
+    /// Gated-without-auth returns "err AUTH_REQUIRED". Installs that never
+    /// enrolled an account behave exactly as before — no credential exists
+    /// that could satisfy the gate, so gating can't soft-lock them.
+    /// </summary>
     public string DispatchCommand(string line)
     {
+        // "|auth <base64>" trailer — b64 because passwords can contain
+        // anything; '|' can't appear in a real argument (phrases normalize
+        // to [A-Z0-9- ]).
+        string? authPassword = null;
+        int authAt = line.IndexOf("|auth ", StringComparison.Ordinal);
+        if (authAt >= 0)
+        {
+            try
+            {
+                authPassword = System.Text.Encoding.UTF8.GetString(
+                    Convert.FromBase64String(line[(authAt + 6)..].Trim()));
+            }
+            catch (Exception)
+            {
+                return "err malformed auth trailer";
+            }
+            line = line[..authAt].TrimEnd();
+        }
+
         string[] parts = line.Split(' ',
             StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parts.Length == 0)
             return "err empty command";
 
+        if (RequiresAuth(parts) && !_auth.Authorize(authPassword, out string authErr))
+            return authErr == "AUTH_REQUIRED"
+                ? "err AUTH_REQUIRED — the account session is locked; " +
+                  "sign in on the dashboard or pass |auth <base64 password>"
+                : $"err {authErr}";
+
         switch (parts[0].ToLowerInvariant())
         {
+            case "auth":
+                return DispatchAuth(parts);
             case "lock":
                 RequestLock();
                 return "ok locked";
@@ -622,6 +679,43 @@ internal sealed class GuardService : IDisposable
             default:
                 return $"err unknown command '{parts[0]}'";
         }
+    }
+
+    /// <summary>
+    /// The mutating-verb gate — read-only commands (status, vault status,
+    /// update check, lock, auth status) stay open; `lock` especially: it
+    /// only makes the box safer. Everything that changes state needs a live
+    /// account session or the account password.
+    /// </summary>
+    private bool RequiresAuth(string[] parts)
+    {
+        if (!_auth.Gating)
+            return false; // no credential exists to satisfy a gate — pre-account install
+        return parts[0].ToLowerInvariant() switch
+        {
+            "pause" or "resume" or "quit" or "reenrolled" => true,
+            "vault" => parts.Length > 1
+                && !parts[1].Equals("status", StringComparison.OrdinalIgnoreCase),
+            "update" => parts.Length > 1
+                && parts[1].Equals("apply", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
+    }
+
+    /// <summary>`cryptokey auth status` — the gate's read-only face.</summary>
+    private string DispatchAuth(string[] parts)
+    {
+        if (parts.Length > 1
+            && parts[1].Equals("signout", StringComparison.OrdinalIgnoreCase)
+            && _auth.Authorized)
+        {
+            _ = _auth.SignOut();
+            return "ok signed out";
+        }
+        AccountRecord? rec = _auth.Record;
+        return $"ok auth state={_auth.State.ToString().ToLowerInvariant()} " +
+               $"email=\"{rec?.Email ?? "-"}\" " +
+               $"configured={_auth.Configured}";
     }
 
     /// <summary>
@@ -807,11 +901,21 @@ internal sealed class GuardService : IDisposable
             // MAC anyway — a same-pass re-attest would double-write the drive.
             bool rotationDue = (edgeFlip || stale)
                 && DateTime.UtcNow - _lastRotateAttemptUtc > TimeSpan.FromSeconds(5);
+            // Account integrity feeds the auth gate: a grafted/edited
+            // verifier must NOT be able to authorize ops even though the
+            // key itself still verifies.
+            _auth.SetAttestationClean(check.Attest != AttestState.Mismatch);
+
             // Announce-then-heal: a mismatch announces as tamper below, then
             // the envelope re-binds to the live config (same secret — no
             // generation burn). An in-app save (_reattestPending) re-binds
-            // silently — we caused it, it isn't tamper.
-            bool reattest = (_reattestPending || check.Attest == AttestState.Mismatch)
+            // silently — we caused it, it isn't tamper. With an account
+            // bound, an UNPROMPTED mismatch never self-heals: healing would
+            // launder a grafted verifier into the attested config. The
+            // account-free case still heals — deletion announces loudly and
+            // lands on the documented relink path.
+            bool reattest = (_reattestPending
+                    || (check.Attest == AttestState.Mismatch && _config.Account == null))
                 && !stale && !rotationDue
                 && DateTime.UtcNow - _lastReattestUtc > TimeSpan.FromSeconds(5);
             // The vault consumes its own copy on feed — when the rewrap also

@@ -233,6 +233,28 @@ so input during a freeze is eaten, not counted. The panic combo is checked
 before the gate. `LockScreen`/`LockForm` paints the amber countdown from
 `_cooldownUntil`; the counter is in-memory and dies with the lock session.
 
+## Launch routing — the account gate
+
+```text
+cryptokey (desktop app)
+  config.json exists?
+    YES → StartGuard immediately (protection never waits) → openDashboard
+          hits the shell gate: authorized session → MainWindow; else
+          AuthWindow(SignIn) → MainWindow on success. A cryptokey:// deep
+          link routed over the pipe (deeplink verb) opens the auth
+          window's reset face instead.
+    NO  → account gate first: account.pending.json (a sign-up that
+          preceded enrollment) or a record → AuthWindow(SignIn);
+          neither → AuthWindow(Create). Authenticated → OnboardingWindow
+          → Commit folds the pending record into KeyConfig.Account and
+          the first keyfile attests it. No supabase.json AND no record →
+          straight to the wizard (a backend-less install stays usable).
+```
+
+`guard`/headless modes never touch the account: the engine starts, the
+IPC gate answers `AUTH_REQUIRED` on mutating verbs, and the lock factors
+stay exactly the USB key + recovery phrase.
+
 ## Pause semantics
 
 `pause [mins]` (default 5) is valid from `Unlocked` **or** `Paused` —

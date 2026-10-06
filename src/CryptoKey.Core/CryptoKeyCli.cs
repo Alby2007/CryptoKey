@@ -50,11 +50,38 @@ internal static class CryptoKeyCli
         switch (args[0].ToLowerInvariant())
         {
             case "enroll":
+                // Re-enrollment rewrites the key/config pair — an
+                // account-bound install treats it as a sensitive op. Bind
+                // the on-disk config first — a bare CLI process has no
+                // engine to have bound it, so the record is invisible
+                // (and the verifier unusable) until we do.
+                string? enrollAuth = null;
+                try { AuthService.Current.BindConfig(ConfigStore.Load()); }
+                catch (Exception) { }
+                if (AuthService.Current.Gating && !AuthService.Current.Authorized)
+                {
+                    enrollAuth = ReadPassword("Account password: ");
+                    string ae = enrollAuth == null ? "AUTH_REQUIRED"
+                        : AuthService.Current.Authorize(enrollAuth, out string e)
+                            ? "" : e;
+                    if (ae.Length > 0)
+                    {
+                        Console.WriteLine($"error: {ae}");
+                        return 1;
+                    }
+                }
                 int erc = Enrollment.Run();
                 if (erc == 0)
+                {
                     // A running guard holds the old config in memory — ping it
-                    // so it reloads and watches the new key's serial.
-                    _ = IpcClient.Send("reenrolled", 400);
+                    // so it reloads and watches the new key's serial. The
+                    // guard's own gate applies: the just-authorized password
+                    // rides along when we took one.
+                    string trailer = enrollAuth == null ? "" : " |auth "
+                        + Convert.ToBase64String(
+                            System.Text.Encoding.UTF8.GetBytes(enrollAuth));
+                    _ = IpcClient.Send("reenrolled" + trailer, 400);
+                }
                 return erc;
             case "status":
                 return Status();
@@ -68,13 +95,20 @@ internal static class CryptoKeyCli
                 return SendIpc(args.Length > 1 ? $"open {args[1]}" : "open");
             case "lock":
                 return SendIpc("lock");
+            case "auth":
+                // `auth status` / `auth signout` — piped to a live guard;
+                // signout is gated like any mutator.
+                if (args.Length > 1
+                    && args[1].Equals("signout", StringComparison.OrdinalIgnoreCase))
+                    return SendIpcGated("auth signout");
+                return SendIpc("auth status");
             case "pause":
                 int mins = args.Length > 1 && int.TryParse(args[1], out int m) ? m : 5;
-                return SendIpc($"pause {mins}");
+                return SendIpcGated($"pause {mins}");
             case "resume":
-                return SendIpc("resume");
+                return SendIpcGated("resume");
             case "quit":
-                return SendIpc("quit");
+                return SendIpcGated("quit");
             case "update":
                 return Update(args);
             case "sign-release":
@@ -109,6 +143,83 @@ internal static class CryptoKeyCli
     }
 
     /// <summary>
+    /// Send a mutating command through the pipe. A live account session
+    /// authorizes it silently; without one the guard answers AUTH_REQUIRED
+    /// and the CLI prompts for the account password (masked) and retries
+    /// with a "|auth" trailer. The password never lands in argv or logs.
+    /// </summary>
+    public static int SendIpcGated(string command)
+    {
+        string? reply = IpcClient.Send(command);
+        if (reply != null
+            && reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+        {
+            string? pw = ReadPassword("Account password: ");
+            if (pw == null)
+            {
+                Console.WriteLine("error: AUTH_REQUIRED — no account password supplied");
+                return 1;
+            }
+            reply = IpcClient.Send(command + " |auth " +
+                Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(pw)));
+        }
+        if (reply == null)
+        {
+            Console.WriteLine("cryptokey guard is not running.");
+            return 1;
+        }
+        Console.WriteLine(reply);
+        return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Masked console password entry — '*' per char, Backspace edits,
+    /// Escape cancels (returns null). A redirected stdin can't do masked
+    /// reads: it falls back to a plain line so scripts still work.
+    /// </summary>
+    public static string? ReadPassword(string prompt)
+    {
+        if (Console.IsInputRedirected)
+        {
+            Console.Write(prompt);
+            return Console.ReadLine();
+        }
+        try { Console.Write(prompt); }
+        catch (Exception) { return null; }
+        var sb = new System.Text.StringBuilder();
+        while (true)
+        {
+            ConsoleKeyInfo k;
+            try { k = Console.ReadKey(intercept: true); }
+            catch (Exception) { return null; }
+            if (k.Key == ConsoleKey.Enter)
+            {
+                Console.WriteLine();
+                break;
+            }
+            if (k.Key == ConsoleKey.Escape)
+            {
+                Console.WriteLine();
+                return null;
+            }
+            if (k.Key == ConsoleKey.Backspace)
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Remove(sb.Length - 1, 1);
+                    Console.Write("\b \b");
+                }
+                continue;
+            }
+            if (k.KeyChar == '\0' || char.IsControl(k.KeyChar))
+                continue;
+            sb.Append(k.KeyChar);
+            Console.Write('*');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// `cryptokey update [--apply]` — check GitHub for a newer signed
     /// release. --apply hands the swap to the live guard (which stages,
     /// quits, and lets the staged exe relaunch it); with no guard running
@@ -120,6 +231,19 @@ internal static class CryptoKeyCli
         bool apply = args.Contains("--apply", StringComparer.OrdinalIgnoreCase);
         if (apply && IpcClient.Send("update apply", 2000) is string reply)
         {
+            if (reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+            {
+                string? pw = ReadPassword("Account password: ");
+                if (pw == null)
+                {
+                    Console.WriteLine("error: AUTH_REQUIRED");
+                    return 1;
+                }
+                reply = IpcClient.Send("update apply |auth " +
+                    Convert.ToBase64String(
+                        System.Text.Encoding.UTF8.GetBytes(pw)), 2000)
+                    ?? "err guard went quiet";
+            }
             Console.WriteLine(reply);
             return reply.StartsWith("ok") ? 0 : 1;
         }

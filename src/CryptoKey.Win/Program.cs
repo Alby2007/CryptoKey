@@ -53,6 +53,17 @@ internal static class Program
             && int.TryParse(args[1], out int parentPid))
             return RunLockWatchdog(parentPid);
 
+        // cryptokey:// deep link (password-reset emails land here): forward
+        // to a live guard, else the GUI picks it up as its launch link.
+        if (args.Length >= 1 && args[0].StartsWith("cryptokey://",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            string url = args[0];
+            if (IpcClient.Send("deeplink " + url, 600) != null)
+                return 0;
+            return Gui(false, false, false, deepLink: url);
+        }
+
         // Dev/internal: writes the app icon (committed as app.ico) using the
         // same renderer as the tray — badge in the system accent color.
         // `bmp` emits classic DIB frames for maximum shell compatibility.
@@ -72,7 +83,8 @@ internal static class Program
         if (args.Length == 0 || args[0].StartsWith("--"))
             return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
-                args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
+                args.Contains("--classic", StringComparer.OrdinalIgnoreCase),
+                deepLink: null);
 
         // Shared verbs (enroll, status, guard, open, lock, pause, resume,
         // quit, watchdog) — null means the verb is this host's own.
@@ -96,22 +108,54 @@ internal static class Program
         }
     }
 
-    private static int Gui(bool devMode, bool takeover, bool forceClassic)
+    private static int Gui(bool devMode, bool takeover, bool forceClassic,
+        string? deepLink)
     {
         if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
+
+        EnsureUrlScheme(); // self-heal: repoint cryptokey:// at the running exe
 
         using IDisposable? singleInstance =
             Platform.Services.SingleInstance.Acquire("CryptoKeyGuard", takeover);
         if (singleInstance == null)
         {
-            // Guard already up — just raise its window.
+            // Guard already up — route the deep link through, else just
+            // raise the window.
+            if (deepLink != null)
+                return CryptoKeyCli.SendIpc("deeplink " + deepLink);
             return CryptoKeyCli.SendIpc("open");
         }
 
         // No config = first run: the onboarding wizard enrolls a key in-app
         // before the guard starts (the console `enroll` verb still exists).
-        return RunApp(config, devMode, openDashboard: true, forceClassic);
+        return RunApp(config, devMode, openDashboard: true, forceClassic, deepLink);
+    }
+
+    /// <summary>
+    /// HKCU Classes registration for cryptokey:// — password-reset links
+    /// launch the app (or forward to the running guard). Per-user hive:
+    /// no admin needed, and a stale entry repoints silently.
+    /// </summary>
+    private static void EnsureUrlScheme()
+    {
+        try
+        {
+            string exe = Environment.ProcessPath ?? "";
+            if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                return; // a `dotnet cryptokey.dll` dev run owns nothing
+            string command = $"\"{exe}\" \"%1\"";
+            using var root = Microsoft.Win32.Registry.CurrentUser
+                .CreateSubKey(@"Software\Classes\cryptokey\shell\open\command");
+            if (root.GetValue("") as string == command)
+                return; // already ours
+            using var top = Microsoft.Win32.Registry.CurrentUser
+                .CreateSubKey(@"Software\Classes\cryptokey");
+            top.SetValue("", "URL:CryptoKey");
+            top.SetValue("URL Protocol", "");
+            root.SetValue("", command);
+        }
+        catch (Exception) { /* scheme registration is best-effort */ }
     }
 
     /// <summary>
@@ -254,11 +298,11 @@ internal static class Program
     // difference is whether the dashboard opens on launch. A null config
     // (desktop app, first run) starts with the onboarding wizard.
     private static int RunApp(KeyConfig? config, bool devMode, bool openDashboard,
-        bool forceClassic)
+        bool forceClassic, string? deepLink = null)
     {
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             Console.WriteLine($"[guard] Fatal background error: {e.ExceptionObject}");
-        return WinUi.Run(config, devMode, forceClassic, openDashboard);
+        return WinUi.Run(config, devMode, forceClassic, openDashboard, deepLink);
     }
 
     /// <summary>
@@ -350,6 +394,10 @@ internal static class Program
                 "status probe — the copy may be incomplete or the .NET " +
                 "runtime can't resolve. Test it: \"" + installedExe + "\" status");
         }
+
+        // cryptokey:// deep links (password-reset emails) point at the
+        // installed exe — register the HKCU scheme against it.
+        EnsureUrlScheme();
 
         // Shortcuts repoint at the installed exe — IconLocation rides along,
         // so the embedded padlock survives the move.
@@ -583,8 +631,17 @@ internal static class Program
                 for (int i = 2; i < args.Length; i++)
                     cmd += " " + args[i]; // create size
             }
-            return CryptoKeyCli.SendIpc(cmd);
+            // Mutating vault verbs are account-gated on the pipe — status
+            // stays open; the gated send prompts only on AUTH_REQUIRED.
+            return sub == "status"
+                ? CryptoKeyCli.SendIpc(cmd)
+                : CryptoKeyCli.SendIpcGated(cmd);
         }
+
+        // No live guard — standalone mutating vault ops take the account
+        // gate directly. status stays open.
+        if (sub != "status" && !RequireAccountAuth())
+            return 1;
 
         return sub switch
         {
@@ -599,6 +656,32 @@ internal static class Program
             "recover" => VaultRecover(config),
             _ => VaultUsage(),
         };
+    }
+
+    /// <summary>
+    /// Standalone sensitive-op gate: an account-bound install demands the
+    /// account password before a local mutation. Installs that never
+    /// enrolled an account pass through — no credential exists to ask for.
+    /// </summary>
+    private static bool RequireAccountAuth()
+    {
+        AuthService auth = AuthService.Current;
+        // A bare CLI process never opened the config — bind it so the
+        // account record (and thus the offline verifier) is visible.
+        try { auth.BindConfig(ConfigStore.Load()); }
+        catch (Exception) { }
+        if (!auth.Gating || auth.Authorized)
+            return true;
+        string? pw = CryptoKeyCli.ReadPassword("Account password: ");
+        if (pw == null)
+        {
+            Console.WriteLine("error: AUTH_REQUIRED");
+            return false;
+        }
+        if (auth.Authorize(pw, out string err))
+            return true;
+        Console.WriteLine($"error: {err}");
+        return false;
     }
 
     /// <summary>Feed a verified device secret into a VaultService for standalone ops.</summary>

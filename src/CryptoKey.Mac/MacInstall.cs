@@ -24,6 +24,7 @@ internal static class MacInstall
     private static string PlistDir => Path.Combine(Home, "Library", "LaunchAgents");
     private static string PlistPath => Path.Combine(PlistDir, Label + ".plist");
     private static string LogDir => Path.Combine(Home, "Library", "Logs", "CryptoKey");
+    private static string AppBundle => Path.Combine(InstallDir, "CryptoKey.app");
 
     /// <summary>Install the running payload + LaunchAgent, then start it.</summary>
     public static int Install()
@@ -80,6 +81,8 @@ internal static class MacInstall
 
         File.WriteAllText(PlistPath, BuildPlist());
         Console.WriteLine($"Wrote {PlistPath}");
+
+        RegisterUrlScheme();
 
         // Reload if already bootstrapped, then start now.
         uint uid = MacInterop.getuid();
@@ -174,6 +177,67 @@ internal static class MacInstall
                 continue;
             File.Copy(f, Path.Combine(InstallDir, name), overwrite: true);
         }
+    }
+
+    /// <summary>
+    /// Register cryptokey:// with LaunchServices: a bare binary can't
+    /// declare a scheme — CFBundleURLTypes needs a bundle — so we build a
+    /// minimal wrapper .app next to the payload (Info.plist + a MacOS
+    /// symlink to the exe) and lsregister it. Reset links then open this
+    /// app; its argv handler forwards the URL to a live guard or launches
+    /// the GUI on the auth window's reset face.
+    /// </summary>
+    private static void RegisterUrlScheme()
+    {
+        try
+        {
+            string contents = Path.Combine(AppBundle, "Contents");
+            string macos = Path.Combine(contents, "MacOS");
+            Directory.CreateDirectory(macos);
+            File.WriteAllText(Path.Combine(contents, "Info.plist"), BuildAppPlist());
+
+            string link = Path.Combine(macos, "cryptokey");
+            if (!File.Exists(link))
+            {
+                // Relative so the bundle stays valid if InstallDir moves —
+                // MacOS/ → Contents/ → CryptoKey.app/ → InstallDir/cryptokey.
+                File.CreateSymbolicLink(link, "../../../cryptokey");
+            }
+
+            RunQuiet("/System/Library/Frameworks/CoreServices.framework" +
+                "/Frameworks/LaunchServices.framework/Support/lsregister",
+                "-f", AppBundle);
+            Console.WriteLine("Registered cryptokey:// links → CryptoKey.app.");
+        }
+        catch (Exception ex)
+        {
+            // Deep links degrade to manual 'cryptokey cryptokey://…' — not fatal.
+            Console.WriteLine($"URL-scheme registration skipped: {ex.Message}");
+        }
+    }
+
+    private static string BuildAppPlist()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("""<?xml version="1.0" encoding="UTF-8"?>""");
+        sb.AppendLine("""<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">""");
+        sb.AppendLine("<plist version=\"1.0\">");
+        sb.AppendLine("<dict>");
+        sb.AppendLine("  <key>CFBundleExecutable</key><string>cryptokey</string>");
+        sb.AppendLine("  <key>CFBundleIdentifier</key><string>com.cryptokey.app</string>");
+        sb.AppendLine("  <key>CFBundleName</key><string>CryptoKey</string>");
+        sb.AppendLine("  <key>CFBundlePackageType</key><string>APPL</string>");
+        sb.AppendLine("  <key>CFBundleURLTypes</key>");
+        sb.AppendLine("  <array>");
+        sb.AppendLine("    <dict>");
+        sb.AppendLine("      <key>CFBundleURLName</key><string>CryptoKey deep link</string>");
+        sb.AppendLine("      <key>CFBundleURLSchemes</key>");
+        sb.AppendLine("      <array><string>cryptokey</string></array>");
+        sb.AppendLine("    </dict>");
+        sb.AppendLine("  </array>");
+        sb.AppendLine("</dict>");
+        sb.AppendLine("</plist>");
+        return sb.ToString();
     }
 
     /// <summary>

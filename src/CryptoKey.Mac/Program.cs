@@ -23,6 +23,18 @@ internal static class Program
     {
         Platform.Init(MacPlatform.Services);
 
+        // cryptokey:// deep link — forward to a live guard, else the GUI
+        // carries it as its launch link (reset face on the auth window).
+        if (args[0].StartsWith("cryptokey://", StringComparison.OrdinalIgnoreCase))
+        {
+            string url = args[0];
+            if (IpcClient.Send("deeplink " + url, 600) != null)
+                return 0;
+            return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
+                headless: false, openDashboard: true, deepLink: url);
+        }
+
         // Bare `cryptokey` (optionally --dev/--takeover/--headless) = the
         // desktop app. Avalonia tier by default; --headless forces the pump.
         if (args.Length == 0 || args[0].StartsWith("--"))
@@ -57,7 +69,8 @@ internal static class Program
         }
     }
 
-    private static int Guard(bool devMode, bool takeover, bool headless, bool openDashboard)
+    private static int Guard(bool devMode, bool takeover, bool headless,
+        bool openDashboard, string? deepLink = null)
     {
         if (!CryptoKeyCli.TryLoadConfig(out KeyConfig? config, alertModal: true))
             return 1;
@@ -71,6 +84,9 @@ internal static class Program
             Platform.Services.SingleInstance.Acquire("CryptoKeyGuard", takeover);
         if (singleInstance == null)
         {
+            // Guard already up — route a deep link through, else raise it.
+            if (deepLink != null)
+                return CryptoKeyCli.SendIpc("deeplink " + deepLink);
             Console.WriteLine("Another guard instance is already running.");
             return 1;
         }
@@ -93,7 +109,7 @@ internal static class Program
             {
                 // config == null lands here only on the desktop path — the
                 // wizard enrolls before the guard starts.
-                return GuardWithUi(config, devMode, openDashboard);
+                return GuardWithUi(config, devMode, openDashboard, deepLink);
             }
             catch (Exception ex)
             {
@@ -117,7 +133,8 @@ internal static class Program
     /// dashboard, menu-bar tray, notifications — with the guard engine in
     /// the same process (engine events are already on this thread).
     /// </summary>
-    private static int GuardWithUi(KeyConfig? config, bool devMode, bool openDashboard)
+    private static int GuardWithUi(KeyConfig? config, bool devMode,
+        bool openDashboard, string? deepLink)
     {
         var ui = new AvaloniaUiDispatcher();
         var lockUi = new LockWindowCtl();
@@ -147,6 +164,14 @@ internal static class Program
                     UiRuntime.Post(() => shell?.OpenWindow(route));
                     return "ok opened";
                 }
+                if (parts.Length > 1
+                    && parts[0].Equals("deeplink", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (shell == null)
+                        return "err no dashboard";
+                    UiRuntime.Post(() => shell?.OnDeepLink(parts[1]));
+                    return "ok";
+                }
                 return service.DispatchCommand(line);
             });
             service.Start();
@@ -155,6 +180,8 @@ internal static class Program
             var client = new GuardClient(service, cfg, devMode, UiRuntime.Post);
             shell = new UiShell(client, host);
             UiRuntime.InstallCrashPolicy(client.Log, () => shell?.CloseWindows());
+            if (deepLink != null)
+                UiRuntime.Post(() => shell?.OnDeepLink(deepLink));
             if (openDashboard)
                 shell.OpenWindow();
         }
@@ -164,8 +191,15 @@ internal static class Program
             // Daemon by default — the Dock icon appears only while a real
             // window is up (dashboard or the first-run wizard).
             MacInterop.HideFromDock();
+
+            // Bind the enrolled account record (or the pending pre-enroll
+            // one) before any auth-gated surface asks.
+            AuthService.Current.BindConfig(config);
+
             if (config != null)
             {
+                // Guard first — protection never waits for sign-in; the
+                // account gate rides on OpenWindow.
                 StartGuard(config);
                 return;
             }
@@ -173,23 +207,51 @@ internal static class Program
             // First run: the wizard enrolls a key before the guard starts —
             // Dock icon up while a real window is showing.
             MacInterop.SetDockVisible(true);
-            var wizard = new OnboardingWindow(host, firstRun: true,
-                (flow, configure) => Task.Run(() => flow.Commit(configure)));
-            wizard.Closed += (_, _) =>
+
+            void ShowWizard()
             {
-                if (wizard.Enrolled
-                    && CryptoKeyCli.TryLoadConfig(out KeyConfig? fresh, alertModal: true)
-                    && fresh != null)
+                var wizard = new OnboardingWindow(host, firstRun: true,
+                    (flow, configure) => Task.Run(() => flow.Commit(configure)));
+                wizard.Closed += (_, _) =>
                 {
-                    StartGuard(fresh);
-                }
+                    if (wizard.Enrolled
+                        && CryptoKeyCli.TryLoadConfig(out KeyConfig? fresh, alertModal: true)
+                        && fresh != null)
+                    {
+                        StartGuard(fresh);
+                    }
+                    else
+                    {
+                        exitCode = 1;
+                        UiRuntime.Shutdown();
+                    }
+                };
+                wizard.Show();
+            }
+
+            // The account gate precedes the wizard: a pending record
+            // resumes at sign-in, a virgin install creates. No backend +
+            // no credential = nothing to gate → straight to the wizard.
+            AuthService auth = AuthService.Current;
+            if (!auth.Configured && !auth.Gating)
+            {
+                ShowWizard();
+                return;
+            }
+            var authWin = new AuthWindow(host,
+                auth.HasPending || auth.Record != null
+                    ? AuthMode.SignIn : AuthMode.Create);
+            authWin.Closed += (_, _) =>
+            {
+                if (authWin.Authenticated)
+                    ShowWizard();
                 else
                 {
                     exitCode = 1;
                     UiRuntime.Shutdown();
                 }
             };
-            wizard.Show();
+            authWin.Show();
         });
 
         try { ipc?.Dispose(); } catch (Exception) { }

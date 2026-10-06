@@ -34,6 +34,16 @@ internal sealed class KeyConfig
     /// </summary>
     public ulong VaultEpoch { get; set; }
 
+    /// <summary>
+    /// The bound cloud account (identity + offline password verifier — never
+    /// tokens). Nullable: pre-account installs carry null and behave exactly
+    /// as before. Once present it JOINS the attestation canon — a grafted
+    /// foreign verifier mismatches on the next key verify, and a deleted or
+    /// corrupted section fails closed for sensitive ops (relink via online
+    /// sign-in is the recovery path).
+    /// </summary>
+    public AccountRecord? Account { get; set; }
+
     public GuardSettings Guard { get; set; } = new();
 }
 
@@ -412,19 +422,20 @@ internal static class ConfigStore
     /// to forge the MAC, so an attacker who only copies/edits files can't
     /// produce one.
     /// </summary>
+    /// <summary>New envelopes always carry the accounthash field ("-" when none).</summary>
     public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
-        => ComputeAttest(secret, config, includeEpoch: true);
+        => ComputeAttest(secret, config, includeEpoch: true, accountField: true);
 
     /// <summary>Pre-epoch canon (Tier-1 keyfiles) — reads only; test-visible.</summary>
     internal static byte[] ComputeAttestNoEpoch(byte[] secret, KeyConfig config)
-        => ComputeAttest(secret, config, includeEpoch: false);
+        => ComputeAttest(secret, config, includeEpoch: false, accountField: false);
 
     private static byte[] ComputeAttest(byte[] secret, KeyConfig config,
-        bool includeEpoch)
+        bool includeEpoch, bool accountField)
     {
         byte[] data = Encoding.UTF8.GetBytes(
             "CKY-ATTEST2" + config.DeviceSerial + config.PassphraseHash
-            + GuardCanonical(config, includeEpoch));
+            + GuardCanonical(config, includeEpoch, accountField));
         return HMACSHA256.HashData(secret, data);
     }
 
@@ -432,11 +443,20 @@ internal static class ConfigStore
     /// Fixed-time compare against every accepted attestation form — all
     /// candidates are computed regardless of an early hit, so no timing
     /// side-channel tells a prober which form the file carries:
-    /// 1. canon incl. vaultepoch (everything written now)
-    /// 2. canon without it (pre-epoch Tier-1 keyfiles)
-    /// 3. CKY-ATTEST‖serial‖phraseHash (pre-canon)
+    /// 1. canon + accounthash + vaultepoch (everything written now)
+    /// 2. canon + accounthash, no epoch
+    /// 3. canon + epoch, no accounthash (pre-account keyfiles)
+    /// 4. canon without epoch (pre-epoch Tier-1 keyfiles)
+    /// 5. CKY-ATTEST‖serial‖phraseHash (pre-canon)
     /// Each canon addition costs one more accepted form; the next envelope
     /// write upgrades the file to the newest form silently.
+    ///
+    /// STRICT RULE: once <see cref="KeyConfig.Account"/> is bound, only the
+    /// account-bearing forms (1, 2) verify — a grafted or edited
+    /// VerifierHash can never hide behind the pre-account canon. Deleting
+    /// the section is the inverse: the stored account MAC won't match any
+    /// account-free form, so it surfaces as a tamper announce and heals to
+    /// the account-free canon (documented delete→relink flow).
     /// </summary>
     public static bool AttestMatches(byte[] secret, KeyConfig config,
         ReadOnlySpan<byte> stored)
@@ -444,9 +464,18 @@ internal static class ConfigStore
         bool ok = CryptographicOperations.FixedTimeEquals(stored,
             ComputeAttest(secret, config));
         ok |= CryptographicOperations.FixedTimeEquals(stored,
-            ComputeAttest(secret, config, includeEpoch: false));
-        ok |= CryptographicOperations.FixedTimeEquals(stored,
-            LegacyAttest(secret, config));
+            ComputeAttest(secret, config, includeEpoch: false, accountField: true));
+        if (config.Account == null)
+        {
+            // Account-free configs still accept every historical form —
+            // installs that never enrolled an account verify unchanged.
+            ok |= CryptographicOperations.FixedTimeEquals(stored,
+                ComputeAttest(secret, config, includeEpoch: true, accountField: false));
+            ok |= CryptographicOperations.FixedTimeEquals(stored,
+                ComputeAttest(secret, config, includeEpoch: false, accountField: false));
+            ok |= CryptographicOperations.FixedTimeEquals(stored,
+                LegacyAttest(secret, config));
+        }
         return ok;
     }
 
@@ -469,8 +498,12 @@ internal static class ConfigStore
     /// Cosmetic fields (Sounds, BalloonTips, Animations) and layout fields
     /// (VaultMountPoint/SizeMb/ImagePath) are deliberately absent: changing
     /// them must not force a re-attest. The hash-chain fields self-verify.
+    /// <paramref name="accountField"/> appends the bound verifier hash
+    /// ("-" when no account) — the field that makes a grafted account
+    /// section detectable on the next key verify.
     /// </summary>
-    private static string GuardCanonical(KeyConfig config, bool includeEpoch)
+    private static string GuardCanonical(KeyConfig config, bool includeEpoch,
+        bool accountField)
     {
         GuardSettings g = config.Guard;
         static string B(bool v) => v ? "true" : "false";
@@ -487,7 +520,10 @@ internal static class ConfigStore
             + "|vaultautomount=" + B(g.VaultAutoMount)
             + "|vaultidleminutes=" + g.VaultIdleMinutes
             + "|pollintervalms=" + g.PollIntervalMs
-            + (includeEpoch ? "|vaultepoch=" + config.VaultEpoch : "");
+            + (includeEpoch ? "|vaultepoch=" + config.VaultEpoch : "")
+            + (accountField
+                ? "|accounthash=" + (config.Account?.VerifierHash ?? "-")
+                : "");
     }
 
     // The on-disk secret is 64 random bytes — high entropy, so a single

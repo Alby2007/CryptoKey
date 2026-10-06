@@ -89,6 +89,18 @@ read timeout ~5 s.
 | `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
+| `deeplink <url>` | `ok` | Forwards a `cryptokey://` launch arg to the shell's deep-link handler — routed before `DispatchCommand` |
+| `auth status` | `ok auth state=… email=… configured=…` | Read-only account-gate state: `unconfigured`/`unenrolled`/`locked`/`offlineunlocked`/`online` |
+| `auth signout` | `ok signed out` | Ends the session (clears `session.dat`); gated like any mutator |
+
+**Account gate** (see `docs/auth.md`): with an account bound, mutating
+verbs — `pause`, `resume`, `quit`, `reenrolled`, `vault <mutator>`,
+`update apply`, `auth signout` — answer `err AUTH_REQUIRED — …` unless
+the request carries `|auth <base64 password>` or the session is already
+unlocked. A correct trailer also arms the session for the rest of the
+run. `lock`, `status`, `open`, `deeplink`, `auth status`, `vault status`,
+and `update status`/`check` are always open (`lock` only makes the box
+safer; reads disclose nothing).
 
 Security: DACL grants `GA` to the owning user's SID; a medium-integrity
 SACL label (`SE_SECURITY_PRIVILEGE` permitting) lets the normal CLI reach
@@ -132,6 +144,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.VaultIdleMinutes` | Seal the vault after N minutes without input — `0` = off (default). A mounted vault dismounts and drops its keys; the verify feed stays suppressed while idle, so it remounts when input returns |
 | `Guard.UpdateCheckEnabled` | Check GitHub Releases at startup + daily for a newer signed build — default `true`. Notify-only: nothing installs without an explicit apply. Lifecycle class — outside the attestation canon |
 | `VaultEpoch` | Highest vault manifest seq the keyfile has attested — the rollback fence's trusted witness. Managed automatically (synced on open/close/reformat); hand-editing it trips attestation, and setting it past the image flags `rolledback` |
+| `Account` | The bound CryptoKey account — `UserId`, `Email`, `VerifierSalt`/`VerifierHash`/`VerifierIterations` (PBKDF2-SHA256, 600 000). Never a password or token — the verifier proves the app-side password offline; `session.dat` holds the bearer pair. Inside the attestation MAC (`\|accounthash=`), so grafting a foreign verifier trips the next key verify and refuses the password path |
 
 `config.json` also mirrors into `HKCU\Software\CryptoKey\Config` (REG_SZ)
 on every save — a third copy on a different kill surface. Load chain:

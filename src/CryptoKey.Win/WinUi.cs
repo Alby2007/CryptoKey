@@ -12,11 +12,21 @@ namespace CryptoKey;
 internal static class WinUi
 {
     public static int Run(KeyConfig? config, bool devMode, bool forceClassic, bool openDashboard)
+        => Run(config, devMode, forceClassic, openDashboard, deepLink: null);
+
+    /// <param name="deepLink">A cryptokey:// URL launched the process —
+    /// recovery links land on the auth window's reset face.</param>
+    public static int Run(KeyConfig? config, bool devMode, bool forceClassic,
+        bool openDashboard, string? deepLink)
     {
         // Process-wide WinForms setup (DPI mode, text rendering) must precede
         // ANY window on ANY thread — the engine's monitor and lock forms.
         ApplicationConfiguration.Initialize();
         System.Windows.Forms.Application.SetColorMode(SystemColorMode.Dark);
+
+        // The account service is a process singleton — bind the enrolled
+        // record (or the pending pre-enrollment one) before anything asks.
+        AuthService.Current.BindConfig(config);
 
         EngineHost? engine = null;
         UiShell? shell = null;
@@ -33,13 +43,25 @@ internal static class WinUi
                     engine = EngineHost.Start(cfg, devMode, forceClassic, line =>
                     {
                         string[] parts = line.Trim().Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-                        if (parts.Length == 0 || !parts[0].Equals("open", StringComparison.OrdinalIgnoreCase))
+                        if (parts.Length == 0)
                             return null;
-                        if (shell == null)
-                            return "err no dashboard";
-                        Route route = Routes.Parse(parts.Length > 1 ? parts[1] : null);
-                        UiRuntime.Post(() => shell?.OpenWindow(route));
-                        return "ok opened";
+                        if (parts[0].Equals("open", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (shell == null)
+                                return "err no dashboard";
+                            Route route = Routes.Parse(parts.Length > 1 ? parts[1] : null);
+                            UiRuntime.Post(() => shell?.OpenWindow(route));
+                            return "ok opened";
+                        }
+                        if (parts[0].Equals("deeplink", StringComparison.OrdinalIgnoreCase)
+                            && parts.Length > 1)
+                        {
+                            if (shell == null)
+                                return "err no dashboard";
+                            UiRuntime.Post(() => shell?.OnDeepLink(parts[1]));
+                            return "ok";
+                        }
+                        return null;
                     });
                     if (engine.Error != null)
                     {
@@ -52,33 +74,69 @@ internal static class WinUi
                     engine.Stopped += UiRuntime.Shutdown;
                     shell = new UiShell(engine.Client, host);
                     UiRuntime.InstallCrashPolicy(engine.Client.Log, () => shell?.CloseWindows());
+                    if (deepLink != null)
+                        UiRuntime.Post(() => shell?.OnDeepLink(deepLink));
                     if (openDashboard)
                         shell.OpenWindow();
                 }
 
                 if (config != null)
                 {
+                    // The guard starts immediately — the account gate rides
+                    // on OpenWindow; protection never waits for sign-in.
                     StartGuard(config);
                     return;
                 }
 
-                var wizard = new OnboardingWindow(host, firstRun: true,
-                    (flow, configure) => Task.Run(() => flow.Commit(configure)));
-                wizard.Closed += (_, _) =>
+                // First run: the account gate precedes the wizard — a
+                // pending record resumes at sign-in, a virgin install gets
+                // create-account. No backend + no credential = nothing to
+                // gate with → straight to the wizard (pre-account installs
+                // stay usable).
+                AuthService auth = AuthService.Current;
+                bool skipAuth = !auth.Configured && !auth.Gating;
+
+                void ShowWizard()
                 {
-                    if (wizard.Enrolled
-                        && CryptoKeyCli.TryLoadConfig(out KeyConfig? fresh, alertModal: true)
-                        && fresh != null)
+                    var wizard = new OnboardingWindow(host, firstRun: true,
+                        (flow, configure) => Task.Run(() => flow.Commit(configure)));
+                    wizard.Closed += (_, _) =>
                     {
-                        StartGuard(fresh);
-                    }
+                        if (wizard.Enrolled
+                            && CryptoKeyCli.TryLoadConfig(out KeyConfig? fresh, alertModal: true)
+                            && fresh != null)
+                        {
+                            StartGuard(fresh);
+                        }
+                        else
+                        {
+                            exitCode = 1;
+                            UiRuntime.Shutdown();
+                        }
+                    };
+                    wizard.Show();
+                }
+
+                if (skipAuth)
+                {
+                    ShowWizard();
+                    return;
+                }
+
+                var authWin = new AuthWindow(host,
+                    auth.HasPending || auth.Record != null
+                        ? AuthMode.SignIn : AuthMode.Create);
+                authWin.Closed += (_, _) =>
+                {
+                    if (authWin.Authenticated)
+                        ShowWizard();
                     else
                     {
                         exitCode = 1;
                         UiRuntime.Shutdown();
                     }
                 };
-                wizard.Show();
+                authWin.Show();
             });
         }
         catch (Exception ex)

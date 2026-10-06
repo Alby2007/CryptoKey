@@ -1,0 +1,435 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Xunit;
+
+namespace CryptoKey.Tests;
+
+/// <summary>
+/// The account layer's pure invariants: the local PBKDF2 verifier, the
+/// pending-record fold, the attestation canonical forms, the GoTrue REST
+/// client against a scripted handler, and the IPC gate — all without a
+/// network or a real Supabase project.
+/// </summary>
+public class AuthTests : IDisposable
+{
+    private static readonly SupabaseConfig Cfg = new()
+    {
+        ProjectUrl = "https://test.supabase.co",
+        AnonKey = "test-anon-key-0123456789abcdef",
+    };
+
+    public AuthTests()
+    {
+        // Every test starts from a clean account slate — session.dat and
+        // account.pending.json live in the redirected test config dir.
+        AuthService.SetCurrent(null);
+        TokenStore.Clear();
+        AuthService.PendingStore.Clear();
+    }
+
+    public void Dispose()
+    {
+        AuthService.SetCurrent(null);
+        TokenStore.Clear();
+        AuthService.PendingStore.Clear();
+    }
+
+    /// <summary>A queued-response HttpMessageHandler for the REST flows.</summary>
+    private sealed class ScriptHandler : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode Code, string Body)> _responses = new();
+        private readonly Func<HttpRequestMessage, (HttpStatusCode, string)?>? _router;
+        public List<string> Requests { get; } = new();
+        public bool Unreachable;
+
+        public ScriptHandler() { }
+        public ScriptHandler(Func<HttpRequestMessage, (HttpStatusCode, string)?> router)
+            => _router = router;
+
+        public void Enqueue(HttpStatusCode code, string body)
+            => _responses.Enqueue((code, body));
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (Unreachable)
+                throw new HttpRequestException("scripted outage");
+            string body = request.Content?.ReadAsStringAsync().Result ?? "";
+            Requests.Add($"{request.Method} {request.RequestUri} {body}");
+            var r = _router?.Invoke(request)
+                ?? (_responses.Count > 0 ? _responses.Dequeue()
+                    : (HttpStatusCode.InternalServerError, "{}"));
+            return Task.FromResult(new HttpResponseMessage(r.Item1)
+            {
+                Content = new StringContent(r.Item2, Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
+    private static string TokenJson(string access = "acc-1", string refresh = "ref-1",
+        string id = "user-1", string email = "a@b.c")
+        => JsonSerializer.Serialize(new
+        {
+            access_token = access,
+            refresh_token = refresh,
+            expires_in = 3600,
+            user = new { id, email },
+        });
+
+    // ---------------------------------------------------------- verifier
+
+    [Fact]
+    public void Verifier_round_trips_and_rejects()
+    {
+        AccountRecord rec = AccountRecord.Create("u1", "a@b.c", "correct horse");
+        Assert.True(rec.IsComplete);
+        Assert.True(rec.VerifyPassword("correct horse"));
+        Assert.False(rec.VerifyPassword("wrong"));
+        Assert.False(rec.VerifyPassword(""));
+    }
+
+    [Fact]
+    public void Verifier_malformed_fields_fail_closed_not_throw()
+    {
+        var rec = new AccountRecord
+        {
+            UserId = "u", Email = "a@b.c",
+            VerifierSalt = "!!!not-base64!!!", VerifierHash = "%%%",
+            VerifierIterations = 600_000,
+        };
+        // IsComplete checks presence, not validity — but verify must still
+        // fail closed on undecodable fields, never throw.
+        Assert.False(rec.VerifyPassword("x"));
+
+        var empty = new AccountRecord { UserId = "u" };
+        Assert.False(empty.IsComplete);
+        Assert.False(empty.VerifyPassword("x"));
+
+        AccountRecord good = AccountRecord.Create("u", "a@b.c", "x");
+        good.VerifierSalt = Convert.ToBase64String(new byte[8]); // wrong len
+        Assert.False(good.VerifyPassword("x"));
+    }
+
+    [Fact]
+    public void RewriteVerifier_rebinds_to_the_new_password()
+    {
+        AccountRecord rec = AccountRecord.Create("u1", "a@b.c", "old-pw");
+        rec.RewriteVerifier("new-pw");
+        Assert.False(rec.VerifyPassword("old-pw"));
+        Assert.True(rec.VerifyPassword("new-pw"));
+    }
+
+    // ---------------------------------------------------------- pending fold
+
+    [Fact]
+    public void Pending_record_folds_into_enrollment()
+    {
+        // A prior test's config could already carry an account — the fold
+        // prefers Existing over pending, so clear ALL three copies (primary
+        // + file backup + third copy) — Load() restores a missing primary
+        // from the backups, which is itself under test elsewhere.
+        File.Delete(ConfigStore.ConfigPath);
+        File.Delete(ConfigStore.ConfigPath + ".bak");
+        File.Delete(TestInit.ThirdCopyPath);
+        Assert.Null(ConfigStore.Load()?.Account);
+        AccountRecord pending = AccountRecord.Create("u1", "a@b.c", "pw");
+        AuthService.PendingStore.Save(pending);
+        Assert.True(AuthService.PendingStore.Exists);
+
+        string dir = TestDisk.TempDir();
+        var flow = new EnrollmentFlow();
+        flow.SelectDisk(TestDisk.For(dir));
+        flow.Confirm(flow.Phrase!);
+
+        EnrollResult r = flow.Commit();
+        Assert.True(r.Ok, r.Message);
+        Assert.NotNull(r.Config!.Account);
+        Assert.Equal("a@b.c", r.Config.Account!.Email);
+        Assert.False(AuthService.PendingStore.Exists); // staging file served its purpose
+
+        KeyConfig? saved = ConfigStore.Load();
+        Assert.Equal(pending.VerifierHash, saved?.Account?.VerifierHash);
+        // The keyfile's attestation covers the account from the start.
+        KeyfileCheck check = KeyVerifier.Check(r.Config, TestDisk.For(dir));
+        Assert.Equal(AttestState.Ok, check.Attest);
+    }
+
+    [Fact]
+    public void Reenroll_carries_the_bound_account_forward()
+    {
+        string dir = TestDisk.TempDir();
+        var flow = new EnrollmentFlow();
+        flow.SelectDisk(TestDisk.For(dir));
+        flow.Confirm(flow.Phrase!);
+        EnrollResult first = flow.Commit();
+        Assert.True(first.Ok, first.Message);
+        first.Config!.Account = AccountRecord.Create("u1", "a@b.c", "pw");
+        ConfigStore.Save(first.Config);
+
+        var again = new EnrollmentFlow(); // picks up Existing with the account
+        again.SelectDisk(TestDisk.For(dir));
+        again.Confirm(again.Phrase!);
+        EnrollResult second = again.Commit();
+        Assert.True(second.Ok, second.Message);
+        Assert.Equal("a@b.c", second.Config!.Account!.Email);
+    }
+
+    // ---------------------------------------------------------- attestation
+
+    [Fact]
+    public void Account_free_config_accepts_all_historical_forms()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = null;
+
+        // Current canon, no epoch, no accounthash, legacy — all still pass.
+        Assert.True(ConfigStore.AttestMatches(secret, cfg,
+            ConfigStore.ComputeAttest(secret, cfg)));
+        Assert.True(ConfigStore.AttestMatches(secret, cfg,
+            ConfigStore.ComputeAttestNoEpoch(secret, cfg)));
+    }
+
+    [Fact]
+    public void Account_bound_config_verifies_and_rejects_graft()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "pw");
+
+        byte[] stored = ConfigStore.ComputeAttest(secret, cfg);
+        Assert.True(ConfigStore.AttestMatches(secret, cfg, stored));
+
+        // Grafted verifier hash — same slot, attacker's password — must
+        // fail even though the legacy forms are computed too.
+        cfg.Account!.VerifierHash =
+            Convert.ToBase64String(TestDisk.RandomSecret()[..32]);
+        Assert.False(ConfigStore.AttestMatches(secret, cfg, stored));
+
+        // And the strict rule: while an account is bound, a MAC over the
+        // pre-account canon is NOT accepted — deleting/grafting the section
+        // can't hide behind a legacy form.
+        cfg.Account.VerifierHash =
+            AccountRecord.Create("u1", "a@b.c", "pw").VerifierHash;
+        byte[] accountFreeCanon = ConfigStore.ComputeAttestNoEpoch(secret, cfg);
+        Assert.False(ConfigStore.AttestMatches(secret, cfg, accountFreeCanon));
+    }
+
+    [Fact]
+    public void Keyfile_attestation_flags_a_tampered_verifier()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        string dir = TestDisk.TempDir();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "pw");
+        TestDisk.WriteKeyfile(dir, secret, cfg);
+
+        Assert.Equal(AttestState.Ok,
+            KeyVerifier.Check(cfg, TestDisk.For(dir)).Attest);
+
+        cfg.Account!.VerifierHash =
+            Convert.ToBase64String(TestDisk.RandomSecret()[..32]);
+        Assert.Equal(AttestState.Mismatch,
+            KeyVerifier.Check(cfg, TestDisk.For(dir)).Attest);
+    }
+
+    // ---------------------------------------------------------- AuthService REST
+
+    [Fact]
+    public async Task Signup_with_session_tokens_establishes_record()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+
+        AuthResult r = await auth.SignUp("a@b.c", "pw-123456");
+        Assert.True(r.Ok, r.Error);
+        Assert.Equal(AuthGateState.Online, auth.State);
+        Assert.True(auth.Authorized);
+        Assert.True(auth.Record?.VerifyPassword("pw-123456"));
+        Assert.Contains("/auth/v1/signup", handler.Requests[0]);
+        Assert.True(TokenStore.Exists);
+    }
+
+    [Fact]
+    public async Task Signup_email_confirm_returns_needs_confirm()
+    {
+        var handler = new ScriptHandler();
+        // Confirm-on signup returns the user object, no tokens.
+        handler.Enqueue(HttpStatusCode.OK,
+            JsonSerializer.Serialize(new { id = "u9", email = "a@b.c" }));
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+
+        AuthResult r = await auth.SignUp("a@b.c", "pw-123456");
+        Assert.True(r.Ok);
+        Assert.True(r.NeedsConfirm);
+        Assert.False(auth.Authorized);
+    }
+
+    [Fact]
+    public async Task Signin_online_then_offline_grace_unlocks()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+
+        // New process-day: the record survives in pending storage, but the
+        // session file is gone (expired tokens cleared) and the server is
+        // unreachable — the verifier is the only way back in.
+        TokenStore.Clear();
+        var auth2 = new AuthService(Cfg, new ScriptHandler { Unreachable = true });
+        auth2.BindConfig(null);
+        Assert.Equal(AuthGateState.Locked, auth2.State);
+
+        AuthResult r = await auth2.SignIn("a@b.c", "pw-123456");
+        Assert.True(r.Ok, r.Error);
+        Assert.True(r.Offline);
+        Assert.Equal(AuthGateState.OfflineUnlocked, auth2.State);
+    }
+
+    [Fact]
+    public async Task Offline_unlock_before_any_signin_is_refused()
+    {
+        var auth = new AuthService(Cfg, new ScriptHandler());
+        auth.BindConfig(null);
+        AuthResult r = await auth.SignIn("a@b.c", "pw");
+        Assert.False(r.Ok); // no record — nothing to verify against
+        Assert.Equal(AuthGateState.Unenrolled, auth.State);
+    }
+
+    [Fact]
+    public async Task Refresh_renews_and_a_rejected_refresh_ends_the_session()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+        Assert.True((await auth.SignIn("a@b.c", "pw")).Ok);
+
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(access: "acc-2", refresh: "ref-2"));
+        Assert.True((await auth.Refresh()).Ok);
+        Assert.Contains("grant_type=refresh_token", handler.Requests[^1]);
+
+        handler.Enqueue(HttpStatusCode.BadRequest, """{"error":"invalid_grant"}""");
+        Assert.False((await auth.Refresh()).Ok);
+        Assert.False(TokenStore.Exists); // dead session cleared
+    }
+
+    [Fact]
+    public async Task SendRecovery_is_ok_shaped_and_reaches_recover()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, "{}");
+        var auth = new AuthService(Cfg, handler);
+
+        AuthResult r = await auth.SendRecovery("a@b.c");
+        Assert.True(r.Ok, r.Error);
+        Assert.Contains("/auth/v1/recover", handler.Requests[0]);
+    }
+
+    [Fact]
+    public async Task CompleteRecovery_verifies_token_puts_password_and_rewrites_verifier()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());   // /verify
+        handler.Enqueue(HttpStatusCode.OK, "{}");          // PUT /user
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+
+        AuthResult r = await auth.CompleteRecovery("tok-hash", "new-pw");
+        Assert.True(r.Ok, r.Error);
+        Assert.Contains("/auth/v1/verify", handler.Requests[0]);
+        Assert.Contains("/auth/v1/user", handler.Requests[1]);
+        Assert.True(auth.Record?.VerifyPassword("new-pw"));
+    }
+
+    [Fact]
+    public async Task Unconfigured_service_fails_clearly()
+    {
+        var auth = new AuthService(null, null); // no supabase.json
+        Assert.False(auth.Configured);
+        Assert.False((await auth.SignUp("a@b.c", "pw")).Ok);
+        Assert.False((await auth.SendRecovery("a@b.c")).Ok);
+    }
+
+    // ---------------------------------------------------------- IPC gate
+
+    [Fact]
+    public void Gated_verbs_require_auth_when_an_account_is_bound()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        // Mutating verbs gated…
+        Assert.StartsWith("err AUTH_REQUIRED", svc.DispatchCommand("pause"));
+        Assert.StartsWith("err AUTH_REQUIRED", svc.DispatchCommand("resume"));
+        Assert.StartsWith("err AUTH_REQUIRED", svc.DispatchCommand("quit"));
+        Assert.StartsWith("err AUTH_REQUIRED", svc.DispatchCommand("vault mount"));
+
+        // …open verbs stay open — lock only makes the box safer.
+        Assert.StartsWith("ok", svc.DispatchCommand("status"));
+        Assert.StartsWith("ok", svc.DispatchCommand("auth status"));
+        Assert.StartsWith("ok", svc.DispatchCommand("vault status"));
+
+        // The password trailer unlocks the session (b64 — punctuation-safe).
+        string trailer = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("acct-pw"));
+        Assert.StartsWith("ok", svc.DispatchCommand("pause 1" + trailer));
+        // And now the session is armed — no trailer needed.
+        Assert.StartsWith("ok", svc.DispatchCommand("resume"));
+    }
+
+    [Fact]
+    public void No_account_means_no_gate()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = null;
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        Assert.StartsWith("ok", svc.DispatchCommand("pause 1"));
+        Assert.StartsWith("ok", svc.DispatchCommand("resume"));
+    }
+
+    [Fact]
+    public void Wrong_password_is_refused_and_the_right_one_arms()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "real-pw");
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        string bad = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("nope"));
+        Assert.StartsWith("err wrong account password",
+            svc.DispatchCommand("pause" + bad));
+
+        string good = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("real-pw"));
+        Assert.StartsWith("ok", svc.DispatchCommand("pause 1" + good));
+    }
+
+    [Fact]
+    public void Malformed_auth_trailer_is_refused()
+    {
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig cfg = TestDisk.NewConfig(secret);
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "pw");
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        Assert.StartsWith("err malformed auth trailer",
+            svc.DispatchCommand("pause |auth !!!notb64!!!"));
+    }
+}

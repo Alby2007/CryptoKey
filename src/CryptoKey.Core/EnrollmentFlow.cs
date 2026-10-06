@@ -129,6 +129,10 @@ internal sealed class EnrollmentFlow
             KeyConfig fresh = ConfigStore.CreateNew(Disk.SerialNumber, secret, _phrase);
             if (Existing?.Guard != null)
                 fresh.Guard = Existing.Guard;
+            // Account continuity: re-enroll carries the bound account; a
+            // first run folds in the pre-enrollment pending record. Either
+            // way the new keyfile attests it from the start.
+            fresh.Account = Existing?.Account ?? AuthService.PendingStore.Load();
             configure?.Invoke(fresh.Guard);
 
             string keyPath = KeyVerifier.KeyFilePath(Volume);
@@ -154,6 +158,15 @@ internal sealed class EnrollmentFlow
                 try { File.Delete(keyPath); } catch { }
                 return new(false, $"Failed to save config to {ConfigStore.ConfigPath}: {ex.Message}",
                     null, null, warnings);
+            }
+
+            // The account is in the attested config now — the pending
+            // staging file has served its purpose.
+            if (fresh.Account != null)
+            {
+                AuthService.PendingStore.Clear();
+                try { AuthService.Current.BindConfig(fresh); }
+                catch (Exception) { }
             }
 
             // Best-effort host extras (shell shortcuts) — never fail enrollment.
