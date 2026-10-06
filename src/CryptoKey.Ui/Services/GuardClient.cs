@@ -24,7 +24,7 @@ internal sealed class GuardClient : IDisposable
     private readonly KeyConfig _config;
     private readonly IUiDispatcher _engine;
     private readonly Action<Action> _toUi;
-    private readonly List<string> _activity;
+    private readonly RingBuffer<string> _activity = new(500);
 
     /// <summary>Must be constructed on the engine thread (it snapshots engine state).</summary>
     public GuardClient(GuardService service, KeyConfig config, bool devMode, Action<Action> postToUi)
@@ -36,7 +36,8 @@ internal sealed class GuardClient : IDisposable
         DevMode = devMode;
         Snapshot = service.Snapshot();
         Settings = Capture();
-        _activity = service.RecentActivity.ToList();
+        foreach (string line in service.RecentActivity)
+            _activity.Push(line);
         service.StateChanged += OnEngineState;
         service.ActivityLogged += OnEngineActivity;
         service.Notification += OnEngineNotification;
@@ -75,9 +76,7 @@ internal sealed class GuardClient : IDisposable
 
     private void OnEngineActivity(string line) => _toUi(() =>
     {
-        _activity.Add(line);
-        if (_activity.Count > 500)
-            _activity.RemoveRange(0, _activity.Count - 500);
+        _activity.Push(line);
         ActivityLogged?.Invoke(line);
     });
 
@@ -94,8 +93,7 @@ internal sealed class GuardClient : IDisposable
 
     private static bool SettingsEqual(SettingsView a, SettingsView b)
         => a.DeviceSerial == b.DeviceSerial && a.RotationCount == b.RotationCount
-           && System.Text.Json.JsonSerializer.Serialize(a.Guard)
-              == System.Text.Json.JsonSerializer.Serialize(b.Guard);
+           && a.Guard.ValuesEqual(b.Guard);
 
     // ---------------------------------------------------------- UI → engine
 

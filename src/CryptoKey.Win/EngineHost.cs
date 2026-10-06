@@ -52,32 +52,28 @@ internal sealed class EngineHost
     private void Main(KeyConfig config, bool devMode, bool forceClassic,
         Func<string, string?> intercept, ManualResetEventSlim ready)
     {
+        EngineBundle? bundle = null;
         try
         {
-            _service = new GuardService(config, devMode, forceClassic);
-            GuardService svc = _service;
-            Client = new GuardClient(svc, config, devMode, UiRuntime.Post);
-            _ipc = new IpcServer(svc.UiDispatcher, line => intercept(line) ?? svc.DispatchCommand(line));
-            // An engine-thread exception while locked can leave input
-            // swallowed behind a dead overlay — an invisible soft-brick.
-            // Fail dead instead: free the input, then kill the process.
-            Application.ThreadException += (_, e) =>
+            bundle = EngineBundle.Create(config, devMode, forceClassic,
+                intercept, withClient: true, postToUi: UiRuntime.Post);
+            if (bundle.Error != null)
             {
-                Console.WriteLine($"[guard] Fatal engine error: {e.Exception}");
-                try { svc.Log($"Fatal engine error: {e.Exception.GetType().Name}: {e.Exception.Message}"); }
-                catch (Exception) { }
-                try { svc.ReleaseInput(); }
-                catch (Exception) { }
-                Environment.Exit(2);
-            };
-            svc.Start();
-            _ipc.Start(svc.Log);
+                Error = bundle.Error;
+                bundle.Dispose();
+                bundle = null;
+                ready.Set();
+                return;
+            }
+            _service = bundle.Service!;
+            _ipc = bundle.Ipc!;
+            Client = bundle.Client!;
+            _service.Log("Engine thread ready.");
         }
         catch (Exception ex)
         {
             Error = ex.Message;
-            try { _ipc?.Dispose(); } catch (Exception) { }
-            try { _service?.Dispose(); } catch (Exception) { }
+            bundle?.Dispose();
             ready.Set();
             return;
         }
@@ -89,9 +85,7 @@ internal sealed class EngineHost
         }
         finally
         {
-            try { Client.Dispose(); } catch (Exception) { }
-            try { _ipc.Dispose(); } catch (Exception) { }
-            try { _service.Dispose(); } catch (Exception) { }
+            try { bundle?.Dispose(); } catch (Exception) { }
             try { Stopped?.Invoke(); } catch (Exception) { }
         }
     }

@@ -171,7 +171,7 @@ internal sealed class GuardService : IDisposable
     /// </summary>
     public event Action<string, string>? Notification;
 
-    private readonly List<string> _activity = new();
+    private readonly RingBuffer<string> _activity = new(200);
 
     /// <summary>Recent log lines, oldest first (for UI backfill).</summary>
     public IReadOnlyList<string> RecentActivity => _activity;
@@ -1375,9 +1375,7 @@ internal sealed class GuardService : IDisposable
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         Console.WriteLine(line);
-        _activity.Add(line);
-        if (_activity.Count > 200)
-            _activity.RemoveAt(0);
+        _activity.Push(line);
         try
         {
             Directory.CreateDirectory(ConfigStore.ConfigDir);
@@ -1400,7 +1398,7 @@ internal sealed class GuardService : IDisposable
             string[] lines = File.ReadAllLines(LogPath);
             foreach (string line in lines.TakeLast(60))
                 if (!string.IsNullOrWhiteSpace(line))
-                    _activity.Add(line);
+                    _activity.Push(line);
         }
         catch (Exception) { }
     }

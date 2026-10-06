@@ -45,6 +45,33 @@ internal static class Theme
     public static Font MonoFont(float size = 8.5f)
         => new(MonoFamily, size);
 
+    // ---- Shared GDI caches — per-thread, intentionally never disposed ----
+    // A cached Font/Pen is a GDI handle; sharing one across threads isn't
+    // documented-safe, so every cache is [ThreadStatic] (the engine and lock
+    // threads each get their own handful of handles, held for process life).
+
+    [ThreadStatic]
+    private static Dictionary<(FontFamily family, float size, FontStyle style), Font>? _fonts;
+
+    /// <summary>Per-thread font cache — the per-frame `new Font` path is gone.</summary>
+    public static Font CachedFont(FontFamily family, float size, FontStyle style = FontStyle.Regular)
+    {
+        var cache = _fonts ??= new();
+        var key = (family, size, style);
+        if (!cache.TryGetValue(key, out Font? font))
+            cache[key] = font = new Font(family, size, style);
+        return font;
+    }
+
+    [ThreadStatic] private static StringFormat? _centerFormat;
+
+    /// <summary>Centered+baseline-middle StringFormat shared by icon drawing.</summary>
+    private static StringFormat CenterFormat => _centerFormat ??= new StringFormat
+    {
+        Alignment = StringAlignment.Center,
+        LineAlignment = StringAlignment.Center,
+    };
+
     private static FontFamily? TryFamily(string name)
     {
         try { return new FontFamily(name); }
@@ -85,7 +112,11 @@ internal static class Theme
         return p;
     }
 
-    /// <summary>Layered alpha rings approximating an outer glow.</summary>
+    /// <summary>
+    /// Layered alpha rings approximating an outer glow. Note: <paramref
+    /// name="color"/>'s own alpha is cosmetic — each ring's alpha comes from
+    /// the fixed layer schedule below (WithAlpha replaces it).
+    /// </summary>
     public static void DrawGlow(Graphics g, float cx, float cy, float radius, Color color, int layers = 5)
     {
         for (int i = layers; i >= 1; i--)
@@ -94,21 +125,34 @@ internal static class Theme
             int alpha = 26 - i * 5;
             if (alpha <= 0)
                 continue;
-            using var pen = new Pen(WithAlpha(color, alpha), 3f);
+            // Discrete alphas → bounded pen cache, keyed on the ring's RGB
+            // (the input alpha never reaches the pen).
+            int rgb = color.ToArgb() & 0xFFFFFF;
+            var key = (rgb, alpha);
+            var cache = _glowPens ??= new();
+            if (!cache.TryGetValue(key, out Pen? pen))
+                cache[key] = pen = new Pen(WithAlpha(color, alpha), 3f);
             g.DrawEllipse(pen, cx - r, cy - r, r * 2f, r * 2f);
         }
     }
 
+    [ThreadStatic]
+    private static Dictionary<(int rgb, int alpha), Pen>? _glowPens;
+
+    [ThreadStatic]
+    private static Dictionary<int, SolidBrush>? _iconBrushes;
+
     public static void DrawIcon(Graphics g, string glyph, float size, Color color, RectangleF bounds)
     {
-        using var font = new Font(Glyphs.Family, size);
-        using var brush = new SolidBrush(color);
-        var format = new StringFormat
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-        };
-        g.DrawString(glyph, font, brush, bounds, format);
+        Font font = CachedFont(Glyphs.Family, size);
+        // Caller alphas pulse — quantize to 16 steps so the brush cache stays bounded.
+        int argb = color.ToArgb();
+        int step = ((int)((uint)argb >> 24)) / 17; // 0..15 — 17-step quantization of the byte
+        int key = (argb & 0xFFFFFF) | ((step * 17) << 24);
+        var brushes = _iconBrushes ??= new();
+        if (!brushes.TryGetValue(key, out SolidBrush? brush))
+            brushes[key] = brush = new SolidBrush(Color.FromArgb(key));
+        g.DrawString(glyph, font, brush, bounds, CenterFormat);
     }
 
     /// <summary>Renders a glyph to a small bitmap (tray menu images, etc).</summary>

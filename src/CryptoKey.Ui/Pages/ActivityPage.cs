@@ -20,6 +20,8 @@ internal sealed class ActivityPage : Page
     private readonly StackPanel _list = new();
     private readonly TextBlock _count = Kit.Txt("", "caption", "faint");
     private ActivityKind? _kind;
+    private int _visibleCount;
+    private const int MaxRows = 300;
 
     public ActivityPage(PageContext ctx) : base(ctx)
     {
@@ -64,7 +66,25 @@ internal sealed class ActivityPage : Page
 
     protected override void OnHidden() => Client.ActivityLogged -= OnLine;
 
-    private void OnLine(string _) => Rebuild();
+    /// <summary>
+    /// One new line: parse once, prepend if it passes the live filter/search,
+    /// trim the tail — O(1) per log line instead of a full rebuild.
+    /// </summary>
+    private void OnLine(string line)
+    {
+        ActivityItem item = ActivityPresenter.Parse(line);
+        if (ActivityPresenter.Matches(item, _kind, (_search.Text ?? "").Trim()))
+        {
+            if (_visibleCount == 0)
+                _list.Children.Clear(); // drop the "No matching activity" row
+            _list.Children.Insert(0, HomePage.FeedRow(item));
+            if (_visibleCount < MaxRows)
+                _visibleCount++;
+            else
+                _list.Children.RemoveAt(_list.Children.Count - 1);
+        }
+        _count.Text = $"{_visibleCount} of {Client.Activity.Count} entries";
+    }
 
     public override void Refresh() => Rebuild();
 
@@ -74,7 +94,7 @@ internal sealed class ActivityPage : Page
         return Client.Activity.Reverse()
             .Select(ActivityPresenter.Parse)
             .Where(i => ActivityPresenter.Matches(i, _kind, q))
-            .Take(300)
+            .Take(MaxRows)
             .ToList();
     }
 
@@ -84,9 +104,10 @@ internal sealed class ActivityPage : Page
         List<ActivityItem> items = Visible();
         foreach (ActivityItem it in items)
             _list.Children.Add(HomePage.FeedRow(it));
+        _visibleCount = items.Count;
         if (items.Count == 0)
             _list.Children.Add(Kit.Txt("No matching activity.", "caption", "dim"));
-        _count.Text = $"{items.Count} of {Client.Activity.Count} entries";
+        _count.Text = $"{_visibleCount} of {Client.Activity.Count} entries";
     }
 
     private async void CopyVisible()

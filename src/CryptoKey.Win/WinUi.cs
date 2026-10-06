@@ -122,13 +122,20 @@ internal static class WinUi
     /// <summary>
     /// UI-less guard: the engine pump alone on the calling thread — the
     /// classic pre-Avalonia daemon shape, for when the UI stack can't start.
+    /// Runs the same <see cref="EngineBundle"/> as <see cref="EngineHost"/>,
+    /// so headless gets the fatal-error release-input policy too (a crash
+    /// while locked could otherwise leave input swallowed behind a dead
+    /// overlay — an invisible soft-brick).
     /// </summary>
     private static int RunHeadless(KeyConfig config, bool devMode, bool forceClassic)
     {
-        using var service = new GuardService(config, devMode, forceClassic);
-        using var ipc = new IpcServer(service.UiDispatcher, service.DispatchCommand);
-        service.Start();
-        ipc.Start(service.Log);
+        using EngineBundle engine = EngineBundle.Create(config, devMode, forceClassic);
+        if (engine.Error != null)
+        {
+            Platform.Services.UserAlerts.Warn(
+                $"CryptoKey's guard couldn't start: {engine.Error}");
+            return 1;
+        }
         System.Windows.Forms.Application.Run();
         return 0;
     }

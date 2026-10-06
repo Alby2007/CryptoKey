@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
+using Avalonia.Threading;
 
 namespace CryptoKey.Ui;
 
@@ -117,4 +118,30 @@ internal static class Motion
     public static void SetSetting(bool on) => Configure(on, _osAllows);
 
     public static TimeSpan Duration(int ms) => Enabled ? TimeSpan.FromMilliseconds(ms) : TimeSpan.Zero;
+
+    private static DispatcherTimer? _frameTimer;
+    private static Action? _frame;
+
+    /// <summary>
+    /// One shared ~16ms beat for every breathing control — exists only while
+    /// subscribers do: the timer starts on the first subscribe and stops when
+    /// the last unsubscribes (attach/detach symmetry keeps the refcount exact).
+    /// UI-thread only, like every DispatcherTimer.
+    /// </summary>
+    public static event Action? Frame
+    {
+        add
+        {
+            _frame += value;
+            _frameTimer ??= Kit.Timer(TimeSpan.FromMilliseconds(16),
+                DispatcherPriority.Render, () => _frame?.Invoke());
+            _frameTimer.Start();
+        }
+        remove
+        {
+            _frame -= value;
+            if (_frame == null)
+                _frameTimer?.Stop();
+        }
+    }
 }

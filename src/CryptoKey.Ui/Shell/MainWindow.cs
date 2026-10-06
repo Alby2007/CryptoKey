@@ -278,7 +278,6 @@ internal sealed class StatusRail : Border
     private readonly TextBlock _key = new() { FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly Button _lock;
     private readonly StackPanel _text;
-    private readonly DispatcherTimer _pulse;
     private double _phase;
     private bool _compact;
 
@@ -306,11 +305,6 @@ internal sealed class StatusRail : Border
         top.Cursor = new Cursor(StandardCursorType.Hand);
 
         Child = new StackPanel { Children = { top, _lock } };
-        _pulse = Kit.Timer(TimeSpan.FromMilliseconds(40), DispatcherPriority.Background, () =>
-        {
-            _phase = (_phase + 0.08) % (Math.PI * 2);
-            _halo.Opacity = Motion.Enabled ? 0.18 + 0.22 * (0.5 + 0.5 * Math.Sin(_phase)) : 0.3;
-        });
     }
 
     public bool Compact
@@ -330,14 +324,22 @@ internal sealed class StatusRail : Border
         base.OnAttachedToVisualTree(e);
         _client.StateChanged += Apply;
         Apply(_client.Snapshot);
-        _pulse.Start();
+        Motion.Frame += Pulse; // shared ~16ms beat — one clock drives all breathing
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnDetachedFromVisualTree(e);
         _client.StateChanged -= Apply;
-        _pulse.Stop();
+        Motion.Frame -= Pulse;
+    }
+
+    private void Pulse()
+    {
+        // Was a private 40ms timer — on the shared 16ms clock the same rate
+        // is 0.08 * 16/40 radians per tick.
+        _phase = (_phase + 0.032) % (Math.PI * 2);
+        _halo.Opacity = Motion.Enabled ? 0.18 + 0.22 * (0.5 + 0.5 * Math.Sin(_phase)) : 0.3;
     }
 
     private void Apply(StatusSnapshot s)

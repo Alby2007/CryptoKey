@@ -32,6 +32,7 @@ internal sealed class LockForm : Form
     private readonly bool _primary;
     private readonly System.Windows.Forms.Timer _anim;
     private Bitmap? _bg;
+    private Rectangle _dirtyRect;   // scoped repaint region — recomputed on resize
     private float _phase;
     private float _shake = -1f;   // <0 inactive, 0..1 progress
     private float _flash;
@@ -67,9 +68,37 @@ internal sealed class LockForm : Form
             }
             if (_flash > 0f)
                 _flash = Math.Max(0f, _flash - 0.06f);
-            Invalidate();
+            Repaint();
         };
+        UpdateDirtyRect();
     }
+
+    /// <summary>
+    /// Every animated pixel lives inside the card zone: the card is
+    /// deterministic (480×430 centered), shake displaces it ±10px, and the
+    /// key art's ambient glow bleeds ~40px past its rect — card inflated by
+    /// 48 covers the worst case. Secondary forms animate only inside their
+    /// centered art+text band. ~10× less repaint work per monitor.
+    /// </summary>
+    private void UpdateDirtyRect()
+    {
+        RectangleF r;
+        if (_primary)
+        {
+            r = new RectangleF((Width - 480f) / 2f, (Height - 430f) / 2f, 480f, 430f);
+            r.Inflate(48f, 48f);
+        }
+        else
+        {
+            float cy = Height / 2f;
+            r = new RectangleF(0, cy - 125f, Width, 215f);
+        }
+        _dirtyRect = Rectangle.Ceiling(RectangleF.Intersect(r,
+            new RectangleF(0, 0, Width, Height)));
+    }
+
+    private void Repaint()
+        => Invalidate(_dirtyRect.IsEmpty ? ClientRectangle : _dirtyRect);
 
     private bool _animationsOn = true;
 
@@ -77,7 +106,7 @@ internal sealed class LockForm : Form
     {
         _animationsOn = enabled;
         UpdateTimer();
-        Invalidate();
+        Repaint();
     }
 
     private void UpdateTimer()
@@ -100,13 +129,13 @@ internal sealed class LockForm : Form
     public void SetPassphraseLength(int len)
     {
         _passLen = len;
-        Invalidate();
+        Repaint();
     }
 
     public void SetStatus(string message)
     {
         _status = message;
-        Invalidate();
+        Repaint();
     }
 
     public void ResetStatus() => SetStatus(DefaultStatus);
@@ -119,13 +148,13 @@ internal sealed class LockForm : Form
             _shake = 0f;
             _flash = 1f;
         }
-        Invalidate();
+        Repaint();
     }
 
     public void SetCooldown(DateTime? until)
     {
         _cooldownUntil = until;
-        Invalidate();
+        Repaint();
     }
 
     protected override void OnSizeChanged(EventArgs e)
@@ -133,6 +162,7 @@ internal sealed class LockForm : Form
         base.OnSizeChanged(e);
         _bg?.Dispose();
         _bg = null;
+        UpdateDirtyRect();   // the card moved — and a resize repaints fully anyway
     }
 
     private void EnsureBackground()

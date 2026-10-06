@@ -120,6 +120,35 @@ internal sealed class GuardSettings
     /// <summary>Detached copy — every member is a value type or string, so a
     /// shallow clone is a full snapshot (the UI reads these off-engine).</summary>
     public GuardSettings Clone() => (GuardSettings)MemberwiseClone();
+
+    /// <summary>
+    /// Field-wise semantic compare — the Clone comment's guarantee ("every
+    /// member is a value type or string") makes this a complete equality.
+    /// The UI's change-detection runs this per state event; it replaces two
+    /// JSON serializations that served the same purpose.
+    /// </summary>
+    public bool ValuesEqual(GuardSettings? other)
+        => other != null
+           && PollIntervalMs == other.PollIntervalMs
+           && LockOnRemoval == other.LockOnRemoval
+           && BalloonTips == other.BalloonTips
+           && Animations == other.Animations
+           && Sounds == other.Sounds
+           && UnlockPolicy == other.UnlockPolicy
+           && StrictTamper == other.StrictTamper
+           && LockMode == other.LockMode
+           && Watchdog == other.Watchdog
+           && LockPolicies == other.LockPolicies
+           && IdleLockMinutes == other.IdleLockMinutes
+           && WebcamOnTamper == other.WebcamOnTamper
+           && AlertUrl == other.AlertUrl
+           && VaultEnabled == other.VaultEnabled
+           && VaultAutoMount == other.VaultAutoMount
+           && VaultImagePath == other.VaultImagePath
+           && VaultMountPoint == other.VaultMountPoint
+           && VaultSizeMb == other.VaultSizeMb
+           && VaultIdleMinutes == other.VaultIdleMinutes
+           && UpdateCheckEnabled == other.UpdateCheckEnabled;
 }
 
 internal static class ConfigStore

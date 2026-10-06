@@ -168,4 +168,32 @@ public class ConfigStoreTests
         Assert.Equal(600_000, config.PassphraseIterations);
         Assert.True(ConfigStore.VerifyPassphrase(config, "pass-two"));
     }
+
+    [Fact]
+    public void ValuesEqual_clone_is_equal_and_every_field_counts()
+    {
+        var a = new GuardSettings();
+        Assert.True(a.ValuesEqual(a.Clone()));
+        Assert.False(a.ValuesEqual(null));
+
+        // Flip every settable property — ValuesEqual must notice each one,
+        // so a future field that forgets the compare fails this test.
+        foreach (var p in typeof(GuardSettings).GetProperties())
+        {
+            var b = a.Clone();
+            object? v = p.GetValue(a);
+            object alt = v switch
+            {
+                bool b0 => !b0,
+                int i => i + 1,
+                string s => s + "x",
+                UnlockPolicy u => u == UnlockPolicy.KeyOnly
+                    ? UnlockPolicy.KeyOrPassphrase : UnlockPolicy.KeyOnly,
+                _ => throw new InvalidOperationException(
+                    $"no flip rule for {p.Name} ({p.PropertyType.Name})"),
+            };
+            p.SetValue(b, alt);
+            Assert.False(a.ValuesEqual(b), $"{p.Name} flip must differ");
+        }
+    }
 }

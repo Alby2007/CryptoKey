@@ -29,8 +29,14 @@ internal static class KeyArt
     public const double EjectTravel = 64;
 
     /// <param name="eject">0 = fully seated, 1 = fully ejected.</param>
-    public static KeyArtFrame Layout(double eject)
+    /// <param name="ridges">Caller-owned scratch (length ≥3) — filled with the
+    /// grip rects and returned inside the frame, so a per-frame render keeps
+    /// one array for the control's life instead of allocating per call.</param>
+    public static KeyArtFrame Layout(double eject, ArtRect[] ridges)
     {
+        ArgumentNullException.ThrowIfNull(ridges);
+        if (ridges.Length < 3)
+            throw new ArgumentOutOfRangeException(nameof(ridges));
         double dx = Math.Clamp(eject, 0, 1.2) * EjectTravel;
         var port = new ArtRect(10, 26, 60, 88, 14);
         var slot = new ArtRect(44, 56, 26, 28, 5);
@@ -38,7 +44,6 @@ internal static class KeyArt
         var plug = new ArtRect(40 + dx, 58, 48, 24, 3);
         var ca = new ArtRect(plug.X + 8, plug.Y + 6, 10, 5, 1);
         var cb = new ArtRect(plug.X + 22, plug.Y + 6, 10, 5, 1);
-        var ridges = new ArtRect[3];
         for (int i = 0; i < 3; i++)
             ridges[i] = new ArtRect(body.X + 96 + i * 10, body.Y + 18, 3, 28, 1.5);
         return new KeyArtFrame(port, slot, plug, ca, cb, body,
