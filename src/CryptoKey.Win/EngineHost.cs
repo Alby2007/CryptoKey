@@ -44,7 +44,8 @@ internal sealed class EngineHost
         };
         host._thread.SetApartmentState(ApartmentState.STA);
         host._thread.Start();
-        ready.Wait();
+        if (!ready.Wait(TimeSpan.FromSeconds(15)) || !host.Running)
+            host.Error ??= "engine thread did not start";
         return host;
     }
 

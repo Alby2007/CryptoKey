@@ -52,7 +52,9 @@ internal static class Routes
 
     /// <summary>Parses an IPC `open [route]` argument; unknown/absent → Home.</summary>
     public static Route Parse(string? arg)
-        => Enum.TryParse(arg, ignoreCase: true, out Route r) ? r
+        // IsDefined: TryParse accepts numerics, so "open 99" would produce
+        // an unnamed route otherwise.
+        => Enum.TryParse(arg, ignoreCase: true, out Route r) && Enum.IsDefined(r) ? r
             : arg?.ToLowerInvariant() switch
             {
                 "settings" => Route.General,

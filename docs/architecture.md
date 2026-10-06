@@ -77,7 +77,11 @@ command/mutation onto the engine thread and hands back immutable snapshots
 | Thread | Owns | Rules |
 |---|---|---|
 | **Avalonia UI thread** | Dashboard, tray, flyout, wizard — `CryptoKey.Ui` | Never runs engine work; a UI exception is logged and windows close — the guard is unaffected |
-| **Engine thread** (WinForms pump) | `GuardService`, monitor callbacks, config mutation, rotation bookkeeping | Must never block on USB I/O while hooks may be installed — rotation writes go to a worker |
+| **Engine thread** (WinForms pump) | `GuardService`, monitor callbacks, config mutation, rotation bookkeeping | Must never block on USB I/O while hooks may be installed — rotation writes go to a worker. **Windows-only split**: on macOS the engine shares the UI thread (the lock is runloop-driven capture+tap, so a stalled pump is less catastrophic — but a UI hang can still starve dispatch) |
+
+If the Avalonia stack itself fails to start (dead payload, missing Skia),
+both hosts fall back to a headless pump — the guard still runs, CLI-only
+(security outranks chrome).
 | **WMI worker** (`UsbMonitor`) | `Win32_DiskDrive` enumeration | Polls off-pump so a slow WMI query can't stall hooks; results marshal to the engine thread |
 | **Lock thread** (secure mode, per engage) | `SetThreadDesktop` → `InputLocker` LL hooks → `LockForm` → own message pump | STA. Created fresh every engage; teardown closes the form and joins |
 | **Rotation worker** | `RotateKeyfiles` — pure file I/O on a pre-built envelope | Reads no mutable config; logs back via `BeginInvoke` |
