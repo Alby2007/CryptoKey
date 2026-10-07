@@ -717,7 +717,8 @@ internal sealed class GuardService : IDisposable
                 ? null
                 : new VaultStatus(_vault.State, _vault.MountPoint),
             _pendingUpdate?.TagName,
-            _config.Enrolled);
+            _config.Enrolled,
+            AutoLockArmed: _auth.ArmedForAutoLock);
 
     /// <summary>
     /// Pipe command dispatch — must be called on the UI thread. Mutating
@@ -884,6 +885,7 @@ internal sealed class GuardService : IDisposable
             "unenroll" or "accept-config" or "quit" => true,
             "vault" => parts.Length > 1
                 && (parts[1].Equals("delete", StringComparison.OrdinalIgnoreCase)
+                    || parts[1].Equals("reformat", StringComparison.OrdinalIgnoreCase)
                     || parts[1].Equals("accept-rollback",
                         StringComparison.OrdinalIgnoreCase)),
             "update" => parts.Length > 1
@@ -975,7 +977,8 @@ internal sealed class GuardService : IDisposable
     {
         if (parts.Length < 2)
             return "err usage: vault status|mount|unmount|seal|unseal|" +
-                "create [mb]|rekey|delete|accept-rollback|tpm-bind|tpm-unbind|recover";
+                "create [mb]|rekey|reformat [mb]|delete|accept-rollback|" +
+                "tpm-bind|tpm-unbind|recover";
         switch (parts[1].ToLowerInvariant())
         {
             case "status":
@@ -1020,6 +1023,11 @@ internal sealed class GuardService : IDisposable
                 // Needs the vault open; dismounts + reopens around the swap.
                 return _vault.TryRekey(out string kErr)
                     ? "ok vault rekeyed — volume key rotated" : $"err {kErr}";
+            case "reformat":
+                int rmb = parts.Length > 2 && int.TryParse(parts[2], out int rm)
+                    ? rm : _config.Guard.VaultSizeMb;
+                return _vault.TryReformat(rmb, out string fErr)
+                    ? "ok vault reformatted" : $"err {fErr}";
             case "delete":
                 return _vault.TryDeleteImage(out string dErr)
                     ? "ok vault deleted" : $"err {dErr}";

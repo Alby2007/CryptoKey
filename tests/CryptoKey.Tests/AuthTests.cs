@@ -703,6 +703,51 @@ public class AuthTests : IDisposable
     }
 
     [Fact]
+    public async Task Online_signin_fires_ArmingChanged_when_it_re_arms()
+    {
+        // The offline sign-in already announced re-arms via the event;
+        // the online paths (Establish / recovery) silently re-armed and
+        // nobody logged it. Sign-out alerts must pair with sign-in arms.
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        handler.Enqueue(HttpStatusCode.NoContent, "{}"); // remote logout
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("user-1", "a@b.c", "pw-123456");
+        auth.BindConfig(cfg);
+        var events = new List<bool>();
+        auth.ArmingChanged += a => events.Add(a);
+
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.Empty(events);                    // armed → armed: no transition
+        Assert.True((await auth.SignOut()).Ok);
+        Assert.Equal(new[] { false }, events);   // the latch disarmed
+        Assert.False(auth.ArmedForAutoLock);
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.Equal(new[] { false, true }, events); // sign-in re-arms — and says so
+        Assert.True(auth.ArmedForAutoLock);
+    }
+
+    [Fact]
+    public void Snapshot_reports_autolock_arming_for_the_ui()
+    {
+        // The dashboard wordmark + tray tooltip read this field — it must
+        // mirror ArmedForAutoLock exactly (bound install armed unless the
+        // explicit SignedOut latch is persisted).
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        Assert.True(svc.Snapshot().AutoLockArmed);
+        cfg.Account.SignedOut = true;
+        Assert.False(svc.Snapshot().AutoLockArmed);
+    }
+
+    [Fact]
     public void Reenrolled_while_locked_keeps_the_phrase_freeze()
     {
         // The phrase freeze is live-surface state, not config state —

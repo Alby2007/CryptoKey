@@ -129,8 +129,11 @@ internal sealed class AboutPage : Page
     private async void Apply()
     {
         string reply = await Client.Dispatch("update apply");
+        if (RetryAfterAuth(reply, Apply))
+            return;
         bool ok = reply.StartsWith("ok", StringComparison.Ordinal);
-        Ctx.Toast(ok ? "Applying — the app restarts on the new build." : reply, !ok);
+        Ctx.Toast(ok ? "Applying — the app restarts on the new build."
+            : ReplyError(reply) ?? reply, !ok);
         Refresh();
     }
 }

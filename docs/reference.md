@@ -105,6 +105,7 @@ commands carry account passwords and the recovery phrase.
 | `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `vault rekey` | `ok vault rekeyed — volume key rotated` / `err …` | Rotates the *volume key* (forward secrecy — chunk/secret rotation alone doesn't). Rebuilds the image beside it, swaps, re-opens; needs the vault unsealed. Crash-safe via `.rekey-bak` settle |
+| `vault reformat [mb]` | `ok vault reformatted` / `err …` | Wipe + recreate the image at the given size (previous contents are gone) — destructive, fresh-gated like `vault delete` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 | `deeplink <url>` | `ok` | Forwards a `cryptokey://` launch arg to the shell's deep-link handler — routed before `DispatchCommand` |
 | `auth status` | `ok auth state=… email=… configured=… armed=…` | Read-only account-gate state: `unconfigured`/`unenrolled`/`locked`/`offlineunlocked`/`online`; `armed=yes/no` — the signed-out latch |
@@ -119,7 +120,7 @@ answer `err AUTH_REQUIRED — …` unless the request carries
 `|auth <base64 password>` or the session window is open (15 min from the
 last verified credential — sign-in no longer rides to restart).
 **Destructive** verbs — `unenroll`, `quit`, `vault delete`,
-`vault accept-rollback`, `update apply`, `accept-config` — additionally
+`vault reformat`, `vault accept-rollback`, `update apply`, `accept-config` — additionally
 need a *fresh* grant (2 min) or an inline `|auth`. `lock`, `status`,
 `open`, `deeplink`, `auth status`, `vault status`, and
 `update status`/`check` are always open (`lock` only makes the box

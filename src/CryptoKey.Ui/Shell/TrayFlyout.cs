@@ -17,7 +17,7 @@ internal sealed class TrayFlyout : Window
     private readonly GuardClient _client;
     private readonly IUiHost _host;
     private readonly Action<Action> _ensureAuth;
-    private readonly Action<AuthMode> _showAuth;
+    private readonly Action<Action<bool>, AuthMode?> _showAuth;
     private readonly KeyVisual _key = new() { Height = 92, ShowEngraving = false };
     private readonly TextBlock _word = new() { FontSize = 24, FontWeight = FontWeight.Black, LetterSpacing = 1 };
     private readonly TextBlock _reason = Kit.Txt("", "caption", "dim");
@@ -34,8 +34,8 @@ internal sealed class TrayFlyout : Window
     private DateTime _shownAt;
 
     public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open,
-        Action quit, Action<Action> ensureAuth, Action<AuthMode> showAuth,
-        Action openOnboarding)
+        Action quit, Action<Action> ensureAuth,
+        Action<Action<bool>, AuthMode?> showAuth, Action openOnboarding)
     {
         _client = client;
         _host = host;
@@ -56,10 +56,10 @@ internal sealed class TrayFlyout : Window
         // Locked-variant calls to action — straight to the auth faces,
         // not via the dashboard gate.
         _signIn = Kit.Btn("Sign in…", IconData.Person, "primary",
-            () => { Hide(); _showAuth(AuthMode.SignIn); });
+            () => { Hide(); _showAuth(_ => { }, AuthMode.SignIn); });
         _signIn.HorizontalAlignment = HorizontalAlignment.Stretch;
         _create = Kit.Btn("Create account", IconData.Person, "ghost",
-            () => { Hide(); _showAuth(AuthMode.Create); });
+            () => { Hide(); _showAuth(_ => { }, AuthMode.Create); });
         _create.HorizontalAlignment = HorizontalAlignment.Stretch;
         // Dormant (unenrolled) install — the CTA is the enroll wizard.
         _setup = Kit.Btn("Set up a key", IconData.Usb, "primary",
@@ -256,9 +256,17 @@ internal sealed class TrayFlyout : Window
         }
         else
         {
-            string? err = await _client.Query<string?>((s, _) => s.Vault.TryMount(out string m) ? null : m);
-            if (err != null)
-                _reason.Text = err;
+            // Through the dispatch table like every mutator — a dead
+            // session gets the sign-in face, then the mount retries.
+            string reply = await _client.Dispatch("vault mount");
+            if (reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+            {
+                _showAuth(ok => { if (ok) VaultAction(); }, AuthMode.SignIn);
+                return;
+            }
+            if (!reply.StartsWith("ok", StringComparison.Ordinal))
+                _reason.Text = reply.StartsWith("err ", StringComparison.Ordinal)
+                    ? reply[4..] : reply;
         }
     }
 }

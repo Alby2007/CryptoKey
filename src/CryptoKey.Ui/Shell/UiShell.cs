@@ -145,7 +145,7 @@ internal sealed class UiShell : IDisposable
             GuardState.Locked => "CryptoKey — LOCKED",
             GuardState.Paused => $"CryptoKey — paused until {s.PausedUntil:HH:mm}",
             _ when !s.Enrolled => "CryptoKey — no key enrolled",
-            _ => "CryptoKey — armed",
+            _ => s.AutoLockArmed ? "CryptoKey — armed" : "CryptoKey — protection off",
         };
 
         if (s.State == GuardState.Locked)
@@ -334,7 +334,7 @@ internal sealed class UiShell : IDisposable
         // Read-only surfaces stay open — the mutators inside (pause,
         // resume, quit, vault mount) wrap themselves in the auth gate.
         _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit, EnsureAuth,
-            m => ShowAuth(_ => { }, m), OpenOnboarding);
+            ShowAuth, OpenOnboarding);
         _flyout.ShowNear();
     }
 
@@ -347,21 +347,35 @@ internal sealed class UiShell : IDisposable
     }
 
     /// <summary>In-app re-enroll: commit + config reload run atomically on the engine thread.</summary>
-    public void OpenOnboarding()
+    /// <summary>
+    /// Re-enrollment is a mutator like every other: the wizard opens behind
+    /// the account gate (a first-run install passes immediately — nothing
+    /// to check against), and the commit itself runs behind the session
+    /// belt so a session that dies mid-wizard can't drive the key swap.
+    /// </summary>
+    public void OpenOnboarding() => EnsureAuth(OpenWizard);
+
+    private void OpenWizard()
     {
         if (_wizard != null)
         {
             _wizard.Activate();
             return;
         }
-        _wizard = new OnboardingWindow(_host, firstRun: false, (flow, configure) =>
-            _client.Query((svc, _) =>
+        _wizard = new OnboardingWindow(_host, firstRun: false, async (flow, configure) =>
+        {
+            EnrollResult? result = null;
+            await _client.Mutate((svc, _) =>
             {
                 EnrollResult r = flow.Commit(configure);
                 if (r.Ok)
                     svc.ReloadConfig();
-                return r;
-            }));
+                result = r;
+            });
+            return result ?? new EnrollResult(false,
+                "Session locked — sign in again and retry.",
+                null, null, Array.Empty<string>());
+        });
         _wizard.Closed += (_, _) => _wizard = null;
         if (_window is { IsVisible: true })
             _wizard.Show(_window);
@@ -371,8 +385,19 @@ internal sealed class UiShell : IDisposable
 
     private async void Quit()
     {
-        if (!await _client.RequestQuit())
-            Notify("Can't quit while locked", "Insert the key or enter the recovery phrase first.", Tone.Danger, IconData.Lock);
+        string reply = await _client.RequestQuit();
+        if (reply.StartsWith("ok", StringComparison.Ordinal))
+            return; // engine is quitting — the host lifetime takes it from here
+        // The fresh-auth window lapsed, not the lock — offer sign-in and
+        // retry rather than claiming the box is locked.
+        if (reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+        {
+            ShowAuth(ok => { if (ok) Quit(); }, AuthMode.SignIn);
+            return;
+        }
+        Notify("Can't quit",
+            reply.StartsWith("err ", StringComparison.Ordinal) ? reply[4..] : reply,
+            Tone.Danger, IconData.Lock);
     }
 
     /// <summary>Close every window — the UI crash policy and shutdown both use this.</summary>

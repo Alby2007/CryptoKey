@@ -77,11 +77,13 @@ internal static class HomePresenter
                 reason = $"Auto-lock resumes at {s.PausedUntil:HH:mm}.";
                 break;
             default:
-                word = "ARMED";
-                accent = Tone.Ok;
-                reason = s.KeyPresent
-                    ? "Pull the key and this machine locks instantly."
-                    : "Waiting for your key.";
+                word = s.AutoLockArmed ? "ARMED" : "UNLOCKED";
+                accent = s.AutoLockArmed ? Tone.Ok : Tone.Neutral;
+                reason = !s.AutoLockArmed
+                    ? "No account signed in — key removal won't lock this PC."
+                    : s.KeyPresent
+                        ? "Pull the key and this machine locks instantly."
+                        : "Waiting for your key.";
                 break;
         }
 

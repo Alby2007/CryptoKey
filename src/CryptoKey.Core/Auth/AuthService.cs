@@ -518,6 +518,7 @@ internal sealed class AuthService
         if (tokens == null)
             return new AuthResult(false, null, NeedsConfirm: true);
         var user = ParseUser(root);
+        bool armedNow = false;
         lock (_sync)
         {
             if (!allowRebind && !_attestationClean)
@@ -531,6 +532,7 @@ internal sealed class AuthService
                     "use Relink to bind a different one");
             }
             AccountRecord? prev = _record;
+            bool wasSignedOut = prev?.SignedOut == true;
             if (user is { } u)
                 _record = AccountRecord.Create(u.Id, u.Email, password,
                     _cfg?.ProjectUrl);
@@ -544,6 +546,9 @@ internal sealed class AuthService
                 _record = prev; // keep memory honest with the disk that refused
                 return AuthResult.Fail($"account record save failed: {ex.Message}");
             }
+            // A fresh record carries SignedOut=false — the disarm latch
+            // died with the old one, so this sign-in re-armed protection.
+            armedNow = wasSignedOut && _record?.SignedOut == false;
             // A key-fenced record write IS the sanctioned heal — the pending
             // reattest re-binds the whole canon on the next verify, so the
             // dirty flag can lift now rather than one verify-cycle late.
@@ -553,6 +558,8 @@ internal sealed class AuthService
             TokenStore.Save(tokens);
             GrantSessionLocked();
         }
+        if (armedNow)
+            ArmingChanged?.Invoke(true);
         NoteSuccess();
         return new AuthResult(true, null);
     }
@@ -660,9 +667,11 @@ internal sealed class AuthService
                     // and unlock (no tokens — a real session lands on the
                     // first post-confirmation sign-in).
                     NoteSuccess();
+                    bool armedNow;
                     lock (_sync)
                     {
                         AccountRecord? prev = _record;
+                        bool wasSignedOut = prev?.SignedOut == true;
                         _record = AccountRecord.Create(
                             _record?.UserId ?? "unknown",
                             email.Trim(), password, _cfg?.ProjectUrl);
@@ -673,8 +682,11 @@ internal sealed class AuthService
                             return AuthResult.Fail(
                                 $"account record save failed: {ex.Message}");
                         }
+                        armedNow = wasSignedOut && _record?.SignedOut == false;
                         GrantSessionLocked();
                     }
+                    if (armedNow)
+                        ArmingChanged?.Invoke(true);
                     return new AuthResult(true,
                         "Signed in — email isn't verified yet, so this session " +
                         "runs on the local verifier until you confirm it.",
@@ -834,9 +846,11 @@ internal sealed class AuthService
             if (!putResp.IsSuccessStatusCode)
                 return AuthResult.Fail($"password update failed ({(int)putResp.StatusCode})");
 
+            bool armedNow;
             lock (_sync)
             {
                 AccountRecord? prev = _record;
+                bool wasSignedOut = prev?.SignedOut == true;
                 _record = AccountRecord.Create(user.Value.Id, user.Value.Email,
                     newPassword, _cfg?.ProjectUrl);
                 try { PersistLocked(); }
@@ -845,6 +859,7 @@ internal sealed class AuthService
                     _record = prev;
                     return AuthResult.Fail($"account record save failed: {ex.Message}");
                 }
+                armedNow = wasSignedOut && _record?.SignedOut == false;
                 // Key-fenced write = sanctioned heal (see Establish).
                 if (!_attestationClean)
                     _attestationClean = true;
@@ -852,6 +867,8 @@ internal sealed class AuthService
                 TokenStore.Save(tokens);
                 GrantSessionLocked();
             }
+            if (armedNow)
+                ArmingChanged?.Invoke(true);
             NoteSuccess();
             return new AuthResult(true, null);
         }

@@ -273,13 +273,22 @@ internal sealed class HomePage : Page
                 Ctx.Host.OpenFolder(vs.MountPoint + System.IO.Path.DirectorySeparatorChar);
                 break;
             case VaultState.Unsealed:
-                string? err = await Client.Query<string?>((s, _) => s.Vault.TryMount(out string m) ? null : m);
-                Report(err);
+                await MountVault();
                 break;
             default:
                 Ctx.Navigate(Route.Vault);
                 break;
         }
+    }
+
+    /// <summary>Through the dispatch table like every mutator — the account
+    /// gate lives there; a dead session gets the sign-in face, then retries.</summary>
+    private async Task MountVault()
+    {
+        string reply = await Client.Dispatch("vault mount");
+        if (RetryAfterAuth(reply, () => _ = MountVault()))
+            return;
+        Report(ReplyError(reply));
     }
 
     private void UpdatePause()

@@ -66,6 +66,26 @@ internal abstract class Page : UserControl
         return true;
     }
 
+    /// <summary>Map a dispatch reply to <see cref="Report"/>'s error slot.</summary>
+    protected static string? ReplyError(string reply)
+        => reply.StartsWith("ok", StringComparison.Ordinal) ? null
+            : reply.StartsWith("err ", StringComparison.Ordinal)
+                ? reply[4..] : reply;
+
+    /// <summary>
+    /// AUTH_REQUIRED means the session (or the fresh-auth window for
+    /// destructive verbs) lapsed — offer the sign-in face and re-invoke
+    /// <paramref name="retry"/> when it succeeds. Returns true when the
+    /// retry was handed off; the caller must NOT also report the reply.
+    /// </summary>
+    protected bool RetryAfterAuth(string reply, Action retry)
+    {
+        if (!reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+            return false;
+        Ctx.ShowAuth(ok => { if (ok) retry(); }, AuthMode.SignIn);
+        return true;
+    }
+
     protected GuardSettings G => Client.Settings.Guard;
 
     /// <summary>Persist a settings change through the single engine-thread write path.</summary>

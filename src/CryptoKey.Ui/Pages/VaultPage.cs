@@ -109,13 +109,18 @@ internal sealed class VaultPage : Page
         {
             if (_syncing || item is not string letter || letter == _facts?.ConfiguredMountPoint)
                 return;
-            await Client.Run((s, cfg) =>
+            bool saved = true;
+            bool ran = await Client.Mutate((s, cfg) =>
             {
                 s.Vault.ApplyMountPoint(letter);
-                ConfigStore.Save(cfg);
+                try { ConfigStore.Save(cfg); }
+                catch (Exception) { saved = false; return; }
                 s.MarkConfigDirty();
             });
-            Ctx.Toast($"Vault letter → {letter} (applies on next mount)", false);
+            Ctx.Toast(!ran ? "Session locked — sign in again on the Account page."
+                : !saved ? "Vault letter save failed"
+                : $"Vault letter → {letter} (applies on next mount)",
+                !(ran && saved));
         };
         _imagePath.TextWrapping = Avalonia.Media.TextWrapping.Wrap;
         _idleSave = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -309,44 +314,51 @@ internal sealed class VaultPage : Page
                 await Task.Delay(500);
             }
         }
-        string? err = await Client.Query<string?>((s, cfg) =>
+        // Re-check at engine time — the facts snapshot may be stale.
+        string? hint = await Client.Query((s, _) => s.Vault.DriverPresent
+            ? null : s.Vault.DriverHint ?? "the Dokany driver isn't installed — the vault can't mount without it");
+        if (hint != null)
         {
-            // Re-check at engine time — the facts snapshot may be stale.
-            if (!s.Vault.DriverPresent)
-                return s.Vault.DriverHint ?? "the Dokany driver isn't installed — the vault can't mount without it";
-            if (!s.Vault.TryCreate(size, out string e))
-                return e;
-            cfg.Guard.VaultSizeMb = size;
-            ConfigStore.Save(cfg);
-            s.MarkConfigDirty();
-            return null;
-        });
-        Report(err is null ? null : $"Create failed — {err}", $"Vault created ({size} MB)");
+            Report($"Create failed — {hint}");
+            return;
+        }
+        string reply = await Client.Dispatch($"vault create {size}");
+        if (RetryAfterAuth(reply, CreateVault))
+            return;
+        if (reply.StartsWith("ok", StringComparison.Ordinal))
+        {
+            // The slider choice outlives the create via the settings save.
+            await Client.UpdateSettings(g => g.VaultSizeMb = size);
+            Report(null, $"Vault created ({size} MB)");
+        }
+        else
+        {
+            Report(ReplyError(reply) is { } e ? $"Create failed — {e}" : null);
+        }
         Refresh();
     }
 
     private async void ToggleMount()
     {
-        string? err = await Client.Query<string?>((s, _) =>
-        {
-            VaultService v = s.Vault;
-            if (v.State == VaultState.Mounted)
-            {
-                v.TryUnmount(out string _);
-                return null;
-            }
-            if (v.State == VaultState.Sealed)
-                return v.TryUnseal(out string ue) ? null : ue; // explicit reopen — lifts the user-seal
-            return v.TryMount(out string e) ? null : e;
-        });
-        Report(err);
+        // Vault ops route through the dispatch table — the account gate and
+        // the destructive-op fresh window live there, not on Client.Query.
+        VaultState st = await Client.Query((s, _) => s.Vault.State);
+        string cmd = st == VaultState.Mounted ? "vault unmount"
+            : st == VaultState.Sealed ? "vault unseal"
+            : "vault mount";
+        string reply = await Client.Dispatch(cmd);
+        if (RetryAfterAuth(reply, ToggleMount))
+            return;
+        Report(ReplyError(reply));
         Refresh();
     }
 
     private async void AcceptRollback()
     {
-        string? err = await Client.Query<string?>((s, _) => s.Vault.AcceptRollback(out string e) ? null : e);
-        Report(err, "Rollback accepted — vault re-opening.");
+        string reply = await Client.Dispatch("vault accept-rollback");
+        if (RetryAfterAuth(reply, AcceptRollback))
+            return;
+        Report(ReplyError(reply), "Rollback accepted — vault re-opening.");
         Refresh();
     }
 
@@ -355,8 +367,10 @@ internal sealed class VaultPage : Page
         // A real close: dismount AND drop the volume key — sealed. The latch
         // holds for the session, so auto-open can't resurrect it on the next
         // verify tick; Unseal (or a key pull/reinsert) brings it back.
-        string? err = await Client.Query<string?>((s, _) => s.Vault.TrySeal(out string e) ? null : e);
-        Report(err, "Vault closed — Unseal or reinsert the key to reopen.");
+        string reply = await Client.Dispatch("vault seal");
+        if (RetryAfterAuth(reply, CloseVault))
+            return;
+        Report(ReplyError(reply), "Vault closed — Unseal or reinsert the key to reopen.");
         Refresh();
     }
 
@@ -366,8 +380,11 @@ internal sealed class VaultPage : Page
         // fresh volume key; the vault dismounts and re-opens around the
         // file swap. Non-destructive — no hold needed.
         _rekey.IsEnabled = false;
-        string? err = await Client.Query<string?>((s, _) => s.Vault.TryRekey(out string e) ? null : e);
-        Report(err is null ? null : $"Rekey failed — {err}", "Vault rekeyed — volume key rotated.");
+        string reply = await Client.Dispatch("vault rekey");
+        if (RetryAfterAuth(reply, Rekey))
+            return;
+        Report(ReplyError(reply) is { } e ? $"Rekey failed — {e}" : null,
+            "Vault rekeyed — volume key rotated.");
         Refresh();
     }
 
@@ -380,15 +397,21 @@ internal sealed class VaultPage : Page
     private async void Reformat()
     {
         int size = (int)_size.Value;
-        string? err = await Client.Query<string?>((s, _) => s.Vault.TryReformat(size, out string e) ? null : e);
-        Report(err is null ? null : $"Reformat failed — {err}", "Vault reformatted — fresh image, previous contents gone.");
+        string reply = await Client.Dispatch($"vault reformat {size}");
+        if (RetryAfterAuth(reply, Reformat))
+            return;
+        Report(ReplyError(reply) is { } e ? $"Reformat failed — {e}" : null,
+            "Vault reformatted — fresh image, previous contents gone.");
         Refresh();
     }
 
     private async void DeleteImage()
     {
-        string? err = await Client.Query<string?>((s, _) => s.Vault.TryDeleteImage(out string e) ? null : e);
-        Report(err is null ? null : $"Delete failed — {err}", "Vault image deleted.");
+        string reply = await Client.Dispatch("vault delete");
+        if (RetryAfterAuth(reply, DeleteImage))
+            return;
+        Report(ReplyError(reply) is { } e ? $"Delete failed — {e}" : null,
+            "Vault image deleted.");
         Refresh();
     }
 
@@ -401,42 +424,37 @@ internal sealed class VaultPage : Page
     {
         string phrase = _tpmPhrase.Text ?? "";
         bool strict = _strict.IsChecked == true;
-        TpmAction action = _tpmAction;
-        (bool ok, string msg) = await Client.Query((s, _) =>
+        (string? cmd, string success) = _tpmAction switch
         {
-            VaultService v = s.Vault;
-            string err;
-            switch (action)
-            {
-                case TpmAction.UnlockWithPhrase:
-                    return v.UnlockWithPhrase(phrase.AsSpan(), out err)
-                        ? (true, "Recovery phrase accepted — vault opening. Re-bind below.")
-                        : (false, err);
-                case TpmAction.Rebind:
-                    // Pepper already held — the phrase isn't consulted.
-                    return v.BindTpm(ReadOnlySpan<char>.Empty, strict: false, out err)
-                        ? (true, "Vault re-bound to this machine's TPM.")
-                        : (false, err);
-                case TpmAction.Bind:
-                    return v.BindTpm(phrase.AsSpan(), strict, out err)
-                        ? (true, strict ? "Vault bound — strict: a TPM clear means reformat."
-                                        : "Vault bound to this machine (TPM).")
-                        : (false, err);
-                default:
-                    return (false, "Nothing to do.");
-            }
-        });
+            TpmAction.UnlockWithPhrase => ("vault recover " + phrase,
+                "Recovery phrase accepted — vault opening. Re-bind below."),
+            // Pepper already held — the phrase isn't consulted on a rebind.
+            TpmAction.Rebind => ("vault tpm-bind",
+                "Vault re-bound to this machine's TPM."),
+            TpmAction.Bind => ("vault tpm-bind " + (strict ? "--strict " : "") + phrase,
+                strict ? "Vault bound — strict: a TPM clear means reformat."
+                       : "Vault bound to this machine (TPM)."),
+            _ => (null, "Nothing to do."),
+        };
+        if (cmd == null)
+            return;
+        string reply = await Client.Dispatch(cmd);
+        if (RetryAfterAuth(reply, TpmPrimary))
+            return;
+        bool ok = reply.StartsWith("ok", StringComparison.Ordinal);
         _tpmPhrase.Classes.Set("error", !ok);
         if (ok)
             _tpmPhrase.Text = ""; // the phrase never lingers in the field
-        Ctx.Toast(msg, !ok);
+        Ctx.Toast(ok ? success : ReplyError(reply) ?? reply, !ok);
         Refresh();
     }
 
     private async void Unbind()
     {
-        string? err = await Client.Query<string?>((s, _) => s.Vault.UnbindTpm(out string e) ? null : e);
-        Report(err, "Vault unbound — the image opens on any machine now.");
+        string reply = await Client.Dispatch("vault tpm-unbind");
+        if (RetryAfterAuth(reply, Unbind))
+            return;
+        Report(ReplyError(reply), "Vault unbound — the image opens on any machine now.");
         Refresh();
     }
 

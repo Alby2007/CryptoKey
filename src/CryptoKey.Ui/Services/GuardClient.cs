@@ -172,13 +172,27 @@ internal sealed class GuardClient : IDisposable
             _ = Run((s, _) => s.Resume());
     }
 
-    /// <summary>Quit is refused while locked (quitting = unlocking) and is
-    /// a fresh-auth verb — the dispatch table enforces both.</summary>
-    public Task<bool> RequestQuit()
+    /// <summary>
+    /// The session belt for ad-hoc engine mutations that have no dispatch
+    /// verb (keyfile repair, enrollment commit, the drive-letter pick):
+    /// the same check <see cref="UpdateSettings"/> and <see cref="Pause"/>
+    /// apply — a dead session can't keep mutating through a stale page.
+    /// Returns false when the session is locked and the work never ran.
+    /// </summary>
+    public Task<bool> Mutate(Action<GuardService, KeyConfig> work)
         => SessionOk()
-            ? Query((s, _) => s.DispatchCommand("quit")
-                .StartsWith("ok", StringComparison.Ordinal))
+            ? Query((s, c) => { work(s, c); return true; })
             : Task.FromResult(false);
+
+    /// <summary>Quit is refused while locked (quitting = unlocking) and is
+    /// a fresh-auth verb — the dispatch table enforces both. The reply
+    /// comes back verbatim so the caller can tell AUTH_REQUIRED (offer a
+    /// sign-in and retry) from a real lock refusal.</summary>
+    public Task<string> RequestQuit()
+        => SessionOk()
+            ? Query((s, _) => s.DispatchCommand("quit"))
+            : Task.FromResult(
+                "err session locked — sign in again on the Account page.");
 
     /// <summary>
     /// Remove the key binding — the session-gated in-app route into

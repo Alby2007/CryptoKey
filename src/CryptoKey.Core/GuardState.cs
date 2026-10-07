@@ -21,4 +21,5 @@ internal sealed record StatusSnapshot(
     bool WatchdogAlive,
     VaultStatus? Vault = null,
     string? PendingUpdate = null,
-    bool Enrolled = true);
+    bool Enrolled = true,
+    bool AutoLockArmed = true);

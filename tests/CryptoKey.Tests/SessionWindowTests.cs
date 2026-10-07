@@ -114,6 +114,7 @@ public class SessionWindowTests : IDisposable
         // reprompt…
         Assert.Contains("AUTH_REQUIRED", svc.DispatchCommand("unenroll"));
         Assert.Contains("AUTH_REQUIRED", svc.DispatchCommand("vault delete"));
+        Assert.Contains("AUTH_REQUIRED", svc.DispatchCommand("vault reformat"));
         Assert.Contains("AUTH_REQUIRED", svc.DispatchCommand("update apply"));
         Assert.Contains("AUTH_REQUIRED", svc.DispatchCommand("quit"));
 
@@ -167,6 +168,25 @@ public class SessionWindowTests : IDisposable
         // …but the install is still bound — sign-out never ran, so the
         // machine stays armed.
         Assert.True(auth.ArmedForAutoLock);
+    }
+
+    [Fact]
+    public void Reformat_routes_through_dispatch_and_reaches_the_engine()
+    {
+        // The UI's Reformat button now drives the same dispatch verb IPC
+        // does — an authorized call must reach TryReformat (which refuses
+        // for want of a held secret), not fall to "unknown command".
+        KeyConfig cfg = BoundConfig("acct-pw");
+        var auth = new AuthService(Cfg, new ScriptHandler());
+        AuthService.SetCurrent(auth);
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        string trailer = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("acct-pw"));
+        string reply = svc.DispatchCommand("vault reformat 64" + trailer);
+        Assert.DoesNotContain("AUTH_REQUIRED", reply);
+        Assert.DoesNotContain("unknown vault command", reply);
+        Assert.StartsWith("err", reply); // the engine refused — no held secret
     }
 
     [Fact]

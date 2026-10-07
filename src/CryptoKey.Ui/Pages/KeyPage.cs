@@ -272,12 +272,15 @@ internal sealed class KeyPage : Page
     private async void Repair()
     {
         _repair.IsEnabled = false;
-        bool ok = await Client.Query((s, _) =>
+        bool repaired = false;
+        bool ran = await Client.Mutate((s, _) =>
         {
-            try { return s.RepairKeyfile(); }
-            catch (Exception) { return false; }
+            try { repaired = s.RepairKeyfile(); }
+            catch (Exception) { }
         });
-        Report(ok ? null : "Repair failed — key absent or write error", "Keyfile repaired — key re-armed");
+        Report(!ran ? "Session locked — sign in again on the Account page."
+            : repaired ? null : "Repair failed — key absent or write error",
+            "Keyfile repaired — key re-armed");
         RefreshKey();
     }
 
@@ -388,7 +391,9 @@ internal sealed class KeyPage : Page
         }
         string pending = _pending;
         _confirm.IsEnabled = false;
-        (string? err, bool reattested) = await Client.Query<(string?, bool)>((svc, cfg) =>
+        string? err = null;
+        bool reattested = false;
+        bool ran = await Client.Mutate((svc, cfg) =>
         {
             ConfigStore.ChangePassphrase(cfg, pending);
             try
@@ -397,18 +402,19 @@ internal sealed class KeyPage : Page
             }
             catch (Exception ex)
             {
-                return ($"Save failed: {ex.Message}", false);
+                err = $"Save failed: {ex.Message}";
+                return;
             }
             // The attestation MAC covers the phrase hash — re-attest now if
             // the key is present; otherwise flag the change as ours so the
             // next insert re-binds quietly instead of announcing tamper.
-            bool re;
-            try { re = svc.RotateNow(); }
-            catch (Exception) { re = false; }
-            if (!re)
+            try { reattested = svc.RotateNow(); }
+            catch (Exception) { reattested = false; }
+            if (!reattested)
                 svc.MarkConfigDirty();
-            return (null, re);
         });
+        if (!ran)
+            err = "Session locked — sign in again on the Account page.";
         if (!Report(err))
         {
             _confirm.IsEnabled = true;

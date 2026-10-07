@@ -54,7 +54,7 @@ public class TrayFlyoutTests : IDisposable
     {
         _onboardingOpened = 0;
         var f = new TrayFlyout(client, new FakeHost(), _ => { }, () => { },
-            a => a(), _ => { }, () => _onboardingOpened++);
+            a => a(), (_, _) => { }, () => _onboardingOpened++);
         f.ShowNear();
         Harness.Pump(TimeSpan.FromMilliseconds(80));
         return f;
@@ -143,6 +143,12 @@ public class TrayFlyoutTests : IDisposable
         Assert.Contains(visible, l => l.Contains("Lock now"));
         Assert.Contains(visible, l => l.Contains("Open CryptoKey"));
         Assert.DoesNotContain(visible, l => l.Contains("Sign in"));
+
+        // No account at all → auto-lock is off; the wordmark can't lie "ARMED".
+        var texts = f.GetVisualDescendants().OfType<TextBlock>()
+            .Where(t => t.IsVisible).Select(t => t.Text).ToList();
+        Assert.Contains("UNLOCKED", texts);
+        Assert.DoesNotContain(texts, t => t is "ARMED");
     }
 
     [AvaloniaFact]
