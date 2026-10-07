@@ -17,11 +17,13 @@ internal sealed class TrayFlyout : Window
     private readonly GuardClient _client;
     private readonly IUiHost _host;
     private readonly Action<Action> _ensureAuth;
+    private readonly Action<AuthMode> _showAuth;
     private readonly KeyVisual _key = new() { Height = 92, ShowEngraving = false };
     private readonly TextBlock _word = new() { FontSize = 24, FontWeight = FontWeight.Black, LetterSpacing = 1 };
     private readonly TextBlock _reason = Kit.Txt("", "caption", "dim");
     private readonly Button _lock;
     private readonly Button _signIn;
+    private readonly Button _create;
     private readonly Button _resume;
     private readonly StackPanel _pauseRow;
     private readonly Border _vaultRow;
@@ -31,11 +33,12 @@ internal sealed class TrayFlyout : Window
     private DateTime _shownAt;
 
     public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open,
-        Action quit, Action<Action> ensureAuth)
+        Action quit, Action<Action> ensureAuth, Action<AuthMode> showAuth)
     {
         _client = client;
         _host = host;
         _ensureAuth = ensureAuth;
+        _showAuth = showAuth;
         SystemDecorations = SystemDecorations.None;
         Topmost = true;
         ShowInTaskbar = false;
@@ -48,10 +51,14 @@ internal sealed class TrayFlyout : Window
 
         _lock = Kit.Btn("Lock now", IconData.Lock, "lock", () => { _client.Lock(); Hide(); });
         _lock.HorizontalAlignment = HorizontalAlignment.Stretch;
-        // Locked-variant call to action — surfaces the account gate.
+        // Locked-variant calls to action — straight to the auth faces,
+        // not via the dashboard gate.
         _signIn = Kit.Btn("Sign in…", IconData.Person, "primary",
-            () => { Hide(); open(Route.Home); });
+            () => { Hide(); _showAuth(AuthMode.SignIn); });
         _signIn.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _create = Kit.Btn("Create account", IconData.Person, "ghost",
+            () => { Hide(); _showAuth(AuthMode.Create); });
+        _create.HorizontalAlignment = HorizontalAlignment.Stretch;
         _resume = Kit.Btn("Resume protection", IconData.Play, "primary",
             () => _ensureAuth(() => _client.Resume()));
         _resume.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -116,7 +123,7 @@ internal sealed class TrayFlyout : Window
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(16),
             BoxShadow = new BoxShadows(new BoxShadow { Blur = 22, OffsetY = 6, Color = Color.FromArgb(150, 0, 0, 0) }),
-            Child = Kit.V(12, head, _lock, _signIn, _resume, _pauseRow, _vaultRow, Kit.Divider(), _footer),
+            Child = Kit.V(12, head, _lock, _signIn, _create, _resume, _pauseRow, _vaultRow, Kit.Divider(), _footer),
         };
 
         Deactivated += (_, _) =>
@@ -171,27 +178,32 @@ internal sealed class TrayFlyout : Window
     private void Apply()
     {
         var auth = AuthService.Current;
-        if (auth.Gating && !auth.Authorized)
+        // Unsigned + an account is possible (bound record or a configured
+        // backend): the panel is a sign-in card, not a status readout —
+        // auto-lock is disarmed anyway, so "ARMED" would be a lie and an
+        // unauthorized observer gets nothing. Sign in fits a bound
+        // install; Create account only exists where no record does — on a
+        // bound box it would be a refused foreign rebind. Lock now hides:
+        // with protection off it's a dead affordance.
+        if (!auth.SessionLive && (auth.Gating || auth.Configured))
         {
-            // Locked variant: the panel is a sign-in card, not a status
-            // readout — an unauthorized observer doesn't get armed state,
-            // key presence, the vault row, or control affordances. Dimmed
-            // key art leaks nothing; Lock now stays because it only makes
-            // the box safer. And the account session is the master switch —
-            // auto-lock itself is off while nobody's signed in.
             _key.State = KeyVisualState.Absent;
             _word.Text = "Signed out";
+            _word.FontSize = 17;
             _word.Foreground = Kit.ToneBrush(Tone.Neutral);
             _reason.Text = "Protection is off until you sign in.";
-            _lock.IsVisible = true;
+            _lock.IsVisible = false;
             _signIn.IsVisible = true;
+            _create.IsVisible = !auth.Gating;
             _resume.IsVisible = false;
             _pauseRow.IsVisible = false;
             _vaultRow.IsVisible = false;
             _footer.IsVisible = false;
             return;
         }
+        _word.FontSize = 24;
         _signIn.IsVisible = false;
+        _create.IsVisible = false;
         _footer.IsVisible = true;
 
         StatusSnapshot s = _client.Snapshot;

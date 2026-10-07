@@ -364,7 +364,10 @@ internal static class Program
                         : "(Quit the running guard first.)");
                     return 1;
                 }
-                CryptoKeyCli.SendIpc("quit");
+                // Gated send: on a bound install `quit` needs the account
+                // password — SendIpcGated prompts masked and retries with
+                // the |auth trailer, so an unsigned box can still update.
+                CryptoKeyCli.SendIpcGated("quit");
                 // Release takes a beat — hooks teardown, mutex drop, process exit.
                 for (int i = 0; i < 20; i++)
                 {

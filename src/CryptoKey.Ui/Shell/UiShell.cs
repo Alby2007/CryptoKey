@@ -106,11 +106,14 @@ internal sealed class UiShell : IDisposable
 
     private void Apply(StatusSnapshot s, bool announce)
     {
-        // Account-gated-out: the native menu is a masked surface like the
-        // flyout — no state text, no key identity. The icon and tooltip
-        // stay (the owner's glance lamp); action items stay enabled —
-        // they prompt sign-in through EnsureAuth.
-        bool gatedOut = !AccountGatePassed();
+        // Unsigned while an account is possible: the native menu is a
+        // masked surface like the flyout — no state text, no key identity,
+        // and the tooltip can't say "armed" while auto-lock is disarmed.
+        // Action items stay enabled — they prompt sign-in through
+        // EnsureAuth. Truly unaccounted installs (no backend, no record)
+        // keep the honest readout — nothing exists to sign into.
+        var auth0 = AuthService.Current;
+        bool gatedOut = !auth0.SessionLive && (auth0.Gating || auth0.Configured);
         _statusItem.Header = gatedOut
             ? "CryptoKey — sign in to manage"
             : s.State == GuardState.Paused
@@ -131,7 +134,7 @@ internal sealed class UiShell : IDisposable
         _iconState = s.State;
         try { _tray.Icon = new WindowIcon(_host.TrayIcon(s.State)); }
         catch (Exception) { }
-        _tray.ToolTipText = s.State switch
+        _tray.ToolTipText = gatedOut ? "CryptoKey — sign in" : s.State switch
         {
             GuardState.Locked => "CryptoKey — LOCKED",
             GuardState.Paused => $"CryptoKey — paused until {s.PausedUntil:HH:mm}",
@@ -323,7 +326,8 @@ internal sealed class UiShell : IDisposable
             return;
         // Read-only surfaces stay open — the mutators inside (pause,
         // resume, quit, vault mount) wrap themselves in the auth gate.
-        _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit, EnsureAuth);
+        _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit, EnsureAuth,
+            m => ShowAuth(_ => { }, m));
         _flyout.ShowNear();
     }
 

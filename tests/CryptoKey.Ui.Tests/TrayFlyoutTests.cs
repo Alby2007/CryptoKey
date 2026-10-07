@@ -8,9 +8,10 @@ namespace CryptoKey.Ui.Tests;
 
 /// <summary>
 /// The tray flyout's two faces: unlocked it is a status + control panel;
-/// gated-out it must degrade to a sign-in card that leaks nothing — no
-/// armed state, key presence, vault row, or mutator affordances — while
-/// keeping Lock now (always safe) and the sign-in call to action.
+/// unsigned-with-account-possible it degrades to a sign-in card that
+/// leaks nothing — no armed state, key presence, vault row, or mutator
+/// affordances. Lock now hides there (auto-lock is disarmed anyway);
+/// Create account appears only where no record is bound.
 /// </summary>
 public class TrayFlyoutTests : IDisposable
 {
@@ -44,7 +45,7 @@ public class TrayFlyoutTests : IDisposable
 
     private static TrayFlyout Show(GuardClient client)
     {
-        var f = new TrayFlyout(client, new FakeHost(), _ => { }, () => { }, a => a());
+        var f = new TrayFlyout(client, new FakeHost(), _ => { }, () => { }, a => a(), _ => { });
         f.ShowNear();
         Harness.Pump(TimeSpan.FromMilliseconds(80));
         return f;
@@ -64,12 +65,35 @@ public class TrayFlyoutTests : IDisposable
         TrayFlyout f = Show(client);
 
         var visible = Buttons(f).Where(b => b.IsVisible).Select(Label).ToList();
-        Assert.Contains(visible, l => l.Contains("Lock now"));
         Assert.Contains(visible, l => l.Contains("Sign in"));
-        Assert.DoesNotContain(visible, l => l.Contains("Pause") || l.Contains("Resume")
+        Assert.DoesNotContain(visible, l => l.Contains("Lock now")
+            || l.Contains("Create account")
+            || l.Contains("Pause") || l.Contains("Resume")
             || l.Contains("Open CryptoKey") || l.Contains("Mount") || l.Contains("Open"));
 
         // The masked head: no real state word leaks — "Signed out".
+        var texts = f.GetVisualDescendants().OfType<TextBlock>()
+            .Where(t => t.IsVisible).Select(t => t.Text).ToList();
+        Assert.Contains("Signed out", texts);
+        Assert.DoesNotContain(texts, t => t is "ARMED" or "PAUSED" or "UNLOCKED");
+    }
+
+    [AvaloniaFact]
+    public void Unbound_but_configured_shows_create_account()
+    {
+        var (_, client, _) = Harness.Guard();
+        AuthService.SetCurrent(new AuthService(new SupabaseConfig
+        {
+            ProjectUrl = "https://test.supabase.co",
+            AnonKey = "test-anon-key-0123456789abcdef",
+        }, null)); // backend present, no record — Gating false, Configured true
+        TrayFlyout f = Show(client);
+
+        var visible = Buttons(f).Where(b => b.IsVisible).Select(Label).ToList();
+        Assert.Contains(visible, l => l.Contains("Sign in"));
+        Assert.Contains(visible, l => l.Contains("Create account"));
+        Assert.DoesNotContain(visible, l => l.Contains("Lock now"));
+
         var texts = f.GetVisualDescendants().OfType<TextBlock>()
             .Where(t => t.IsVisible).Select(t => t.Text).ToList();
         Assert.Contains("Signed out", texts);
