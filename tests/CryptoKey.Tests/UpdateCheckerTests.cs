@@ -189,6 +189,26 @@ public class UpdateCheckerTests
     }
 
     [Fact]
+    public void VerifyAndExtract_rejects_unbound_manifest()
+    {
+        // M1 — tag binding is required: an unsigned-era manifest replayed
+        // under a newer tag must fail closed on absence, not pass.
+        (byte[] priv, string pub) = ReleaseSigning.GenerateKey();
+        var (info, manifestPath, sigPath, zipPath, dir) = StageFixture();
+        try
+        {
+            string unbound = File.ReadAllText(manifestPath)
+                .Replace("# release: v9.9.9\n", "");
+            File.WriteAllText(manifestPath, unbound);
+            File.WriteAllBytes(sigPath,
+                ReleaseSigning.Sign(File.ReadAllBytes(manifestPath), priv));
+            Assert.Throws<UpdateException>(() => UpdateChecker.VerifyAndExtract(
+                info, manifestPath, sigPath, zipPath, dir, publicKeyB64: pub));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void VerifyAndExtract_rejects_tag_mismatch()
     {
         (byte[] priv, string pub) = ReleaseSigning.GenerateKey();

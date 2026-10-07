@@ -265,6 +265,17 @@ internal sealed class MacIpcSecurity : IIpcSecurity
             NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
     }
+
+    /// <summary>Unix sockets don't expose first-instance semantics; the
+    /// anchor is a normal held instance that keeps the socket path owned.</summary>
+    public NamedPipeServerStream CreateAnchorPipe()
+        => new(IpcServer.PipeName, PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+
+    /// <summary>The socket lives under the per-user $TMPDIR — no spoofable
+    /// peer identity to check at the client.</summary>
+    public bool VerifyServerIsOurs(NamedPipeClientStream pipe) => true;
 }
 
 /// <summary>

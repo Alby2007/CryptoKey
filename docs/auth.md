@@ -4,16 +4,19 @@ A cloud identity layer (Supabase Auth, email + password) that gates the
 **app surface** — the dashboard, the tray's mutating items, and the CLI's
 sensitive verbs — with an offline grace path for when the network is gone.
 
-It is the **master switch** — the account session owns the whole
-protection surface, including the auto-lock machinery itself.
+It is the **master switch** — the account owns the whole protection
+surface, including the auto-lock machinery itself.
 
 The split is directional: **unlocking is never gated.** The USB key and
 the recovery phrase always open a locked box, and an explicit `lock`
-always works — locking is the safe direction. But *arming* is
-session-scoped: with nobody signed in, a key pull is just a USB event —
-auto-lock (removal, startup-absent, resume, idle, pause-expiry) stays
-disarmed until a session signs in. Sign out and the machine stops
-protecting itself; sign back in and the key is the lock again.
+always works — locking is the safe direction. *Arming* follows the
+binding, not the session: a bound install auto-locks (removal,
+startup-absent, resume, idle, pause-expiry) whenever it hasn't been
+explicitly signed out — token freshness, network reachability, and
+reboots don't enter into it. That's the fail-closed direction: an
+attacker can't disarm by cutting the network for an hour. Only a gated
+`auth signout` disarms — the latch persists inside the attested record
+(`SignedOut`) — and the next real sign-in re-arms.
 
 ## What the account gates
 
@@ -21,9 +24,16 @@ protecting itself; sign back in and the key is the lock again.
 |---|---|---|
 | Dashboard window | opens only after auth | — |
 | Tray | pause / resume / quit; the flyout renders a sign-in card while gated out | lock now |
-| Auto-lock | armed only while a session is signed in (removal, idle, startup, resume, pause-expiry) | — |
-| IPC verbs | `pause`, `resume`, `quit`, `reenrolled`, `unenroll`, `vault <mutator>`, `update apply` | `status`, `lock`, `vault status`, `update status/check`, `auth status`, `open`, `deeplink` |
+| Auto-lock | armed whenever a key is enrolled, an account is bound, and `SignedOut` isn't latched — session freshness doesn't matter | — |
+| IPC verbs | `pause`, `resume`, `quit`, `reenrolled`, `unenroll`, `accept-config`, `vault <mutator>`, `update apply`, `auth signout` | `status`, `lock`, `vault status`, `update status/check`, `auth status`, `open`, `deeplink` |
 | CLI | same verbs via `cryptokey <verb>` (masked password prompt on `AUTH_REQUIRED`) | `status`, `lock`, `enroll` without a bound account |
+
+**Fresh verbs.** The destructive ops — `unenroll`, `quit`,
+`vault delete`, `vault accept-rollback`, `update apply`, `accept-config`
+— need a *recent* authorization, not just an open session: sign-in (or a
+correct `|auth` trailer) opens a 2-minute fresh window; a stale session
+riding the window is refused with `AUTH_REQUIRED`, and the dashboard
+re-prompts rather than failing silently.
 
 `lock` is intentionally ungated — it only makes the machine safer. Read
 verbs stay open; they expose no secrets.
@@ -44,8 +54,15 @@ Mutating verbs accept `|auth <base64 password>` — base64 so passwords can
 contain anything (`|` can't appear in a normalized argument). The CLI
 reads the password masked (`*` echo, Backspace edits, Esc abandons) and
 appends the trailer for that one send; it's never written to argv, logs,
-or disk. A correct password also arms the process's authorization for the
-rest of the session.
+or disk.
+
+A correct credential opens a **15-minute gate window** — sign-in used to
+latch the run's authorization forever, which let any same-user process
+ride one leaked password until restart. Now ordinary gated verbs pass
+while the window is open, the destructive verbs above need the 2-minute
+fresh window, and an idle dashboard drops the run's authorization on the
+same clock (`LockSession` — in-memory only; the stored refresh token and
+the armed latch survive, and `SignedOut` is never set by a timeout).
 
 ## Identity & session lifecycle
 

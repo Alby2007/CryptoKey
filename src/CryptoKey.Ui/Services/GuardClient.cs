@@ -172,20 +172,24 @@ internal sealed class GuardClient : IDisposable
             _ = Run((s, _) => s.Resume());
     }
 
-    /// <summary>Quit is refused while locked (quitting = unlocking).</summary>
+    /// <summary>Quit is refused while locked (quitting = unlocking) and is
+    /// a fresh-auth verb — the dispatch table enforces both.</summary>
     public Task<bool> RequestQuit()
         => SessionOk()
-            ? Query((s, _) => s.RequestQuit())
+            ? Query((s, _) => s.DispatchCommand("quit")
+                .StartsWith("ok", StringComparison.Ordinal))
             : Task.FromResult(false);
 
     /// <summary>
     /// Remove the key binding — the session-gated in-app route into
-    /// <see cref="GuardService.Unenroll"/> (the IPC verb goes through the
-    /// dispatch table; both land on the same engine call).
+    /// <see cref="GuardService.Unenroll"/>. It goes through the dispatch
+    /// table like the IPC verb: the locked refusal, the account gate, and
+    /// the destructive-op freshness window all live there.
     /// </summary>
     public Task<string> Unenroll(string phrase)
         => SessionOk()
-            ? Query((s, _) => s.Unenroll(phrase))
+            ? Dispatch("unenroll " + Convert.ToBase64String(
+                System.Text.Encoding.UTF8.GetBytes(phrase)))
             : Task.FromResult("err session locked — sign in again on the Account page.");
 
     /// <summary>Same dispatch table the IPC pipe and CLI use.</summary>

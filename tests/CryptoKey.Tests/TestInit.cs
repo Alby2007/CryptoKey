@@ -121,17 +121,31 @@ internal static class TestPlatform
         public List<UsbDisk> Enumerate() => Disks;
     }
 
-    private sealed class TestKeyMonitorFactory : IKeyMonitorFactory
+    internal sealed class TestKeyMonitorFactory : IKeyMonitorFactory
     {
+        /// <summary>The most recent monitor — tests fire polls through it.</summary>
+        public static TestKeyMonitor? Last;
         public KeyMonitorHandle Create(string targetSerial)
-            => new(new TestKeyMonitor(), new TestDispatcher());
+        {
+            var m = new TestKeyMonitor();
+            Last = m;
+            return new(m, new TestDispatcher());
+        }
     }
 
-    private sealed class TestKeyMonitor : IKeyMonitor
+    internal sealed class TestKeyMonitor : IKeyMonitor
     {
-        public event Action<bool>? PresenceChanged { add { } remove { } }
-        public event Action<UsbDisk?>? PresenceChecked { add { } remove { } }
-        public event Action<string>? ErrorLogged { add { } remove { } }
+        private Action<bool>? _changed;
+        private Action<UsbDisk?>? _checked;
+        private Action<string>? _error;
+        public event Action<bool>? PresenceChanged { add => _changed += value; remove => _changed -= value; }
+        public event Action<UsbDisk?>? PresenceChecked { add => _checked += value; remove => _checked -= value; }
+        public event Action<string>? ErrorLogged { add => _error += value; remove => _error -= value; }
+
+        /// <summary>Drive one poll as if the USB monitor saw <paramref name="disk"/>.</summary>
+        public void FireChecked(UsbDisk? disk) => _checked?.Invoke(disk);
+        public void FireChanged(bool present) => _changed?.Invoke(present);
+
         public void SetPollInterval(int ms) { }
         public void SetTargetSerial(string serial) { }
         public void Dispose() { }
@@ -143,7 +157,7 @@ internal static class TestPlatform
         public T Send<T>(Func<T> work) => work();
     }
 
-    private sealed class TestIpcSecurity : IIpcSecurity
+    internal sealed class TestIpcSecurity : IIpcSecurity
     {
         public bool Elevated => false;
         public NamedPipeServerStream CreatePipe(out bool integrityLabeled)
@@ -154,6 +168,16 @@ internal static class TestPlatform
                 NamedPipeServerStream.MaxAllowedServerInstances,
                 PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         }
+
+        public NamedPipeServerStream CreateAnchorPipe()
+            => new(IpcServer.PipeName, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+
+        /// <summary>Flipped by impersonation tests — reset to true in
+        /// finally, it's shared suite state.</summary>
+        public static bool ServerIsOurs = true;
+        public bool VerifyServerIsOurs(NamedPipeClientStream pipe) => ServerIsOurs;
     }
 
     private sealed class TestSingleInstance : ISingleInstance

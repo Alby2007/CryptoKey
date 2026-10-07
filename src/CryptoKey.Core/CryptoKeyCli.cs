@@ -145,6 +145,11 @@ internal static class CryptoKeyCli
                 return SendIpcGated("resume");
             case "quit":
                 return SendIpcGated("quit");
+            case "accept-config":
+                // Accept an announced config-canon mismatch (key must be
+                // in). Gated like any mutator — a dirty account field
+                // refuses the auth itself and the answer says so.
+                return SendIpcGated("accept-config");
             case "update":
                 return Update(args);
             case "sign-release":

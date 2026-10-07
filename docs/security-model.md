@@ -226,10 +226,27 @@ machine:
   elevated guard, while low-IL (sandboxed) processes stay out. Applied only
   when `SE_SECURITY_PRIVILEGE` is available; startup logs which branch
   landed.
+- **Squat detection**: the first served instance carries
+  `FirstPipeInstance` — a process that pre-bound the name is caught at
+  startup (logged; the guard keeps serving since clients check the peer).
+- **Client-side peer check**: before writing a command line — which can
+  carry the account password or the recovery phrase — the client asks the
+  kernel for the server's PID (`GetNamedPipeServerProcessId`) and requires
+  its image basename to be our own exe. A squatter's listener gets a
+  dropped connection, never a credential. An unreadable image (elevated
+  peer) falls back to the DACL's guarantee.
+- **Line cap**: 4 KiB per command — oversized lines are dropped unread, so
+  a hostile client can't make the server buffer an unbounded stream. The
+  client's own reply read is bounded the same way, and both ends enforce
+  their timeouts through overlapped I/O (`PipeOptions.Asynchronous`) —
+  a dead peer can't hang a sync read past the budget.
 - Per-connection read timeout (~5 s) — a connect-but-silent client can't
   starve the pipe.
 - `quit` is refused while locked (quitting would be a silent unlock);
-  `pause` requires unlocked/paused.
+  `pause` requires unlocked/paused. Destructive verbs (`unenroll`,
+  `vault delete`/`accept-rollback`, `update apply`, `quit`,
+  `accept-config`) additionally need a fresh credential — a session grant
+  ≤ 2 min old or an inline `|auth` — so a stale session can't drive them.
 
 ## Recovery-phrase backoff
 
@@ -238,7 +255,8 @@ capped at 300 — 15 s → 30 s → 60 s → 120 s → 240 s → 300 s. Enforced
 **inside the low-level hook** before any buffering or Enter handling, so
 input during a freeze is eaten without counting. The lock screen paints a
 live countdown. The counter is in-memory — it clears on unlock, re-lock,
-config reload, or restart (documented trade-off).
+or restart (documented trade-off); a config reload while locked does NOT
+touch it — `reenrolled` can't thaw a freeze.
 
 ## macOS equivalences (`CryptoKey.Mac`)
 

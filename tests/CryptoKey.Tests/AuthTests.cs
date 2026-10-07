@@ -183,11 +183,18 @@ public class AuthTests : IDisposable
         byte[] secret = TestDisk.RandomSecret();
         KeyConfig cfg = TestDisk.NewConfig(secret);
         cfg.Account = null;
+        cfg.V2Only = false; // pre-latch install — the historical forms apply
 
         // Current canon, no epoch, no accounthash, legacy — all still pass.
         Assert.True(ConfigStore.AttestMatches(secret, cfg,
             ConfigStore.ComputeAttest(secret, cfg)));
         Assert.True(ConfigStore.AttestMatches(secret, cfg,
+            ConfigStore.ComputeAttestNoEpoch(secret, cfg)));
+
+        // …and the latch: once v2-only sets, the pre-latch canons stop
+        // matching — an off-app v2only:false flip can't hide behind them.
+        cfg.V2Only = true;
+        Assert.False(ConfigStore.AttestMatches(secret, cfg,
             ConfigStore.ComputeAttestNoEpoch(secret, cfg)));
     }
 
@@ -483,6 +490,45 @@ public class AuthTests : IDisposable
         Assert.Contains("/auth/v1/verify", handler.Requests[0]);
         Assert.Contains("/auth/v1/user", handler.Requests[1]);
         Assert.True(auth.Record?.VerifyPassword("new-pw"));
+    }
+
+    [Fact]
+    public async Task CompleteRecovery_refuses_a_foreign_account()
+    {
+        // M2 — a cryptokey://recover link fired by any web page must not
+        // rebind this install to a different account. The /verify response
+        // names the token's user; mismatch with the bound record → refuse
+        // BEFORE the password write goes out.
+        var handler = new ScriptHandler();
+        var auth = new AuthService(Cfg, handler);
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("user-1", "a@b.c", "acct-pw");
+        auth.BindConfig(cfg);
+        AuthService.SetCurrent(auth);
+
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-2", email: "x@y.z"));
+        AuthResult r = await auth.CompleteRecovery("tok-hash", "new-pw");
+
+        Assert.False(r.Ok);
+        Assert.Contains("different account", r.Error);
+        Assert.Single(handler.Requests); // /verify ran, PUT /user never did
+        Assert.Equal("user-1", auth.Record!.UserId); // still bound
+    }
+
+    [Fact]
+    public async Task CompleteRecovery_same_user_rebinds_fine()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-1"));
+        handler.Enqueue(HttpStatusCode.OK, "{}");
+        var auth = new AuthService(Cfg, handler);
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("user-1", "a@b.c", "acct-pw");
+        auth.BindConfig(cfg);
+        AuthService.SetCurrent(auth);
+
+        Assert.True((await auth.CompleteRecovery("tok-hash", "new-pw")).Ok);
+        Assert.True(auth.Record!.VerifyPassword("new-pw"));
     }
 
     [Fact]

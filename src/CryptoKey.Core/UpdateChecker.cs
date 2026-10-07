@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
@@ -197,9 +198,13 @@ internal static class UpdateChecker
                 "not signed by the pinned maintainer key");
 
         string manifest = System.Text.Encoding.UTF8.GetString(manifestBytes);
-        if (ManifestTag(manifest) is string bound && bound != info.TagName)
-            throw new UpdateException($"release manifest is bound to {bound}, " +
-                $"not {info.TagName} — refusing a mismatched payload");
+        // The tag binding is REQUIRED, not advisory: an unbound manifest
+        // replayed under a newer release tag must fail closed, not pass
+        // on absence.
+        if (ManifestTag(manifest) is not string bound || bound != info.TagName)
+            throw new UpdateException(
+                $"release manifest is not bound to {info.TagName} — " +
+                "refusing an unbound or mismatched payload");
         var sums = ParseSha256Sums(manifest);
         if (!sums.TryGetValue(ZipName, out string? wantHash)
                 || !Sha256Hex(zipPath).Equals(wantHash, StringComparison.OrdinalIgnoreCase))
@@ -208,6 +213,22 @@ internal static class UpdateChecker
         string payload = Path.Combine(dir, "payload");
         // ExtractToDirectory rejects path-traversal entries on modern .NET.
         ZipFile.ExtractToDirectory(zipPath, payload, overwriteFiles: true);
+
+        // The staged exe's own version must be the tag we fetched — a
+        // payload re-served under a foreign tag dies here even if a
+        // signing lapse ever let its manifest through. A versionless exe
+        // (test fixtures) can't be judged — skip rather than guess.
+        string stagedExe = Path.Combine(payload, "cryptokey.exe");
+        if (File.Exists(stagedExe))
+        {
+            string? pv = FileVersionInfo.GetVersionInfo(stagedExe).ProductVersion;
+            if (!string.IsNullOrEmpty(pv)
+                && !pv.Equals(info.TagName.TrimStart('v', 'V'),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new UpdateException(
+                    $"staged cryptokey.exe reports version {pv}, not " +
+                    $"{info.TagName} — refusing a mismatched payload");
+        }
         log?.Invoke($"Update {info.TagName} verified + staged.");
         return payload;
     }

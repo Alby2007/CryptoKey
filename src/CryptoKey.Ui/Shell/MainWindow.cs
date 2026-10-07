@@ -3,6 +3,7 @@ using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
@@ -30,6 +31,7 @@ internal sealed class MainWindow : Window
     private readonly ColumnDefinition _sideCol;
     private readonly TextBlock _brandText;
     private readonly StatusRail _rail;
+    private readonly DispatcherTimer _idle;
     private bool _narrow;
 
     public Route Current { get; private set; } = Route.Home;
@@ -181,7 +183,33 @@ internal sealed class MainWindow : Window
         Content = root;
 
         KeyDown += OnKeyDown;
+
+        // Dashboard idle timeout (M6): an unattended dashboard must not
+        // hold a mutating session forever. Any input re-arms the timer;
+        // expiry drops the run's authorization, so the next gated op
+        // reprompts instead of riding an hours-old sign-in.
+        _idle = new DispatcherTimer { Interval = AuthService.GateTtl };
+        _idle.Tick += (_, _) =>
+        {
+            _idle.Stop();
+            AuthService.Current.LockSession();
+        };
+        AddHandler(PointerMovedEvent, (_, _) => ArmIdle(),
+            RoutingStrategies.Tunnel | RoutingStrategies.Bubble, true);
+        AddHandler(PointerPressedEvent, (_, _) => ArmIdle(),
+            RoutingStrategies.Tunnel | RoutingStrategies.Bubble, true);
+        AddHandler(KeyDownEvent, (_, _) => ArmIdle(),
+            RoutingStrategies.Tunnel | RoutingStrategies.Bubble, true);
+        ArmIdle();
+
         Navigate(Route.Home);
+    }
+
+    private void ArmIdle()
+    {
+        _idle.Stop();
+        _idle.Interval = AuthService.GateTtl;
+        _idle.Start();
     }
 
     private Button NavButton(Route r)

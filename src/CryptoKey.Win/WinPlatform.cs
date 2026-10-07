@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Management;
 using System.Runtime.InteropServices;
@@ -213,12 +214,74 @@ internal sealed class WinIpcSecurity : IIpcSecurity
             return Create(security);
         }
 
-        static NamedPipeServerStream Create(PipeSecurity security)
+        static NamedPipeServerStream Create(PipeSecurity security,
+            PipeOptions extra = PipeOptions.None)
             => NamedPipeServerStreamAcl.Create(
                 IpcServer.PipeName, PipeDirection.InOut,
                 NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | extra,
                 0, 0, security, HandleInheritability.None);
+    }
+
+    /// <summary>
+    /// The name anchor: DACL'd like every instance, but with
+    /// FirstPipeInstance — creating it fails when the name is already
+    /// bound (a squatter got there first). Held for the process lifetime
+    /// by IpcServer so the name stays claimed.
+    /// </summary>
+    public NamedPipeServerStream CreateAnchorPipe()
+    {
+        string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
+        try
+        {
+            var security = new PipeSecurity();
+            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
+            return NamedPipeServerStreamAcl.Create(
+                IpcServer.PipeName, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance,
+                0, 0, security, HandleInheritability.None);
+        }
+        catch (Exception)
+        {
+            var security = new PipeSecurity();
+            security.SetSecurityDescriptorSddlForm($"D:(A;;GA;;;{sid})");
+            return NamedPipeServerStreamAcl.Create(
+                IpcServer.PipeName, PipeDirection.InOut,
+                NamedPipeServerStream.MaxAllowedServerInstances,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance,
+                0, 0, security, HandleInheritability.None);
+        }
+    }
+
+    /// <summary>
+    /// Client-side peer check: ask the kernel for the pipe server's PID,
+    /// then require its image basename to be ours. Commands carry the
+    /// account password and recovery phrase — a squatter must never get
+    /// them. An elevated peer's image is unreadable from medium IL — the
+    /// per-user DACL already gated the bind, so unreadable passes.
+    /// </summary>
+    public bool VerifyServerIsOurs(NamedPipeClientStream pipe)
+    {
+        try
+        {
+            if (!NativeMethods.GetNamedPipeServerProcessId(
+                    pipe.SafePipeHandle, out uint pid))
+                return true; // can't answer — DACL gated the bind
+            using var proc = Process.GetProcessById((int)pid);
+            string ours = Path.GetFileName(Environment.ProcessPath
+                ?? Process.GetCurrentProcess().MainModule?.FileName ?? "");
+            return string.Equals(Path.GetFileName(proc.MainModule?.FileName),
+                ours, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            // Image unreadable (elevated peer / process exiting) — the
+            // per-user DACL did the real gating.
+            return true;
+        }
     }
 }
 

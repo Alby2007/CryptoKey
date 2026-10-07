@@ -65,12 +65,41 @@ internal sealed class AuthService
     private KeyConfig? _config;
     private AccountRecord? _record;
     private AuthTokens? _tokens;
-    private bool _unlocked;          // verifier satisfied this run — session-scope
+    // Session windows — the M6 fix: a satisfied verifier used to latch the
+    // run's authorization FOREVER (any same-user process could ride it
+    // until restart). Now a grant opens a fixed-length gate window and a
+    // shorter "fresh" window for destructive ops (unenroll / vault delete
+    // / update apply / quit): a leaked password stops buying lifetime
+    // access, and an idle session stops authorizing on its own.
+    private DateTime _gateUntil;   // ordinary gated ops pass while open
+    private DateTime _freshUntil;  // destructive ops pass while open
     private bool _attestationClean = true;
     private int _failures;           // local attempt limiter (in-memory speedbump)
     private DateTime _lockedUntil;
     private int _cooldownSeconds = 30;
     private bool _refreshing;
+
+    /// <summary>How long a verified sign-in authorizes gated ops.
+    /// Mutable only for tests — production never shrinks it.</summary>
+    internal static TimeSpan GateTtl = TimeSpan.FromMinutes(15);
+
+    /// <summary>How long a grant stays "fresh" enough for destructive ops.</summary>
+    internal static TimeSpan FreshTtl = TimeSpan.FromMinutes(2);
+
+    /// <summary>Call under _sync — the grant window is open.</summary>
+    private bool GateOpen => _gateUntil > DateTime.UtcNow;
+
+    /// <summary>Call under _sync — the grant is recent enough for
+    /// destructive verbs (unenroll / vault delete / update apply / quit).</summary>
+    private bool FreshOpen => _freshUntil > DateTime.UtcNow;
+
+    /// <summary>Call under _sync — a credential just verified: open both
+    /// windows. Sign-in and a correct inline password count alike.</summary>
+    private void GrantSessionLocked()
+    {
+        _gateUntil = DateTime.UtcNow.Add(GateTtl);
+        _freshUntil = DateTime.UtcNow.Add(FreshTtl);
+    }
 
     /// <param name="handler">Test seam — production uses one static HttpClient.</param>
     public AuthService(SupabaseConfig? config, HttpMessageHandler? handler)
@@ -124,7 +153,7 @@ internal sealed class AuthService
         get
         {
             lock (_sync)
-                return _attestationClean && (_unlocked || (_tokens?.Live ?? false));
+                return _attestationClean && (GateOpen || (_tokens?.Live ?? false));
         }
     }
 
@@ -139,7 +168,7 @@ internal sealed class AuthService
         get
         {
             lock (_sync)
-                return _unlocked || (_tokens?.Live ?? false);
+                return GateOpen || (_tokens?.Live ?? false);
         }
     }
 
@@ -169,7 +198,7 @@ internal sealed class AuthService
         {
             lock (_sync)
             {
-                if (_unlocked || (_tokens?.Live ?? false))
+                if (GateOpen || (_tokens?.Live ?? false))
                     return _tokens?.Live == true ? AuthGateState.Online
                         : AuthGateState.OfflineUnlocked;
                 if (!Configured && Record == null && !TokenStore.Exists
@@ -298,11 +327,14 @@ internal sealed class AuthService
     // ---------------------------------------------------------- authorization
 
     /// <summary>
-    /// The sensitive-op check: live session → ok; a supplied password is
-    /// verified against the local verifier (works fully offline) and arms
-    /// this run's authorization on success. Never throws.
+    /// The sensitive-op check: an open session window (fresh grant or live
+    /// tokens) → ok; a supplied password is verified against the local
+    /// verifier (works fully offline) and opens this run's window on
+    /// success. <paramref name="fresh"/> (destructive ops) requires the
+    /// grant to be recent — a stale session can't ride the window into
+    /// unenroll/vault-delete/update-apply/quit. Never throws.
     /// </summary>
-    public bool Authorize(string? password, out string error)
+    public bool Authorize(string? password, out string error, bool fresh = false)
     {
         lock (_sync)
         {
@@ -311,7 +343,8 @@ internal sealed class AuthService
                 error = "account data failed integrity check — relink required";
                 return false;
             }
-            if (_unlocked || (_tokens?.Live ?? false))
+            if ((GateOpen || (_tokens?.Live ?? false))
+                && (!fresh || FreshOpen))
             {
                 error = "";
                 return true;
@@ -319,7 +352,10 @@ internal sealed class AuthService
         }
         if (password == null)
         {
-            error = "AUTH_REQUIRED";
+            error = fresh
+                ? "AUTH_REQUIRED — this op needs a fresh sign-in; " +
+                  "pass |auth <base64 password>"
+                : "AUTH_REQUIRED";
             return false;
         }
         if (Throttled(out error))
@@ -327,7 +363,7 @@ internal sealed class AuthService
         bool ok = Record?.VerifyPassword(password) == true;
         if (ok)
         {
-            lock (_sync) _unlocked = true;
+            lock (_sync) GrantSessionLocked();
             NoteSuccess();
             error = "";
         }
@@ -360,7 +396,7 @@ internal sealed class AuthService
         bool armedNow;
         lock (_sync)
         {
-            _unlocked = true;
+            GrantSessionLocked();
             armedNow = ClearSignedOutLocked();
         }
         if (armedNow)
@@ -488,7 +524,7 @@ internal sealed class AuthService
                 _attestationClean = true;
             _tokens = tokens;
             TokenStore.Save(tokens);
-            _unlocked = true;
+            GrantSessionLocked();
         }
         NoteSuccess();
         return new AuthResult(true, null);
@@ -606,7 +642,7 @@ internal sealed class AuthService
                             return AuthResult.Fail(
                                 $"account record save failed: {ex.Message}");
                         }
-                        _unlocked = true;
+                        GrantSessionLocked();
                     }
                     return new AuthResult(true,
                         "Signed in — email isn't verified yet, so this session " +
@@ -663,8 +699,8 @@ internal sealed class AuthService
                 || resp.StatusCode == HttpStatusCode.BadRequest)
             {
                 // Refresh token dead — the online session is over. The
-                // local verifier still covers offline unlock, so
-                // _unlocked survives; only when nothing authorizes this
+                // local verifier still covers offline unlock, so an open
+                // gate window survives; only when nothing authorizes this
                 // run anymore does the session actually end.
                 lock (_sync) { _tokens = null; }
                 TokenStore.Clear();
@@ -743,6 +779,18 @@ internal sealed class AuthService
             if (tokens == null || user == null)
                 return AuthResult.Fail("reset link returned no session");
 
+            // Single-tenant: a bound install may only reset ITS OWN
+            // account — a cryptokey://recover link for a different user
+            // (any web page can fire one) must not rebind this install.
+            lock (_sync)
+            {
+                if (_record != null
+                    && !string.Equals(_record.UserId, user.Value.Id,
+                        StringComparison.Ordinal))
+                    return AuthResult.Fail(
+                        "this reset link is for a different account — refused");
+            }
+
             using var put = Json(Req(HttpMethod.Put, "/user"), new { password = newPassword });
             put.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
             using HttpResponseMessage putResp = await _http.SendAsync(put);
@@ -764,7 +812,7 @@ internal sealed class AuthService
                     _attestationClean = true;
                 _tokens = tokens;
                 TokenStore.Save(tokens);
-                _unlocked = true;
+                GrantSessionLocked();
             }
             NoteSuccess();
             return new AuthResult(true, null);
@@ -815,6 +863,25 @@ internal sealed class AuthService
     public event Action? SessionEnded;
 
     /// <summary>
+    /// Drop this run's authorization WITHOUT signing out — the dashboard
+    /// idle-timeout verb. In-memory only: TokenStore persists so the next
+    /// sign-in can still refresh, and the SignedOut latch is NOT set —
+    /// auto-lock stays armed.
+    /// </summary>
+    public void LockSession()
+    {
+        bool had;
+        lock (_sync)
+        {
+            had = GateOpen || (_tokens?.Live ?? false);
+            _gateUntil = _freshUntil = default;
+            _tokens = null;
+        }
+        if (had)
+            SessionEnded?.Invoke();
+    }
+
+    /// <summary>
     /// Best-effort remote logout; the local session always ends. Also the
     /// ONLY op that disarms auto-lock: the latch is persisted inside the
     /// attested record (a failed save just means the disarm doesn't
@@ -827,7 +894,8 @@ internal sealed class AuthService
         lock (_sync)
         {
             armedBefore = ArmedForAutoLock;
-            tokens = _tokens; _tokens = null; _unlocked = false;
+            tokens = _tokens; _tokens = null;
+            _gateUntil = _freshUntil = default;
             if (_record is { } rec && !rec.SignedOut)
             {
                 rec.SignedOut = true;

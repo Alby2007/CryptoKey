@@ -25,10 +25,16 @@ public class EnvelopeTests
     {
         byte[] secret = TestDisk.RandomSecret();
         KeyConfig config = TestDisk.NewConfig(secret);
+        config.V2Only = false; // pre-latch install — raw files still verify
         Assert.True(KeyVerifier.TryUnwrapKeyfile(secret, config,
             out byte[]? back, out AttestState attest, out _));
         Assert.Equal(secret, back);
         Assert.Equal(AttestState.Missing, attest);
+
+        // Once latched v2-only, the same raw file is refused outright.
+        config.V2Only = true;
+        Assert.False(KeyVerifier.TryUnwrapKeyfile(secret, config,
+            out _, out _, out _));
     }
 
     [Theory]
@@ -125,9 +131,12 @@ public class EnvelopeTests
     public void Legacy_attestation_form_still_verifies()
     {
         // Pre-canon keyfiles carry MAC = HMAC(secret, "CKY-ATTEST"‖serial‖
-        // phraseHash) — hand-build that envelope; AttestMatches accepts it.
+        // phraseHash) — hand-build that envelope; AttestMatches accepts it
+        // on a pre-latch install (V2Only=false — the form can't prove the
+        // latch, so a v2-only install correctly refuses it).
         byte[] secret = TestDisk.RandomSecret();
         KeyConfig config = TestDisk.NewConfig(secret);
+        config.V2Only = false;
         byte[] attest = HMACSHA256.HashData(secret,
             Encoding.UTF8.GetBytes(
                 "CKY-ATTEST" + config.DeviceSerial + config.PassphraseHash));
@@ -179,9 +188,12 @@ public class EnvelopeTests
     {
         // Tier-1 keyfiles carry the canon without `vaultepoch` — the
         // three-candidate check must accept them, then the next write
-        // silently upgrades to the epoch-included form.
+        // silently upgrades to the epoch-included form. Modeled on a
+        // pre-latch install (V2Only=false — once set, the pre-v2only
+        // canon correctly mismatches).
         byte[] secret = TestDisk.RandomSecret();
         KeyConfig config = TestDisk.NewConfig(secret);
+        config.V2Only = false;
         byte[] attest = ConfigStore.ComputeAttestNoEpoch(secret, config);
         byte[] plain = new byte[64 + 32];
         Buffer.BlockCopy(secret, 0, plain, 0, 64);

@@ -385,8 +385,13 @@ internal sealed class AuthWindow : Window
             case AuthMode.Reset:
                 Title = "Set a new password — CryptoKey";
                 _title.Text = "Choose a new password";
-                _subtitle.Text = "Setting it here signs you in and re-binds the " +
-                    "account verifier — your USB key must be inserted.";
+                // Single-tenant: this install only accepts a reset link
+                // for the account it's bound to — say whose, out loud.
+                _subtitle.Text = _auth.Record?.Email is string bound
+                    ? $"Resetting the password for {bound} — links for any " +
+                      "other account are refused. Your USB key must be inserted."
+                    : "Setting it here signs you in and re-binds the " +
+                      "account verifier — your USB key must be inserted.";
                 _card.Child = Kit.V(12,
                     _keyChipRow, _passwordField, _strengthRow, _confirmField, _match);
                 SetNext("Set password", IconData.ArrowRight);

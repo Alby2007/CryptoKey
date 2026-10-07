@@ -71,8 +71,13 @@ lines, and a `Guard:` line when the daemon answers the pipe.
 
 ## IPC protocol — `\\.\pipe\cryptokey-ctl`
 
-One UTF-8 line per connection → one line back. Connect 1.5 s, server-side
-read timeout ~5 s.
+One UTF-8 line per connection → one line back, **4 KiB max** (longer
+lines are dropped unread — a hostile client can't stream an unbounded
+buffer). Connect 1.5 s, server-side read timeout ~5 s. The first served
+instance is created `FirstPipeInstance` so a pre-bound squatter is
+detected at startup, and the client verifies the server's process image
+(`GetNamedPipeServerProcessId` → our exe's basename) *before* writing —
+commands carry account passwords and the recovery phrase.
 
 | Command | Reply | Rules |
 |---|---|---|
@@ -96,16 +101,22 @@ read timeout ~5 s.
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 | `deeplink <url>` | `ok` | Forwards a `cryptokey://` launch arg to the shell's deep-link handler — routed before `DispatchCommand` |
-| `auth status` | `ok auth state=… email=… configured=…` | Read-only account-gate state: `unconfigured`/`unenrolled`/`locked`/`offlineunlocked`/`online` |
-| `auth signout` | `ok signed out` | Ends the session (clears `session.dat`); gated like any mutator |
+| `auth status` | `ok auth state=… email=… configured=… armed=…` | Read-only account-gate state: `unconfigured`/`unenrolled`/`locked`/`offlineunlocked`/`online`; `armed=yes/no` — the signed-out latch |
+| `auth signin <b64 password>` | `ok signed in…` / `err …` | Open verb — it IS the credential check; clears the `SignedOut` latch → re-arms auto-lock |
+| `auth signout` | `ok signed out` | Ends the session (clears `session.dat`) and latches `SignedOut` → disarms auto-lock until the next sign-in; gated like any mutator |
+| `accept-config` | `ok accepted — the keyfile re-binds to the live config` / `ok nothing pending` / `err key not verified` | The key-holder's explicit accept for an attestation mismatch — the dirty state holds until this verb runs with the enrolled key verified THIS pass |
 
 **Account gate** (see `docs/auth.md`): with an account bound, mutating
-verbs — `pause`, `resume`, `quit`, `reenrolled`, `unenroll`, `vault <mutator>`,
-`update apply`, `auth signout` — answer `err AUTH_REQUIRED — …` unless
-the request carries `|auth <base64 password>` or the session is already
-unlocked. A correct trailer also arms the session for the rest of the
-run. `lock`, `status`, `open`, `deeplink`, `auth status`, `vault status`,
-and `update status`/`check` are always open (`lock` only makes the box
+verbs — `pause`, `resume`, `quit`, `reenrolled`, `unenroll`,
+`accept-config`, `vault <mutator>`, `update apply`, `auth signout` —
+answer `err AUTH_REQUIRED — …` unless the request carries
+`|auth <base64 password>` or the session window is open (15 min from the
+last verified credential — sign-in no longer rides to restart).
+**Destructive** verbs — `unenroll`, `quit`, `vault delete`,
+`vault accept-rollback`, `update apply`, `accept-config` — additionally
+need a *fresh* grant (2 min) or an inline `|auth`. `lock`, `status`,
+`open`, `deeplink`, `auth status`, `vault status`, and
+`update status`/`check` are always open (`lock` only makes the box
 safer; reads disclose nothing).
 
 Security: DACL grants `GA` to the owning user's SID; a medium-integrity

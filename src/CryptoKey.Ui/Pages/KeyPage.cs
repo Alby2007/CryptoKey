@@ -300,6 +300,12 @@ internal sealed class KeyPage : Page
             RefreshKey();
             return;
         }
+        if (reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+        {
+            // The session's fresh window closed — re-authenticate and retry.
+            Ctx.ShowAuth(ok => { if (ok) RemoveKey(); }, AuthMode.SignIn);
+            return;
+        }
         _removePhrase.Classes.Add("error");
         Report(reply.StartsWith("err ", StringComparison.Ordinal) ? reply[4..] : reply);
     }

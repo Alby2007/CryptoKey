@@ -15,7 +15,10 @@ internal sealed record KeyfileCheck(
     string Detail,
     IReadOnlyList<string> MatchedLetters,
     AttestState Attest,
-    byte[]? Secret = null);
+    byte[]? Secret = null,
+    /// <summary>Any volume carried a v2-magic file — proves v2-era keyfiles
+    /// exist even when this one didn't unwrap (corrupt/foreign).</summary>
+    bool SawEnvelope = false);
 
 internal static class KeyVerifier
 {
@@ -111,6 +114,14 @@ internal static class KeyVerifier
 
         if (file.Length == SecretLen)
         {
+            // V2Only latch: raw pre-attestation files skip the machine
+            // binding AND the canon MAC — a stolen v1 backup replays
+            // anywhere. Once a v2 envelope exists they stop counting.
+            if (config.V2Only)
+            {
+                detail = "pre-attestation keyfile refused — this install is v2-only";
+                return false;
+            }
             secret = file;
             detail = "pre-attestation format";
             return true;
@@ -169,7 +180,7 @@ internal static class KeyVerifier
                 Array.Empty<string>(), AttestState.Missing);
 
         var matched = new List<string>();
-        bool foundCurrent = false, foundPrevious = false;
+        bool foundCurrent = false, foundPrevious = false, sawEnvelope = false;
         AttestState bestAttest = AttestState.Missing;
         byte[]? winningSecret = null;
         string lastError = "no keyfile found";
@@ -181,6 +192,10 @@ internal static class KeyVerifier
                 lastError = readError;
                 continue;
             }
+            // A v2-magic file proves this device carries envelopes — raw
+            // pre-attestation files stop counting once one exists (V2Only).
+            sawEnvelope |= file.Length > Magic.Length
+                && file.AsSpan(0, Magic.Length).SequenceEqual(Magic);
 
             if (!TryUnwrapKeyfile(file, config, out byte[]? secret,
                     out AttestState attest, out string unwrapDetail)
@@ -230,13 +245,14 @@ internal static class KeyVerifier
         if (foundCurrent)
             return new KeyfileCheck(SecretMatch.Current,
                 $"verified — generation {config.RotationCount}{AttestSuffix(bestAttest)}",
-                matched, bestAttest, winningSecret);
+                matched, bestAttest, winningSecret, sawEnvelope);
         if (foundPrevious)
             return new KeyfileCheck(SecretMatch.Previous,
                 $"stale — previous-generation secret (gen {Math.Max(0, config.RotationCount - 1)})" +
                     AttestSuffix(bestAttest),
-                matched, bestAttest, winningSecret);
-        return new KeyfileCheck(SecretMatch.None, lastError, matched, AttestState.Missing);
+                matched, bestAttest, winningSecret, sawEnvelope);
+        return new KeyfileCheck(SecretMatch.None, lastError, matched,
+            AttestState.Missing, SawEnvelope: sawEnvelope);
     }
 
     private static string AttestSuffix(AttestState attest) => attest switch

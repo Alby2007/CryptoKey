@@ -35,6 +35,16 @@ internal sealed class KeyConfig
     public ulong VaultEpoch { get; set; }
 
     /// <summary>
+    /// Once true, raw 64-byte pre-attestation keyfiles stop being accepted —
+    /// the legacy format skips the per-machine binding AND the tamper MAC,
+    /// so a stolen v1-era backup replays anywhere. Latched at enroll (new
+    /// installs) and on the first v2 envelope ever seen (upgraded installs).
+    /// Covered by the attestation canon: an off-app flip back to false
+    /// mismatches like any canon field.
+    /// </summary>
+    public bool V2Only { get; set; }
+
+    /// <summary>
     /// The bound cloud account (identity + offline password verifier — never
     /// tokens). Nullable: pre-account installs carry null and behave exactly
     /// as before. Once present it JOINS the attestation canon — a grafted
@@ -329,6 +339,7 @@ internal static class ConfigStore
             PassphraseHash = Convert.ToBase64String(
                 HashNormalized(recoveryPhrase, passSalt, CurrentPbkdf2Iterations)),
             PassphraseIterations = CurrentPbkdf2Iterations,
+            V2Only = true, // new enrollments always write v2 envelopes — raw never accepted
         };
     }
 
@@ -436,18 +447,20 @@ internal static class ConfigStore
     /// </summary>
     /// <summary>New envelopes always carry the accounthash field ("-" when none).</summary>
     public static byte[] ComputeAttest(byte[] secret, KeyConfig config)
-        => ComputeAttest(secret, config, includeEpoch: true, accountField: true);
+        => ComputeAttest(secret, config, includeEpoch: true, accountField: true,
+            v2Only: config.V2Only);
 
     /// <summary>Pre-epoch canon (Tier-1 keyfiles) — reads only; test-visible.</summary>
     internal static byte[] ComputeAttestNoEpoch(byte[] secret, KeyConfig config)
-        => ComputeAttest(secret, config, includeEpoch: false, accountField: false);
+        => ComputeAttest(secret, config, includeEpoch: false, accountField: false,
+            v2Only: false);
 
     private static byte[] ComputeAttest(byte[] secret, KeyConfig config,
-        bool includeEpoch, bool accountField)
+        bool includeEpoch, bool accountField, bool v2Only)
     {
         byte[] data = Encoding.UTF8.GetBytes(
             "CKY-ATTEST2" + config.DeviceSerial + config.PassphraseHash
-            + GuardCanonical(config, includeEpoch, accountField));
+            + GuardCanonical(config, includeEpoch, accountField, v2Only));
         return HMACSHA256.HashData(secret, data);
     }
 
@@ -476,18 +489,30 @@ internal static class ConfigStore
         bool ok = CryptographicOperations.FixedTimeEquals(stored,
             ComputeAttest(secret, config));
         ok |= CryptographicOperations.FixedTimeEquals(stored,
-            ComputeAttest(secret, config, includeEpoch: false, accountField: true));
+            ComputeAttest(secret, config, includeEpoch: false, accountField: true,
+                v2Only: config.V2Only));
         if (config.Account == null)
         {
             // Account-free configs still accept every historical form —
             // installs that never enrolled an account verify unchanged.
             ok |= CryptographicOperations.FixedTimeEquals(stored,
-                ComputeAttest(secret, config, includeEpoch: true, accountField: false));
+                ComputeAttest(secret, config, includeEpoch: true, accountField: false,
+                    v2Only: config.V2Only));
             ok |= CryptographicOperations.FixedTimeEquals(stored,
-                ComputeAttest(secret, config, includeEpoch: false, accountField: false));
-            ok |= CryptographicOperations.FixedTimeEquals(stored,
-                LegacyAttest(secret, config));
+                ComputeAttest(secret, config, includeEpoch: false, accountField: false,
+                    v2Only: config.V2Only));
+            // The pre-canon MAC knows nothing of v2only — accepting it on
+            // a latched install would verify a file that can't prove the
+            // latch. Once v2-only is set it stops counting like the rest.
+            if (!config.V2Only)
+                ok |= CryptographicOperations.FixedTimeEquals(stored,
+                    LegacyAttest(secret, config));
         }
+        // NOTE: V2Only is a real latch — once set, the canon REQUIRES the
+        // |v2only field, so pre-flip envelopes mismatch until the pending
+        // re-attest rewrites them. Accepting the old forms here would make
+        // an off-app v2only:false flip invisible — the hole the latch
+        // exists to close.
         return ok;
     }
 
@@ -515,7 +540,7 @@ internal static class ConfigStore
     /// section detectable on the next key verify.
     /// </summary>
     private static string GuardCanonical(KeyConfig config, bool includeEpoch,
-        bool accountField)
+        bool accountField, bool v2Only)
     {
         GuardSettings g = config.Guard;
         static string B(bool v) => v ? "true" : "false";
@@ -533,6 +558,7 @@ internal static class ConfigStore
             + "|vaultidleminutes=" + g.VaultIdleMinutes
             + "|pollintervalms=" + g.PollIntervalMs
             + (includeEpoch ? "|vaultepoch=" + config.VaultEpoch : "")
+            + (v2Only ? "|v2only=true" : "")
             + (accountField
                 ? "|accounthash=" + (config.Account?.VerifierHash ?? "-")
                     // The signed-out latch rides inside the covered slot —

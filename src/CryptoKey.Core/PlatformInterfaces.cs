@@ -81,6 +81,22 @@ internal interface IIpcSecurity
     /// </summary>
     NamedPipeServerStream CreatePipe(out bool integrityLabeled);
 
+    /// <summary>
+    /// The pipe-name anchor: a never-connected instance held for the
+    /// process lifetime. Created with first-instance semantics so a name
+    /// squatter that pre-bound is DETECTED (the create fails) — the caller
+    /// logs and keeps serving on a contested name rather than going deaf.
+    /// </summary>
+    NamedPipeServerStream CreateAnchorPipe();
+
+    /// <summary>
+    /// Client-side check: does the connected pipe server belong to a
+    /// CryptoKey image? (Windows: server-PID image basename; platforms
+    /// with per-user transports return true.) False → drop the connection —
+    /// commands carry account passwords and the recovery phrase.
+    /// </summary>
+    bool VerifyServerIsOurs(NamedPipeClientStream pipe);
+
     /// <summary>True when this host is elevated such that a normal-integrity
     /// client can't reach the pipe without the integrity label.</summary>
     bool Elevated { get; }

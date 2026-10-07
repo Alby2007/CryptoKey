@@ -40,6 +40,7 @@ internal sealed class GuardService : IDisposable
     private string? _tamperNote;
     private bool _keyVerifiedNow;      // key factor currently armed (2FA gate)
     private bool _staleKeyPresent;     // a previous-generation file is on the drive
+    private bool _attestDirty;         // canon mismatch stands — phrase path held closed until key-present accept
     private DateTime? _cooldownUntil;  // phrase-input freeze deadline
     private bool _unlockDeferLogged;   // "Unlock deferred" logged once per stretch
     private AttestState _lastAttest;   // dedup for the legacy-format log line
@@ -577,6 +578,7 @@ internal sealed class GuardService : IDisposable
                 _surface.SetCooldown(null);
             }
             _lastAttest = AttestState.Ok;
+            _attestDirty = false; // fresh binding — the next poll re-judges
             _vault.ReloadConfig();
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
             return "ok re-enrolled";
@@ -678,6 +680,10 @@ internal sealed class GuardService : IDisposable
         _keyVerifiedNow = false;
         _staleKeyPresent = false;
         _tamperNote = null;
+        // The binding the dirty latch guarded is gone — a dormant config
+        // holds no attestation to disagree with, and a manual lock's phrase
+        // must still work.
+        _attestDirty = false;
         _vault.KeyGone();
         Log("Key unenrolled — auto-lock disarmed.");
         EmitSnapshot();
@@ -750,7 +756,9 @@ internal sealed class GuardService : IDisposable
             && State == GuardState.Locked)
             return "err locked — insert the key or enter the recovery phrase first";
 
-        if (RequiresAuth(parts) && !_auth.Authorize(authPassword, out string authErr))
+        if (RequiresAuth(parts)
+            && !_auth.Authorize(authPassword, out string authErr,
+                fresh: RequiresFreshAuth(parts)))
             return authErr == "AUTH_REQUIRED"
                 ? "err AUTH_REQUIRED — the account session is locked; " +
                   "sign in on the dashboard or pass |auth <base64 password>"
@@ -794,6 +802,18 @@ internal sealed class GuardService : IDisposable
                     return "err malformed phrase — expected base64";
                 }
                 return Unenroll(phrase);
+            case "accept-config":
+                // M3 — the key-holder's explicit accept for a canon
+                // mismatch: only while the key verifies THIS pass. Bound
+                // installs come through the auth gate — a dirty account
+                // field already refuses Authorize (relink is their path).
+                if (!_attestDirty)
+                    return "ok nothing pending — config is clean";
+                if (!_keyVerifiedNow)
+                    return "err key not verified — insert the enrolled drive first";
+                _reattestPending = true;
+                Log("Config changes accepted by key-holder — re-attesting.");
+                return "ok accepted — the keyfile re-binds to the live config";
             case "vault":
                 return DispatchVault(parts);
             case "update":
@@ -808,6 +828,7 @@ internal sealed class GuardService : IDisposable
                        $"pausedUntil={s.PausedUntil?.ToString("HH:mm:ss") ?? "-"} " +
                        $"tamper=\"{s.TamperNote ?? "-"}\" " +
                        $"keyVerified={_keyVerifiedNow} " +
+                       $"integrity={(_attestDirty ? "dirty" : "clean")} " +
                        $"policy={_config.Guard.UnlockPolicy} " +
                        $"watchdog={(s.WatchdogAlive ? "alive" : "down")} " +
                        $"surface={(_surface.IsOverlay ? "overlay" : "secure")} " +
@@ -834,7 +855,8 @@ internal sealed class GuardService : IDisposable
             return false; // no credential exists to satisfy a gate — pre-account install
         return parts[0].ToLowerInvariant() switch
         {
-            "pause" or "resume" or "quit" or "reenrolled" or "unenroll" => true,
+            "pause" or "resume" or "quit" or "reenrolled" or "unenroll"
+                or "accept-config" => true,
             "vault" => parts.Length > 1
                 && !parts[1].Equals("status", StringComparison.OrdinalIgnoreCase),
             "update" => parts.Length > 1
@@ -844,6 +866,25 @@ internal sealed class GuardService : IDisposable
             _ => false,
         };
     }
+
+    /// <summary>
+    /// The destructive-verb gate — these need a RECENT authorization (the
+    /// two-minute fresh window), not just an open session: a stale or
+    /// piggybacked session can't drive unenroll/vault-delete/update-apply/
+    /// quit/accept with one long-ago password.
+    /// </summary>
+    private static bool RequiresFreshAuth(string[] parts)
+        => parts[0].ToLowerInvariant() switch
+        {
+            "unenroll" or "accept-config" or "quit" => true,
+            "vault" => parts.Length > 1
+                && (parts[1].Equals("delete", StringComparison.OrdinalIgnoreCase)
+                    || parts[1].Equals("accept-rollback",
+                        StringComparison.OrdinalIgnoreCase)),
+            "update" => parts.Length > 1
+                && parts[1].Equals("apply", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
 
     /// <summary>`cryptokey auth …` — the gate's verbs.</summary>
     private string DispatchAuth(string[] parts)
@@ -1090,19 +1131,49 @@ internal sealed class GuardService : IDisposable
             // key itself still verifies. An in-flight write of our own
             // (_reattestPending — e.g. a password change's record persist)
             // expects the mismatch, so it doesn't count as dirty.
-            _auth.SetAttestationClean(
-                check.Attest != AttestState.Mismatch || _reattestPending);
+            // M4 — the v2-only latch: a v2-magic file on the enrolled drive
+            // proves this install is envelope-era; raw pre-attestation
+            // keyfiles stop counting from here on. The flag joins the
+            // attestation canon, so the flip queues a re-attest — the
+            // envelope rewrites itself with |v2only required.
+            if (check.SawEnvelope && !_config.V2Only)
+            {
+                _config.V2Only = true;
+                _reattestPending = true;
+                try { ConfigStore.Save(_config); }
+                catch (Exception ex) { Log($"v2-only latch save failed: {ex.Message}"); }
+                Log("V2 keyfile envelope seen — raw pre-attestation " +
+                    "keyfiles are now refused (v2-only latched).");
+            }
 
-            // Announce-then-heal: a mismatch announces as tamper below, then
-            // the envelope re-binds to the live config (same secret — no
-            // generation burn). An in-app save (_reattestPending) re-binds
-            // silently — we caused it, it isn't tamper. With an account
-            // bound, an UNPROMPTED mismatch never self-heals: healing would
-            // launder a grafted verifier into the attested config. The
-            // account-free case still heals — deletion announces loudly and
-            // lands on the documented relink path.
-            bool reattest = (_reattestPending
-                    || (check.Attest == AttestState.Mismatch && _config.Account == null))
+            // M4 — a secret match on a PRE-ATTESTATION file verified
+            // nothing about config.json: on an account-bound install the
+            // canon went unexamined, so it counts as dirty — a grafted
+            // verifier can't hide behind a legacy file.
+            _auth.SetAttestationClean(
+                (check.Attest != AttestState.Mismatch || _reattestPending)
+                && !(check.Attest == AttestState.Missing
+                    && check.Match != SecretMatch.None
+                    && _config.Account != null));
+
+            // M3 — the dirty latch: a canon mismatch (off-app edit or a
+            // grafted verifier/phrase hash) is NEVER silently absorbed.
+            // While it stands, the phrase path stays closed — config.json
+            // is the untrusted side of that verification — until a
+            // key-present `accept-config` re-binds the envelope. A clean
+            // verify clears it. (Bound installs keep the relink path:
+            // dirty auth fields refuse Authorize outright.)
+            if (check.Attest == AttestState.Mismatch && !_reattestPending)
+                _attestDirty = true;
+            else if (check.Attest == AttestState.Ok)
+                _attestDirty = false;
+
+            // Announce-then-heal: an in-app save (_reattestPending — we
+            // caused it, it isn't tamper) re-binds silently, and an explicit
+            // key-present accept rides the same path. Unprompted mismatches
+            // no longer heal at all — account-free installs included:
+            // healing laundered a tampered canon into attestation.
+            bool reattest = _reattestPending
                 && !stale && !rotationDue
                 && DateTime.UtcNow - _lastReattestUtc > TimeSpan.FromSeconds(5);
             // The vault consumes its own copy on feed — when the rewrap also
@@ -1162,7 +1233,8 @@ internal sealed class GuardService : IDisposable
                         ? "Keyfile presented a previous-generation secret — " +
                           "possible clone or interrupted rotation."
                         : "Keyfile attestation mismatch — config.json changed " +
-                          "off-app or tampered; the keyfile re-binds to the live config.";
+                          "off-app or tampered. Held: unlock with the key, then " +
+                          "'cryptokey accept-config' if the changes are yours.";
                     Log(msg);
                     Snap("tamper");
                     Alert("Tamper", msg);
@@ -1525,6 +1597,17 @@ internal sealed class GuardService : IDisposable
         _cooldownUntil = null;
         _surface.SetCooldown(null);
         _surface.SetFailedAttempts(0);
+
+        // M3 — a standing canon mismatch holds the phrase path closed even
+        // for the right phrase: the hash it verified against is the
+        // untrusted side. Key unlock still works (the keyfile IS the
+        // verifier); the holder accepts or reverts the changes.
+        if (_attestDirty)
+        {
+            _surface.SetStatus("Config integrity check failed — unlock with the " +
+                "key, then run 'cryptokey accept-config' if the changes are yours.");
+            return;
+        }
 
         if (policy == UnlockPolicy.KeyOnly)
         {
