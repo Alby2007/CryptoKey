@@ -49,7 +49,10 @@ internal static class ShortcutManager
         shortcut.TargetPath = exe;
         shortcut.Arguments = "";
         shortcut.WorkingDirectory = Path.GetDirectoryName(exe);
-        shortcut.IconLocation = $"\"{exe}\",0";
+        // UNQUOTED path — the string is stored verbatim in the .lnk and the
+        // shell's icon resolver doesn't strip quotes, so "\"C:\…\",0" fails
+        // to resolve and the shortcut renders the generic page icon.
+        shortcut.IconLocation = $"{exe},0";
         shortcut.Description = "CryptoKey — USB security key PC lock";
         shortcut.Save();
     }
