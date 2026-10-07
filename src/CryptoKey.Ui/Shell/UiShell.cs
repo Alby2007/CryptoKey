@@ -106,9 +106,17 @@ internal sealed class UiShell : IDisposable
 
     private void Apply(StatusSnapshot s, bool announce)
     {
-        _statusItem.Header = s.State == GuardState.Paused
-            ? $"CryptoKey — PAUSED until {s.PausedUntil:HH:mm}"
-            : $"CryptoKey — {s.State.ToString().ToUpperInvariant()}";
+        // Account-gated-out: the native menu is a masked surface like the
+        // flyout — no state text, no key identity. The icon and tooltip
+        // stay (the owner's glance lamp); action items stay enabled —
+        // they prompt sign-in through EnsureAuth.
+        bool gatedOut = !AccountGatePassed();
+        _statusItem.Header = gatedOut
+            ? "CryptoKey — sign in to manage"
+            : s.State == GuardState.Paused
+                ? $"CryptoKey — PAUSED until {s.PausedUntil:HH:mm}"
+                : $"CryptoKey — {s.State.ToString().ToUpperInvariant()}";
+        _keyItem.IsVisible = !gatedOut;
         _keyItem.Header = s.KeyPresent
             ? $"Key: {s.Model} — present"
             : $"Key: absent ({_client.Settings.DeviceSerial})";

@@ -21,11 +21,13 @@ internal sealed class TrayFlyout : Window
     private readonly TextBlock _word = new() { FontSize = 24, FontWeight = FontWeight.Black, LetterSpacing = 1 };
     private readonly TextBlock _reason = Kit.Txt("", "caption", "dim");
     private readonly Button _lock;
+    private readonly Button _signIn;
     private readonly Button _resume;
     private readonly StackPanel _pauseRow;
     private readonly Border _vaultRow;
     private readonly StatusChip _vaultChip = new();
     private readonly Button _vaultBtn;
+    private readonly Grid _footer;
     private DateTime _shownAt;
 
     public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open,
@@ -46,6 +48,10 @@ internal sealed class TrayFlyout : Window
 
         _lock = Kit.Btn("Lock now", IconData.Lock, "lock", () => { _client.Lock(); Hide(); });
         _lock.HorizontalAlignment = HorizontalAlignment.Stretch;
+        // Locked-variant call to action — surfaces the account gate.
+        _signIn = Kit.Btn("Sign in…", IconData.Person, "primary",
+            () => { Hide(); open(Route.Home); });
+        _signIn.HorizontalAlignment = HorizontalAlignment.Stretch;
         _resume = Kit.Btn("Resume protection", IconData.Play, "primary",
             () => _ensureAuth(() => _client.Resume()));
         _resume.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -77,22 +83,22 @@ internal sealed class TrayFlyout : Window
         vaultGrid.Children.Add(_vaultBtn);
         _vaultRow = new Border { Classes = { "well" }, Padding = new Thickness(12, 8), Child = vaultGrid };
 
-        var footer = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 4 };
+        _footer = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 4 };
         var openBtn = Kit.Btn("Open CryptoKey", IconData.Home, "ghost small", () => { Hide(); open(Route.Home); });
         openBtn.HorizontalAlignment = HorizontalAlignment.Left;
-        footer.Children.Add(openBtn);
+        _footer.Children.Add(openBtn);
         var settings = new Button { Classes = { "ghost", "small" }, Content = new Icon(IconData.Settings, 16) };
         ToolTip.SetTip(settings, "Settings");
         Kit.AutomationName(settings, "Settings");
         settings.Click += (_, _) => { Hide(); open(Route.General); };
         Grid.SetColumn(settings, 1);
-        footer.Children.Add(settings);
+        _footer.Children.Add(settings);
         var quitBtn = new Button { Classes = { "ghost", "small" }, Content = new Icon(IconData.Quit, 16) };
         ToolTip.SetTip(quitBtn, "Quit CryptoKey");
         Kit.AutomationName(quitBtn, "Quit CryptoKey");
         quitBtn.Click += (_, _) => { Hide(); _ensureAuth(quit); };
         Grid.SetColumn(quitBtn, 2);
-        footer.Children.Add(quitBtn);
+        _footer.Children.Add(quitBtn);
 
         var head = new Grid { ColumnDefinitions = new ColumnDefinitions("150,*"), ColumnSpacing = 8 };
         head.Children.Add(_key);
@@ -110,7 +116,7 @@ internal sealed class TrayFlyout : Window
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(16),
             BoxShadow = new BoxShadows(new BoxShadow { Blur = 22, OffsetY = 6, Color = Color.FromArgb(150, 0, 0, 0) }),
-            Child = Kit.V(12, head, _lock, _resume, _pauseRow, _vaultRow, Kit.Divider(), footer),
+            Child = Kit.V(12, head, _lock, _signIn, _resume, _pauseRow, _vaultRow, Kit.Divider(), _footer),
         };
 
         Deactivated += (_, _) =>
@@ -164,6 +170,29 @@ internal sealed class TrayFlyout : Window
 
     private void Apply()
     {
+        var auth = AuthService.Current;
+        if (auth.Gating && !auth.Authorized)
+        {
+            // Locked variant: the panel is a sign-in card, not a status
+            // readout — an unauthorized observer doesn't get armed state,
+            // key presence, the vault row, or control affordances. Dimmed
+            // key art leaks nothing; Lock now stays because it only makes
+            // the box safer.
+            _key.State = KeyVisualState.Absent;
+            _word.Text = "Locked";
+            _word.Foreground = Kit.ToneBrush(Tone.Neutral);
+            _reason.Text = "Sign in to view status and controls.";
+            _lock.IsVisible = true;
+            _signIn.IsVisible = true;
+            _resume.IsVisible = false;
+            _pauseRow.IsVisible = false;
+            _vaultRow.IsVisible = false;
+            _footer.IsVisible = false;
+            return;
+        }
+        _signIn.IsVisible = false;
+        _footer.IsVisible = true;
+
         StatusSnapshot s = _client.Snapshot;
         HomeView v = HomePresenter.Present(s, _client.Settings, _client.DevMode, _host.IsElevated);
         _key.State = v.Visual;
