@@ -119,7 +119,7 @@ internal sealed class OnboardingWindow : Window
                 _title.Text = _firstRun ? "Your USB drive becomes your key" : "Enroll a new key";
                 _subtitle.Text = _firstRun
                     ? "Pull it out and this computer locks. Plug it back in and you're in. Setup takes about a minute."
-                    : _flow.Existing != null
+                    : _flow.Existing?.Enrolled == true
                         ? $"This replaces the key currently enrolled (serial {_flow.Existing.DeviceSerial}). Your settings carry over."
                         : "Register a drive as your key.";
                 _body.Content = Kit.V(10,

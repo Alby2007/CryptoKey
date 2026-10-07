@@ -23,9 +23,11 @@ internal sealed class HomePage : Page
     private readonly Button _resume;
     private readonly Border _hero;
 
+    private readonly TextBlock _keyEyebrow = Kit.Txt("ENROLLED KEY", "eyebrow");
     private readonly TextBlock _keyTitle = Kit.Txt("", "h2");
     private readonly TextBlock _keySerial = Kit.Txt("", "mono", "dim");
     private readonly TextBlock _keyDetail = Kit.Txt("", "caption", "dim");
+    private readonly Button _setupKey;
 
     private readonly StatusChip _vaultChip = new();
     private readonly TextBlock _vaultLine = Kit.Txt("", "caption", "dim");
@@ -78,12 +80,17 @@ internal sealed class HomePage : Page
         };
 
         // ---- Key card ----
+        _setupKey = Kit.Btn("Set up a key", IconData.Usb, "primary small",
+            () => Ctx.OpenOnboarding());
+        _setupKey.HorizontalAlignment = HorizontalAlignment.Left;
+        _setupKey.IsVisible = false;
         var keyCard = new Border
         {
             Classes = { "card" },
             Child = Kit.V(8,
-                Kit.H(8, new Icon(IconData.Usb, 16) { Foreground = Palette.Signal }, Kit.Txt("ENROLLED KEY", "eyebrow")),
+                Kit.H(8, new Icon(IconData.Usb, 16) { Foreground = Palette.Signal }, _keyEyebrow),
                 _keyTitle, _keySerial, _keyDetail,
+                _setupKey,
                 LinkButton("Manage key & recovery", () => Ctx.Navigate(Route.Key))),
         };
 
@@ -212,6 +219,8 @@ internal sealed class HomePage : Page
         };
         _hero.BorderBrush = Palette.Brush(accent, 0x40);
 
+        _keyEyebrow.Text = s.Enrolled ? "ENROLLED KEY" : "KEY";
+        _setupKey.IsVisible = !s.Enrolled && s.State != GuardState.Locked;
         _keyTitle.Text = v.KeyTitle;
         _keySerial.Text = v.KeySerial;
         _keyDetail.Text = v.KeyDetail;

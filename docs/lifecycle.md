@@ -21,7 +21,35 @@ stateDiagram-v2
 `State` is the single source of truth — tray, dashboard, IPC `status`,
 `quit` gating, and `DispatchCommand` all read the same snapshot
 (`StatusSnapshot`: state, key presence/model, verify failure, pause expiry,
-tamper note, key-factor armed).
+tamper note, key-factor armed, watchdog liveness, vault, `Enrolled`).
+
+## Dormant — unenrolled
+
+`cryptokey unenroll` (or Key page → Remove key; IPC `unenroll <b64-phrase>`)
+removes the key binding without uninstalling — distinct from first-run
+(first-run is *no config*; unenrolled is *a config with no key bound*):
+
+- refused while **Locked** — removing the key there is just an unlock
+  bypass, so the refusal precedes even the account gate (no baited
+  password prompt for a verb that can't run);
+- refused while a **vault image exists** — vault contents are keyed to
+  this enrollment; delete the vault first;
+- verifies the **recovery phrase** — ownership proof, and the phrase is
+  what keeps manual-lock escape and vault recovery possible afterward;
+- clears only the key material: `DeviceSerial`, `SecretSalt`,
+  `SecretHash`, `PrevSecretHash`, `RotationCount`, `LastRotationUtc`;
+- keeps everything else: phrase, account record, all guard settings,
+  `VaultEpoch` (the rollback fence — re-enroll carries it forward);
+- best-effort deletes `.cryptokey` from the enrolled drive when attached
+  — a stale keyfile verifies nothing and re-enroll overwrites it.
+
+The empty `DeviceSerial` is the sentinel — `KeyConfig.Enrolled` goes false
+and every auto-lock funnel (removal, startup, resume, idle, pause-expiry)
+no-ops. The disarm is logged once at unenrollment
+("Key unenrolled — auto-lock disarmed."), not per tick. Manual `lock`
+still works — the kept phrase unlocks it. The dashboard/tray read "No key
+enrolled — protection is off" with a "Set up a key" CTA into the ordinary
+wizard; the config, account, and settings carry over there too.
 
 `LockOnRemoval` arming rule: auto-lock only fires when the guard has seen
 the enrolled device since startup — a machine booted without the key

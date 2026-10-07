@@ -45,6 +45,16 @@ internal sealed class KeyConfig
     public AccountRecord? Account { get; set; }
 
     public GuardSettings Guard { get; set; } = new();
+
+    /// <summary>
+    /// A key binding exists — serial AND secret hash both populated. Empty
+    /// serial is the unenrolled sentinel: `unenroll` clears the key material
+    /// but keeps everything else (account, phrase, settings, vault epoch), so
+    /// a present-but-unenrolled config is the dormant state — NOT first-run
+    /// (first-run is still a null config).
+    /// </summary>
+    [JsonIgnore]
+    public bool Enrolled => DeviceSerial.Length > 0 && SecretHash.Length > 0;
 }
 
 internal enum SecretMatch

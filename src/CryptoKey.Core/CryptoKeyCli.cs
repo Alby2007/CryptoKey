@@ -83,6 +83,8 @@ internal static class CryptoKeyCli
                     _ = IpcClient.Send("reenrolled" + trailer, 400);
                 }
                 return erc;
+            case "unenroll":
+                return Unenroll();
             case "status":
                 return Status();
             case "guard":
@@ -217,6 +219,130 @@ internal static class CryptoKeyCli
             Console.Write('*');
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// `cryptokey unenroll` — remove the key binding while keeping the
+    /// install (account, phrase, settings, vault epoch all survive). With a
+    /// live guard the gated pipe op owns it (lock/vault state included);
+    /// with the guard down the same mutation runs standalone. Either way
+    /// the recovery phrase proves ownership and the account gate applies.
+    /// </summary>
+    private static int Unenroll()
+    {
+        string? authPw = null;
+        string AuthTrailer() => authPw == null ? "" : " |auth "
+            + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(authPw));
+
+        // Live guard: phrase rides as a positional b64 arg — its alphabet
+        // can't collide with the "|auth" trailer.
+        string? reply = IpcClient.Send("unenroll", 2000);
+        if (reply != null)
+        {
+            // The gate checks the session before it wants the phrase arg.
+            if (reply.Contains("AUTH_REQUIRED", StringComparison.Ordinal))
+            {
+                authPw = ReadPassword("Account password: ");
+                if (authPw == null)
+                {
+                    Console.WriteLine("error: AUTH_REQUIRED — no account password supplied");
+                    return 1;
+                }
+                reply = IpcClient.Send("unenroll" + AuthTrailer(), 2000);
+            }
+            if (reply != null
+                && reply.Contains("PHRASE_REQUIRED", StringComparison.Ordinal))
+            {
+                string? typed = ReadPassword("Recovery phrase: ");
+                if (typed == null)
+                {
+                    Console.WriteLine("error: PHRASE_REQUIRED — no recovery phrase supplied");
+                    return 1;
+                }
+                reply = IpcClient.Send("unenroll " + Convert.ToBase64String(
+                    System.Text.Encoding.UTF8.GetBytes(typed)) + AuthTrailer(), 2000);
+            }
+            if (reply == null)
+            {
+                Console.WriteLine("cryptokey guard went quiet mid-unenroll.");
+                return 1;
+            }
+            Console.WriteLine(reply);
+            return reply.StartsWith("ok", StringComparison.Ordinal) ? 0 : 1;
+        }
+
+        // No live guard — the same mutation standalone (mirrors vault's
+        // standalone ops): account gate → phrase → strip → delete keyfile.
+        if (!RequireAccountAuth())
+            return 1;
+        if (!TryLoadConfig(out KeyConfig? config))
+            return 1;
+        if (config == null)
+        {
+            Console.WriteLine("Nothing enrolled (no config on disk).");
+            return 1;
+        }
+        if (!config.Enrolled)
+        {
+            Console.WriteLine("No key enrolled — nothing to remove.");
+            return 0;
+        }
+        string imagePath = string.IsNullOrWhiteSpace(config.Guard.VaultImagePath)
+            ? VaultService.DefaultImagePath : config.Guard.VaultImagePath;
+        if (File.Exists(imagePath))
+        {
+            Console.WriteLine("error: a vault image exists — its content is " +
+                "keyed to this enrollment; remove the vault first");
+            return 1;
+        }
+        string? phrase = ReadPassword("Recovery phrase: ");
+        if (phrase == null || !ConfigStore.VerifyPassphrase(config, phrase))
+        {
+            Console.WriteLine("error: incorrect recovery phrase");
+            return 1;
+        }
+        UsbDisk? disk = null;
+        try { disk = Platform.Services.Usb.FindDisk(config.DeviceSerial); }
+        catch (Exception) { }
+
+        config.DeviceSerial = "";
+        config.SecretSalt = "";
+        config.SecretHash = "";
+        config.PrevSecretHash = "";
+        config.RotationCount = 0;
+        config.LastRotationUtc = null;
+        try
+        {
+            ConfigStore.Save(config);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"error: unenroll failed: {ex.Message}");
+            return 1;
+        }
+        if (disk != null)
+        {
+            foreach (string vol in disk.VolumePaths)
+            {
+                try
+                {
+                    string keyfile = KeyVerifier.KeyFilePath(vol);
+                    if (File.Exists(keyfile))
+                    {
+                        File.Delete(keyfile);
+                        Console.WriteLine($"Keyfile deleted on {vol}.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"warning: couldn't delete the keyfile on {vol}: {ex.Message}");
+                }
+            }
+        }
+        Console.WriteLine("Unenrolled — key binding removed; the install stays " +
+            "(account, phrase, and settings kept). Auto-lock is disarmed " +
+            "until a new key is enrolled.");
+        return 0;
     }
 
     /// <summary>
@@ -430,6 +556,13 @@ internal static class CryptoKeyCli
 
         Console.WriteLine($"CryptoKey:     {BuildStamp}");
         Console.WriteLine($"Config:        {ConfigStore.ConfigPath}");
+        Console.WriteLine($"Enrolled:      {(config.Enrolled ? "yes" : "no")}");
+        if (!config.Enrolled)
+        {
+            Console.WriteLine("Key:           — (no key enrolled — auto-lock is off)");
+            PrintLiveGuard();
+            return 0;
+        }
         Console.WriteLine($"Device serial: {config.DeviceSerial}");
         Console.WriteLine($"Unlock policy: {config.Guard.UnlockPolicy}" +
             (config.Guard.StrictTamper ? " (strict tamper)" : ""));

@@ -25,7 +25,9 @@ internal sealed class UiShell : IDisposable
     private MainWindow? _window;
     private TrayFlyout? _flyout;
     private OnboardingWindow? _wizard;
-    private GuardState? _iconState;
+    // Icon/tooltip cache key — (state, enrolled): unenroll doesn't change
+    // GuardState (Unlocked→Unlocked) but must still refresh the tooltip.
+    private (GuardState, bool)? _iconKey;
 
     public UiShell(GuardClient client, IUiHost host)
     {
@@ -118,26 +120,31 @@ internal sealed class UiShell : IDisposable
             ? "CryptoKey — sign in to manage"
             : s.State == GuardState.Paused
                 ? $"CryptoKey — PAUSED until {s.PausedUntil:HH:mm}"
-                : $"CryptoKey — {s.State.ToString().ToUpperInvariant()}";
+                : !s.Enrolled && s.State != GuardState.Locked
+                    ? "CryptoKey — NO KEY"
+                    : $"CryptoKey — {s.State.ToString().ToUpperInvariant()}";
         _keyItem.IsVisible = !gatedOut;
-        _keyItem.Header = s.KeyPresent
-            ? $"Key: {s.Model} — present"
-            : $"Key: absent ({_client.Settings.DeviceSerial})";
+        _keyItem.Header = !s.Enrolled
+            ? "Key: none enrolled"
+            : s.KeyPresent
+                ? $"Key: {s.Model} — present"
+                : $"Key: absent ({_client.Settings.DeviceSerial})";
         _lockItem.IsEnabled = s.State != GuardState.Locked;
-        _pauseItem.IsEnabled = s.State != GuardState.Locked; // can extend a pause
+        _pauseItem.IsEnabled = s.State != GuardState.Locked && s.Enrolled;
         _resumeItem.IsEnabled = s.State == GuardState.Paused;
         _quitItem.IsEnabled = s.State != GuardState.Locked;
 
-        if (s.State == _iconState)
+        if ((s.State, s.Enrolled) == _iconKey)
             return;
-        GuardState? prev = _iconState;
-        _iconState = s.State;
+        GuardState? prev = _iconKey?.Item1;
+        _iconKey = (s.State, s.Enrolled);
         try { _tray.Icon = new WindowIcon(_host.TrayIcon(s.State)); }
         catch (Exception) { }
         _tray.ToolTipText = gatedOut ? "CryptoKey — sign in" : s.State switch
         {
             GuardState.Locked => "CryptoKey — LOCKED",
             GuardState.Paused => $"CryptoKey — paused until {s.PausedUntil:HH:mm}",
+            _ when !s.Enrolled => "CryptoKey — no key enrolled",
             _ => "CryptoKey — armed",
         };
 
@@ -327,7 +334,7 @@ internal sealed class UiShell : IDisposable
         // Read-only surfaces stay open — the mutators inside (pause,
         // resume, quit, vault mount) wrap themselves in the auth gate.
         _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit, EnsureAuth,
-            m => ShowAuth(_ => { }, m));
+            m => ShowAuth(_ => { }, m), OpenOnboarding);
         _flyout.ShowNear();
     }
 

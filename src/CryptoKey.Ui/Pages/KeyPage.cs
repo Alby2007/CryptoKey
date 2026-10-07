@@ -20,6 +20,15 @@ internal sealed class KeyPage : Page
     private readonly Button _repair;
     private bool _needsRepair;
 
+    // ---- Remove key ----
+    private readonly StackPanel _enrolledBody;
+    private readonly StackPanel _unenrolledBody;
+    private readonly Grid _removeRow;
+    private readonly Grid _vaultBlockRow;
+    private readonly Border _removeWell;
+    private readonly TextBox _removePhrase = PhraseBox("Recovery phrase");
+    private readonly HoldButton _removeBtn;
+
     // ---- Phrase flow ----
     private readonly Border _stepAuth;
     private readonly Border _stepReveal;
@@ -45,13 +54,58 @@ internal sealed class KeyPage : Page
     {
         _repair = Kit.Btn("Repair keyfile", IconData.Wrench, "", Repair);
         _repair.IsEnabled = false;
-        var keyCard = Kit.Section("Enrolled key", IconData.Usb,
-            "Live check of the drive registered as your key.",
+
+        _removeBtn = new HoldButton("Remove key", IconData.Trash, "Hold to remove the key");
+        _removeBtn.Confirmed += RemoveKey;
+        var removeWell = new Border { Classes = { "well" }, IsVisible = false };
+        removeWell.Child = Kit.V(10,
+            Kit.Txt("This disarms auto-lock — pulling the drive then does nothing " +
+                    "until a new key is set up. The recovery phrase stays (it still " +
+                    "unlocks a manual lock and can recover a vault), as do your " +
+                    "account and settings.", "body", "dim"),
+            _removePhrase,
+            Kit.H(8, _removeBtn,
+                Kit.Btn("Cancel", null, "ghost", () =>
+                {
+                    removeWell.IsVisible = false;
+                    _removePhrase.Text = "";
+                })));
+        _removeWell = removeWell;
+        _removeRow = Kit.Row("Remove key",
+            "Unbind this drive — the install, account, and recovery phrase all stay.",
+            Kit.Btn("Remove key…", IconData.Trash, "", () =>
+            {
+                _removeWell.IsVisible = !_removeWell.IsVisible;
+                if (_removeWell.IsVisible)
+                    _removePhrase.Focus();
+            }));
+        _vaultBlockRow = Kit.Row("Remove key",
+            "A vault image exists — its contents are keyed to this enrollment. " +
+            "Remove the vault first.",
+            Kit.Btn("Open vault page", IconData.ArrowRight, "ghost",
+                () => Ctx.Navigate(Route.Vault)));
+        _removeRow.IsVisible = _vaultBlockRow.IsVisible = false;
+
+        _enrolledBody = Kit.V(14,
             Kit.V(6, _keyStatus, _keyDetail),
             Kit.Row("Re-enroll", "Register a different drive (or start fresh). Runs the setup wizard.",
                 Kit.Btn("Re-enroll a key", IconData.Refresh, "", () => Ctx.OpenOnboarding())),
             Kit.Row("Repair keyfile", "Rewrites a damaged or outdated keyfile on the enrolled drive.",
-                Kit.H(8, Kit.Btn("Re-check", IconData.Scan, "ghost", RefreshKey), _repair)));
+                Kit.H(8, Kit.Btn("Re-check", IconData.Scan, "ghost", RefreshKey), _repair)),
+            _removeRow,
+            _vaultBlockRow);
+        var setupBtn = Kit.Btn("Set up a key", IconData.Usb, "primary", () => Ctx.OpenOnboarding());
+        setupBtn.HorizontalAlignment = HorizontalAlignment.Left;
+        _unenrolledBody = Kit.V(8,
+            Kit.Txt("No key enrolled — protection is off", "h2"),
+            Kit.Txt("Pulling a drive does nothing until a key is set up. Your " +
+                    "recovery phrase, account, and settings are all kept.",
+                "body", "dim"),
+            setupBtn);
+
+        var keyCard = Kit.Section("Enrolled key", IconData.Usb,
+            "Live check of the drive registered as your key.",
+            _enrolledBody, _unenrolledBody, _removeWell);
 
         // ---- Step 1: authorize ----
         _generate = Kit.Btn("Generate new phrase", IconData.Sparkles, "primary", Generate);
@@ -133,8 +187,21 @@ internal sealed class KeyPage : Page
         RevealPassword = false,
     };
 
+    private bool? _shownEnrolled;
+
     public override void Refresh()
     {
+        bool enrolled = Client.Snapshot.Enrolled;
+        _enrolledBody.IsVisible = enrolled;
+        _unenrolledBody.IsVisible = !enrolled;
+        if (_shownEnrolled != enrolled)
+        {
+            bool first = _shownEnrolled == null;
+            _shownEnrolled = enrolled;
+            // Enrollment flipped while the page sat open — repopulate rows.
+            if (!first)
+                RefreshKey();
+        }
         _repair.IsEnabled = _needsRepair && Client.Snapshot.State != GuardState.Locked;
     }
 
@@ -150,9 +217,24 @@ internal sealed class KeyPage : Page
 
     private async void RefreshKey()
     {
+        _removeWell.IsVisible = false;
+        _removePhrase.Text = "";
+        if (!Client.Snapshot.Enrolled)
+        {
+            // Dormant — no key to check, nothing to remove.
+            _needsRepair = false;
+            _removeRow.IsVisible = _vaultBlockRow.IsVisible = false;
+            Refresh();
+            return;
+        }
         _keyStatus.Text = "Checking key…";
         _keyStatus.Foreground = Palette.TextDim;
         _keyDetail.Text = "";
+        // A vault image is keyed to this enrollment — the engine refuses
+        // removal while one exists, so the row swaps to a Vault-page pointer.
+        bool vaultImageExists = await Client.Query((s, _) => s.Vault.ImageExists);
+        _removeRow.IsVisible = !vaultImageExists;
+        _vaultBlockRow.IsVisible = vaultImageExists;
         string serial = Client.Settings.DeviceSerial;
         string status, detail;
         bool needsRepair = false, present = false;
@@ -198,6 +280,28 @@ internal sealed class KeyPage : Page
         });
         Report(ok ? null : "Repair failed — key absent or write error", "Keyfile repaired — key re-armed");
         RefreshKey();
+    }
+
+    /// <summary>
+    /// Remove the key binding — the hold is the deliberation, the phrase is
+    /// the ownership proof, the account session gates it like every other
+    /// mutator (<see cref="GuardClient.Unenroll"/>).
+    /// </summary>
+    private async void RemoveKey()
+    {
+        _removeBtn.IsEnabled = false;
+        string reply = await Client.Unenroll(_removePhrase.Text ?? "");
+        _removeBtn.IsEnabled = true;
+        if (reply.StartsWith("ok", StringComparison.Ordinal))
+        {
+            _removePhrase.Text = "";
+            _removeWell.IsVisible = false;
+            Ctx.Toast("Key removed — auto-lock is off until a new key is set up.", false);
+            RefreshKey();
+            return;
+        }
+        _removePhrase.Classes.Add("error");
+        Report(reply.StartsWith("err ", StringComparison.Ordinal) ? reply[4..] : reply);
     }
 
     // ---------------------------------------------------------- phrase flow

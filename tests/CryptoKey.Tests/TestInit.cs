@@ -114,9 +114,11 @@ internal static class TestPlatform
         }
     }
 
-    private sealed class TestUsbEnumerator : IUsbEnumerator
+    internal sealed class TestUsbEnumerator : IUsbEnumerator
     {
-        public List<UsbDisk> Enumerate() => new();
+        /// <summary>Attached disks — tests push/clear; the suite is non-parallel.</summary>
+        public static List<UsbDisk> Disks { get; } = new();
+        public List<UsbDisk> Enumerate() => Disks;
     }
 
     private sealed class TestKeyMonitorFactory : IKeyMonitorFactory

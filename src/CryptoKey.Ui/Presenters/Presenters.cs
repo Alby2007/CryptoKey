@@ -50,7 +50,15 @@ internal static class HomePresenter
     {
         string word, reason;
         Tone accent;
-        switch (s.State)
+        if (!s.Enrolled && s.State != GuardState.Locked)
+        {
+            // Dormant — a config exists but no key is bound. Distinct from
+            // "key absent": there's nothing enrolled to BE absent.
+            word = "NO KEY";
+            accent = Tone.Neutral;
+            reason = "No key enrolled — auto-lock is off.";
+        }
+        else switch (s.State)
         {
             case GuardState.Locked:
                 word = "LOCKED";
@@ -59,7 +67,9 @@ internal static class HomePresenter
                 // is satisfied and the recovery phrase completes the unlock.
                 reason = s.KeyFactorArmed
                     ? "Key verified — enter the recovery phrase to finish unlocking."
-                    : s.LastVerifyFailure ?? "Your key is out. Insert it to unlock.";
+                    : !s.Enrolled
+                        ? "Locked — the recovery phrase still unlocks."
+                        : s.LastVerifyFailure ?? "Your key is out. Insert it to unlock.";
                 break;
             case GuardState.Paused:
                 word = "PAUSED";
@@ -76,7 +86,9 @@ internal static class HomePresenter
         }
 
         var chips = new List<Chip>();
-        if (s.KeyPresent)
+        if (!s.Enrolled)
+            chips.Add(new Chip("no key enrolled", Tone.Neutral));
+        else if (s.KeyPresent)
             chips.Add(s.LastVerifyFailure != null
                 ? new Chip("key unverified", Tone.Danger)
                 : new Chip("key verified", Tone.Ok));
@@ -97,7 +109,14 @@ internal static class HomePresenter
 
         string title, serial, detail;
         serial = $"serial {settings.DeviceSerial}";
-        if (s.KeyPresent)
+        if (!s.Enrolled)
+        {
+            title = "No key enrolled";
+            serial = "";
+            detail = "The recovery phrase, account, and settings are kept — " +
+                "set up a key to re-arm.";
+        }
+        else if (s.KeyPresent)
         {
             title = s.Model ?? "USB drive";
             detail = s.LastVerifyFailure ?? $"Keyfile verified — generation {settings.RotationCount}";
@@ -111,7 +130,8 @@ internal static class HomePresenter
         return new HomeView(s.State, word, reason, accent, VisualFor(s), chips,
             title, serial, detail,
             CanLock: s.State != GuardState.Locked,
-            CanPause: s.State != GuardState.Locked, // a pause can be extended
+            // Pausing means nothing with no auto-lock armed.
+            CanPause: s.State != GuardState.Locked && s.Enrolled,
             CanResume: s.State == GuardState.Paused);
     }
 

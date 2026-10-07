@@ -7,6 +7,11 @@ cryptokey                        # dashboard app: guard + UI (add --dev, --takeo
 cryptokey guard                  # tray daemon (same flags)
 cryptokey enroll                 # enroll the inserted removable drive — generates the recovery
                                  # phrase (shown once, retyped to confirm); creates shortcuts
+cryptokey unenroll               # remove the key binding: account-gated, prompts for the
+                                 # recovery phrase; the install, account, phrase, and settings
+                                 # stay — auto-lock is off until a new key enrolls. Refused
+                                 # while locked or while a vault image exists. Deletes the
+                                 # .cryptokey file when the drive is attached
 cryptokey open                   # raise the dashboard on the running guard
 cryptokey status                 # local verify + guard reachability
 cryptokey lock                   # IPC: lock now
@@ -76,7 +81,8 @@ read timeout ~5 s.
 | `resume` | `ok resumed` / `err not paused` | |
 | `quit` | `ok quitting` / `err locked — …` | Refused while Locked (silent-unlock guard) |
 | `reenrolled` | `ok re-enrolled` | Sent by `enroll`; guard reloads config in place + retargets the monitor |
-| `status` | `ok state=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… surface=… build=… elevated=… vault=… update=…` | `watchdog=alive/down` — supervisor liveness; `surface=secure/overlay` — active lock surface; `build` = running guard's version+commit; `elevated=yes/no` — guard integrity level; `update` = pending release tag or `-` |
+| `unenroll [b64-phrase]` | `ok unenrolled — …` / `err PHRASE_REQUIRED` / `err locked — …` / `err incorrect recovery phrase` / `err a vault image exists — …` | Clears only the key material (serial, secret hashes, rotation) — config, account, phrase, settings, and `VaultEpoch` survive; the guard goes dormant (auto-lock off). Refused while Locked **before** the account gate; refused while a vault image exists. The phrase rides as a positional base64 arg — its alphabet can't collide with the `\|auth` trailer |
+| `status` | `ok state=… enrolled=… key=… model=… verifyFail=… pausedUntil=… tamper=… keyVerified=… policy=… watchdog=… surface=… build=… elevated=… vault=… update=…` | `enrolled=yes/no` — key binding present; `watchdog=alive/down` — supervisor liveness; `surface=secure/overlay` — active lock surface; `build` = running guard's version+commit; `elevated=yes/no` — guard integrity level; `update` = pending release tag or `-` |
 | `update` / `update status` | `ok update v… pending …` / `ok up to date …` | Last check's result |
 | `update check` | `ok checking` | Runs async — result lands on the next `status`/snapshot |
 | `update apply` | `ok update applying …` / `err locked — …` / `err no update pending` | Refused while Locked; stages the signed payload then hands off to it — the staged `apply-update` quits the guard, swaps the install dir, relaunches |
@@ -94,7 +100,7 @@ read timeout ~5 s.
 | `auth signout` | `ok signed out` | Ends the session (clears `session.dat`); gated like any mutator |
 
 **Account gate** (see `docs/auth.md`): with an account bound, mutating
-verbs — `pause`, `resume`, `quit`, `reenrolled`, `vault <mutator>`,
+verbs — `pause`, `resume`, `quit`, `reenrolled`, `unenroll`, `vault <mutator>`,
 `update apply`, `auth signout` — answer `err AUTH_REQUIRED — …` unless
 the request carries `|auth <base64 password>` or the session is already
 unlocked. A correct trailer also arms the session for the rest of the
@@ -117,7 +123,7 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 
 | Field | Meaning |
 |---|---|
-| `DeviceSerial` | WMI `Win32_DiskDrive` serial of the enrolled drive |
+| `DeviceSerial` | WMI `Win32_DiskDrive` serial of the enrolled drive — **empty = unenrolled**: the dormant state `unenroll` leaves behind (auto-lock disarmed; a present-but-empty config is not first-run — first-run is no config at all) |
 | `SecretSalt` + `SecretHash` | `SHA-256(salt ‖ secret)` verifier — base64 |
 | `PrevSecretHash` | Previous ratchet generation (heal window) |
 | `RotationCount`, `LastRotationUtc` | Ratchet bookkeeping; `status`/dashboard show generation |

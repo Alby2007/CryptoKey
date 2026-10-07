@@ -48,9 +48,14 @@ internal sealed class FakeHost : IUiHost
 internal static class Harness
 {
     /// <summary>A real GuardService over the null test platform, wrapped like the app does.</summary>
-    public static (GuardService Service, GuardClient Client, KeyConfig Config) Guard()
+    public static (GuardService Service, GuardClient Client, KeyConfig Config) Guard(
+        Action<KeyConfig>? configure = null)
     {
         KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        // Runs BEFORE the GuardService/client see the config — the client's
+        // first Snapshot() already reflects it (the dormant-state tests need
+        // exactly that ordering).
+        configure?.Invoke(cfg);
         var svc = new GuardService(cfg, devMode: false, forceClassic: false);
         var client = new GuardClient(svc, cfg, devMode: false, a => Dispatcher.UIThread.Post(a));
         return (svc, client, cfg);

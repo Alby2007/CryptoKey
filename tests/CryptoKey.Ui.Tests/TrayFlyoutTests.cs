@@ -43,9 +43,14 @@ public class TrayFlyoutTests : IDisposable
         AuthService.SetCurrent(auth);
     }
 
+    /// <summary>How many times the Set-up-a-key CTA ran the wizard hook.</summary>
+    private static int _onboardingOpened;
+
     private static TrayFlyout Show(GuardClient client)
     {
-        var f = new TrayFlyout(client, new FakeHost(), _ => { }, () => { }, a => a(), _ => { });
+        _onboardingOpened = 0;
+        var f = new TrayFlyout(client, new FakeHost(), _ => { }, () => { },
+            a => a(), _ => { }, () => _onboardingOpened++);
         f.ShowNear();
         Harness.Pump(TimeSpan.FromMilliseconds(80));
         return f;
@@ -111,5 +116,35 @@ public class TrayFlyoutTests : IDisposable
         Assert.Contains(visible, l => l.Contains("Lock now"));
         Assert.Contains(visible, l => l.Contains("Open CryptoKey"));
         Assert.DoesNotContain(visible, l => l.Contains("Sign in"));
+    }
+
+    [AvaloniaFact]
+    public void Unenrolled_shows_the_setup_cta_not_a_key_status()
+    {
+        var (_, client, cfg) = Harness.Guard(c =>
+        {
+            // Dormant: config present, no key bound.
+            c.DeviceSerial = ""; c.SecretSalt = ""; c.SecretHash = "";
+            c.PrevSecretHash = ""; c.RotationCount = 0; c.LastRotationUtc = null;
+        });
+        AuthService.SetCurrent(new AuthService(null, null)); // ungated
+        TrayFlyout f = Show(client);
+
+        var visible = Buttons(f).Where(b => b.IsVisible).Select(Label).ToList();
+        Assert.Contains(visible, l => l.Contains("Set up a key"));
+        Assert.Contains(visible, l => l.Contains("Lock now")); // manual lock still works
+        Assert.DoesNotContain(visible, l => l.Contains("Pause")
+            || l.Contains("Sign in") || l.Contains("Create account"));
+
+        var texts = f.GetVisualDescendants().OfType<TextBlock>()
+            .Where(t => t.IsVisible).Select(t => t.Text).ToList();
+        Assert.Contains("NO KEY", texts);
+        Assert.Contains(texts, t => t?.Contains("No key enrolled") == true);
+        Assert.DoesNotContain(texts, t => t is "ARMED");
+
+        // The CTA lands on the enroll wizard.
+        Button setup = Buttons(f).First(b => Label(b).Contains("Set up a key"));
+        setup.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Assert.Equal(1, _onboardingOpened);
     }
 }

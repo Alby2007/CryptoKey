@@ -245,13 +245,18 @@ internal sealed class GuardService : IDisposable
             Alert("Config restore", "config restored from backup — config directory had been wiped");
         }
         UsbDisk? disk = null;
-        try
+        // Unenrolled: skip the lookup — the empty serial false-matches
+        // blank-serial drives, and auto-lock is disarmed anyway.
+        if (_config.Enrolled)
         {
-            disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial);
-        }
-        catch (Exception ex)
-        {
-            Log($"USB enumeration failed at startup: {ex.Message}");
+            try
+            {
+                disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial);
+            }
+            catch (Exception ex)
+            {
+                Log($"USB enumeration failed at startup: {ex.Message}");
+            }
         }
         _lastDisk = disk;
         if (disk != null)
@@ -462,8 +467,9 @@ internal sealed class GuardService : IDisposable
                 }
                 // Paused/Locked suppress it; the gate stops re-locking on
                 // the same idle streak after a key-present auto-unlock.
-                // No signed-in session → idle is just idle (master switch).
+                // No key bound or no signed-in session → idle is just idle.
                 if (mins <= 0 || State != GuardState.Unlocked
+                    || !_config.Enrolled
                     || AutoLockDisarmed($"idle {mins} min"))
                     return;
                 switch (_idleGate.Check(idleMs))
@@ -581,6 +587,101 @@ internal sealed class GuardService : IDisposable
         }
     }
 
+    /// <summary>
+    /// `unenroll` — remove the key binding while keeping the install.
+    /// Phrase-verified (ownership proof — the phrase is also what keeps
+    /// vault recovery and manual-lock escape possible), refused while
+    /// locked (removing the key there is just an unlock bypass), and
+    /// blocked while a vault image exists (vault content is keyed to this
+    /// enrollment — delete the vault first). Clears ONLY the key material;
+    /// account, recovery phrase, guard settings, and the vault epoch
+    /// survive — the box goes dormant (auto-lock disarmed), never
+    /// first-run.
+    /// </summary>
+    public string Unenroll(string phrase)
+    {
+        if (State == GuardState.Locked)
+            return "err locked — unlock first (removing the key there " +
+                "is just an unlock bypass)";
+        if (_vault.ImageExists)
+            return "err a vault image exists — its content is keyed to this " +
+                "enrollment; remove the vault first";
+        if (!ConfigStore.VerifyPassphrase(_config, phrase))
+        {
+            Log("Unenroll refused — incorrect recovery phrase.");
+            return "err incorrect recovery phrase";
+        }
+
+        // Grab the enrolled disk BEFORE clearing the serial — best-effort
+        // keyfile delete below. A detached drive just leaves a stale
+        // keyfile behind (harmless — re-enroll overwrites it).
+        UsbDisk? disk = _lastDisk;
+        try
+        {
+            disk ??= Platform.Services.Usb.FindDisk(_config.DeviceSerial);
+        }
+        catch (Exception) { }
+
+        // Strip only the key material — a failed save rolls the live
+        // config back so memory and disk never disagree.
+        (string serial, string salt, string hash, string prev,
+            int rotations, DateTime? rotatedAt) = (_config.DeviceSerial,
+            _config.SecretSalt, _config.SecretHash, _config.PrevSecretHash,
+            _config.RotationCount, _config.LastRotationUtc);
+        _config.DeviceSerial = "";
+        _config.SecretSalt = "";
+        _config.SecretHash = "";
+        _config.PrevSecretHash = "";
+        _config.RotationCount = 0;
+        _config.LastRotationUtc = null;
+        try
+        {
+            ConfigStore.Save(_config);
+        }
+        catch (Exception ex)
+        {
+            (_config.DeviceSerial, _config.SecretSalt, _config.SecretHash,
+                _config.PrevSecretHash, _config.RotationCount,
+                _config.LastRotationUtc) =
+                (serial, salt, hash, prev, rotations, rotatedAt);
+            Log($"Unenroll save failed: {ex.Message}");
+            return $"err unenroll failed: {ex.Message}";
+        }
+
+        if (disk != null)
+        {
+            foreach (string vol in disk.VolumePaths)
+            {
+                try
+                {
+                    string keyfile = KeyVerifier.KeyFilePath(vol);
+                    if (File.Exists(keyfile))
+                    {
+                        File.Delete(keyfile);
+                        Log($"Keyfile deleted on {vol}.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Couldn't delete the keyfile on {vol}: {ex.Message}");
+                }
+            }
+        }
+
+        _monitor.SetTargetSerial(""); // re-checks now — lands on the unenrolled guard
+        _lastDisk = null;
+        _lastVerifyFailure = null;
+        _verifiedEdge = false;
+        _keyVerifiedNow = false;
+        _staleKeyPresent = false;
+        _tamperNote = null;
+        _vault.KeyGone();
+        Log("Key unenrolled — auto-lock disarmed.");
+        EmitSnapshot();
+        return "ok unenrolled — key binding removed; the install stays " +
+            "(account, phrase, and settings kept). Enroll a new drive any time.";
+    }
+
     /// <summary>Shut the guard down — refused while locked (quitting = unlocking).</summary>
     public bool RequestQuit()
     {
@@ -601,7 +702,8 @@ internal sealed class GuardService : IDisposable
             _vault.State is VaultState.Disabled or VaultState.NoImage
                 ? null
                 : new VaultStatus(_vault.State, _vault.MountPoint),
-            _pendingUpdate?.TagName);
+            _pendingUpdate?.TagName,
+            _config.Enrolled);
 
     /// <summary>
     /// Pipe command dispatch — must be called on the UI thread. Mutating
@@ -638,6 +740,13 @@ internal sealed class GuardService : IDisposable
         if (parts.Length == 0)
             return "err empty command";
 
+        // `unenroll` while locked is a REFUSED op, not a gated one — answer
+        // before the account check so AUTH_REQUIRED can't bait a password
+        // prompt for a verb that can't run anyway.
+        if (parts[0].Equals("unenroll", StringComparison.OrdinalIgnoreCase)
+            && State == GuardState.Locked)
+            return "err locked — insert the key or enter the recovery phrase first";
+
         if (RequiresAuth(parts) && !_auth.Authorize(authPassword, out string authErr))
             return authErr == "AUTH_REQUIRED"
                 ? "err AUTH_REQUIRED — the account session is locked; " +
@@ -667,6 +776,21 @@ internal sealed class GuardService : IDisposable
                     : "err locked — insert the key or enter the recovery phrase first";
             case "reenrolled":
                 return ReloadConfig();
+            case "unenroll":
+                if (parts.Length < 2)
+                    return "err PHRASE_REQUIRED — resend as " +
+                        "'unenroll <base64 recovery phrase>'";
+                string phrase;
+                try
+                {
+                    phrase = System.Text.Encoding.UTF8.GetString(
+                        Convert.FromBase64String(parts[1]));
+                }
+                catch (Exception)
+                {
+                    return "err malformed phrase — expected base64";
+                }
+                return Unenroll(phrase);
             case "vault":
                 return DispatchVault(parts);
             case "update":
@@ -674,6 +798,7 @@ internal sealed class GuardService : IDisposable
             case "status":
                 StatusSnapshot s = Snapshot();
                 return $"ok state={s.State.ToString().ToLowerInvariant()} " +
+                       $"enrolled={(s.Enrolled ? "yes" : "no")} " +
                        $"key={(s.KeyPresent ? "present" : "absent")} " +
                        $"model=\"{s.Model ?? "-"}\" " +
                        $"verifyFail=\"{s.LastVerifyFailure ?? "-"}\" " +
@@ -706,7 +831,7 @@ internal sealed class GuardService : IDisposable
             return false; // no credential exists to satisfy a gate — pre-account install
         return parts[0].ToLowerInvariant() switch
         {
-            "pause" or "resume" or "quit" or "reenrolled" => true,
+            "pause" or "resume" or "quit" or "reenrolled" or "unenroll" => true,
             "vault" => parts.Length > 1
                 && !parts[1].Equals("status", StringComparison.OrdinalIgnoreCase),
             "update" => parts.Length > 1
@@ -878,6 +1003,17 @@ internal sealed class GuardService : IDisposable
 
     private void OnPresenceChecked(UsbDisk? disk)
     {
+        // Unenrolled: the empty target serial false-matches blank-serial
+        // drives — presence means nothing while dormant. Pause expiry
+        // still runs (a pause taken before unenroll should still lapse).
+        if (!_config.Enrolled)
+        {
+            _lastDisk = null;
+            _lastVerifyFailure = null;
+            CheckPauseExpiry();
+            EmitSnapshot();
+            return;
+        }
         _lastDisk = disk;
         CheckPauseExpiry();
         if (disk == null)
@@ -1410,6 +1546,11 @@ internal sealed class GuardService : IDisposable
         if (State == GuardState.Locked || State == GuardState.Paused)
             return;
         if (!_config.Guard.LockOnRemoval)
+            return;
+        // No key bound — dormant state: removal/startup/resume/pause-expiry
+        // all funnel here and all no-op. The disarm was already announced
+        // by the "Key unenrolled" log line; don't repeat-note it per tick.
+        if (!_config.Enrolled)
             return;
         if (AutoLockDisarmed(reason))
             return;

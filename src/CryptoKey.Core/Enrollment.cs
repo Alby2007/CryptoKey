@@ -10,8 +10,10 @@ internal static class Enrollment
     public static int Run()
     {
         var flow = new EnrollmentFlow();
-        if (flow.Existing != null)
+        if (flow.Existing?.Enrolled == true)
         {
+            // An existing-but-unenrolled config is dormant, not a key to
+            // overwrite — skip the confirm and just enroll.
             Console.Write($"A key is already enrolled (serial '{flow.Existing.DeviceSerial}'). Overwrite? [y/N] ");
             string? answer = Console.ReadLine()?.Trim();
             if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase))

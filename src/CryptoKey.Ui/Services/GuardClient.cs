@@ -178,6 +178,16 @@ internal sealed class GuardClient : IDisposable
             ? Query((s, _) => s.RequestQuit())
             : Task.FromResult(false);
 
+    /// <summary>
+    /// Remove the key binding — the session-gated in-app route into
+    /// <see cref="GuardService.Unenroll"/> (the IPC verb goes through the
+    /// dispatch table; both land on the same engine call).
+    /// </summary>
+    public Task<string> Unenroll(string phrase)
+        => SessionOk()
+            ? Query((s, _) => s.Unenroll(phrase))
+            : Task.FromResult("err session locked — sign in again on the Account page.");
+
     /// <summary>Same dispatch table the IPC pipe and CLI use.</summary>
     public Task<string> Dispatch(string command) => Query((s, _) => s.DispatchCommand(command));
 

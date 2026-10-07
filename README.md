@@ -100,6 +100,8 @@ your recovery phrase — to unlock.
 ```console
 cryptokey               # launch the app: dashboard window + tray + guard
 cryptokey enroll        # register a USB drive as your key
+cryptokey unenroll      # remove the key binding — phrase-verified; the install,
+                        # account, and phrase stay, auto-lock disarms until re-enroll
 cryptokey guard --dev   # tray only: lock the PC while the key is absent
 cryptokey open          # raise the dashboard of a running guard
 cryptokey status        # enrollment + key presence + live guard state

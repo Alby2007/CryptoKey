@@ -22,11 +22,21 @@ protecting itself; sign back in and the key is the lock again.
 | Dashboard window | opens only after auth | — |
 | Tray | pause / resume / quit; the flyout renders a sign-in card while gated out | lock now |
 | Auto-lock | armed only while a session is signed in (removal, idle, startup, resume, pause-expiry) | — |
-| IPC verbs | `pause`, `resume`, `quit`, `reenrolled`, `vault <mutator>`, `update apply` | `status`, `lock`, `vault status`, `update status/check`, `auth status`, `open`, `deeplink` |
+| IPC verbs | `pause`, `resume`, `quit`, `reenrolled`, `unenroll`, `vault <mutator>`, `update apply` | `status`, `lock`, `vault status`, `update status/check`, `auth status`, `open`, `deeplink` |
 | CLI | same verbs via `cryptokey <verb>` (masked password prompt on `AUTH_REQUIRED`) | `status`, `lock`, `enroll` without a bound account |
 
 `lock` is intentionally ungated — it only makes the machine safer. Read
 verbs stay open; they expose no secrets.
+
+`unenroll` is the double-factored mutator: an account authorization
+(`|auth` trailer or live session) **and** the recovery phrase, as a
+base64 positional arg — the auth trailer is appended by the caller, so
+the phrase can't collide with it. A **Locked** refusal precedes both —
+asking for the account password on a verb that can't run would bait
+credentials for nothing, and a locked box could otherwise be coaxed into
+revealing whether a password is correct while its owner is away. Past the
+gate, `AUTH_REQUIRED` precedes `PHRASE_REQUIRED` (the verb handler runs
+only after the gate passes).
 
 ### The IPC auth trailer
 

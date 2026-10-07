@@ -24,6 +24,7 @@ internal sealed class TrayFlyout : Window
     private readonly Button _lock;
     private readonly Button _signIn;
     private readonly Button _create;
+    private readonly Button _setup;
     private readonly Button _resume;
     private readonly StackPanel _pauseRow;
     private readonly Border _vaultRow;
@@ -33,7 +34,8 @@ internal sealed class TrayFlyout : Window
     private DateTime _shownAt;
 
     public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open,
-        Action quit, Action<Action> ensureAuth, Action<AuthMode> showAuth)
+        Action quit, Action<Action> ensureAuth, Action<AuthMode> showAuth,
+        Action openOnboarding)
     {
         _client = client;
         _host = host;
@@ -59,6 +61,11 @@ internal sealed class TrayFlyout : Window
         _create = Kit.Btn("Create account", IconData.Person, "ghost",
             () => { Hide(); _showAuth(AuthMode.Create); });
         _create.HorizontalAlignment = HorizontalAlignment.Stretch;
+        // Dormant (unenrolled) install — the CTA is the enroll wizard.
+        _setup = Kit.Btn("Set up a key", IconData.Usb, "primary",
+            () => { Hide(); openOnboarding(); });
+        _setup.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _setup.IsVisible = false;
         _resume = Kit.Btn("Resume protection", IconData.Play, "primary",
             () => _ensureAuth(() => _client.Resume()));
         _resume.HorizontalAlignment = HorizontalAlignment.Stretch;
@@ -123,7 +130,7 @@ internal sealed class TrayFlyout : Window
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(16),
             BoxShadow = new BoxShadows(new BoxShadow { Blur = 22, OffsetY = 6, Color = Color.FromArgb(150, 0, 0, 0) }),
-            Child = Kit.V(12, head, _lock, _signIn, _create, _resume, _pauseRow, _vaultRow, Kit.Divider(), _footer),
+            Child = Kit.V(12, head, _lock, _signIn, _create, _setup, _resume, _pauseRow, _vaultRow, Kit.Divider(), _footer),
         };
 
         Deactivated += (_, _) =>
@@ -195,6 +202,7 @@ internal sealed class TrayFlyout : Window
             _lock.IsVisible = false;
             _signIn.IsVisible = true;
             _create.IsVisible = !auth.Gating;
+            _setup.IsVisible = false;
             _resume.IsVisible = false;
             _pauseRow.IsVisible = false;
             _vaultRow.IsVisible = false;
@@ -213,6 +221,8 @@ internal sealed class TrayFlyout : Window
         _word.Foreground = Kit.ToneBrush(v.Accent);
         _reason.Text = v.Reason;
         _lock.IsVisible = v.CanLock;
+        // Unenrolled: the CTA is the enroll wizard, not the (inert) pause row.
+        _setup.IsVisible = !s.Enrolled && s.State != GuardState.Locked;
         _resume.IsVisible = v.CanResume;
         _pauseRow.IsVisible = v.CanPause;
         if (s.Vault is VaultStatus vs)

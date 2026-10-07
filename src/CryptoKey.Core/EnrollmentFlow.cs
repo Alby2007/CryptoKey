@@ -133,6 +133,10 @@ internal sealed class EnrollmentFlow
             // first run folds in the pre-enrollment pending record. Either
             // way the new keyfile attests it from the start.
             fresh.Account = Existing?.Account ?? AuthService.PendingStore.Load();
+            // The rollback fence outlives a key swap — unenroll keeps the
+            // config (and its epoch), so re-enroll must carry it too or an
+            // old vault image could replay below its attested seq.
+            fresh.VaultEpoch = Existing?.VaultEpoch ?? 0;
             configure?.Invoke(fresh.Guard);
 
             string keyPath = KeyVerifier.KeyFilePath(Volume);
