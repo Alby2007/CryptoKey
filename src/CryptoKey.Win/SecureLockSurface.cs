@@ -543,10 +543,15 @@ internal sealed class SecureLockSurface : ILockSurface
                 string? name;
                 try { name = Process.GetProcessById((int)pid).ProcessName; }
                 catch { name = null; } // protected/system or died mid-scan
-                if (FlapPolicy.ClassifyForeignWindow(
-                        NativeMethods.IsWindowVisible(h), name)
-                    != FlapPolicy.ForeignWindowVerdict.Benign)
-                    found.Add(new ForeignWindow(h, pid, name));
+                // Eviction exempts furniture by NAME, unconditionally —
+                // unlike the sentinel this list feeds a kill path, and
+                // killing a real ctfmon/TextInputHost (whose visible
+                // windows can legitimately land here, e.g. an IME
+                // candidate popup during phrase input) breaks session
+                // input. The sentinel still counts their visible windows.
+                if (name != null && FlapPolicy.IsBenignDesktopResident(name))
+                    return true;
+                found.Add(new ForeignWindow(h, pid, name));
                 return true;
             }, IntPtr.Zero);
         }

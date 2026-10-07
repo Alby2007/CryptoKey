@@ -246,32 +246,49 @@ internal static class TestPlatform
         }
     }
 
-    private sealed class TestLockSurfaceFactory : ILockSurfaceFactory
+    internal sealed class TestLockSurfaceFactory : ILockSurfaceFactory
     {
+        /// <summary>Last surface the guard built — tests drive/observe it.</summary>
+        public static TestLockSurface? Last { get; private set; }
+
         public ILockSurface Create(bool securePreferred, bool devMode)
-            => new TestLockSurface(securePreferred);
+            => Last = new TestLockSurface(securePreferred);
     }
 
-    private sealed class TestLockSurface : ILockSurface
+    internal sealed class TestLockSurface : ILockSurface
     {
         private readonly bool _overlay;
+        private Action<char[]>? _submitted;
         public TestLockSurface(bool overlay) => _overlay = overlay;
 
         public bool IsOverlay => _overlay;
         public string? EngageError => null;
-        public event Action<char[]>? PassphraseSubmitted { add { } remove { } }
+        public event Action<char[]>? PassphraseSubmitted
+        {
+            add => _submitted += value;
+            remove => _submitted -= value;
+        }
         public event Action? PanicRequested { add { } remove { } }
         public event Action<string>? SecurityEvent { add { } remove { } }
+
+        // Recorded surface state — the guard's backoff mirrors land here.
+        public int FailedAttempts { get; private set; }
+        public DateTime? CooldownUntil { get; private set; }
+        public string? LastStatus { get; private set; }
+
+        /// <summary>Raise a phrase submit as the real surface would.</summary>
+        public void Submit(string text) => _submitted?.Invoke(text.ToCharArray());
+
         public bool Engage() => true;
         public bool Disengage() => true;
         public void ReleaseInput() { }
         public void ReassertClip() { }
         public void SetAnimations(bool enabled) { }
-        public void SetStatus(string message) { }
+        public void SetStatus(string message) => LastStatus = message;
         public void ResetStatus() { }
         public void SetPassphraseLength(int len) { }
-        public void SetFailedAttempts(int count) { }
-        public void SetCooldown(DateTime? until) { }
+        public void SetFailedAttempts(int count) => FailedAttempts = count;
+        public void SetCooldown(DateTime? until) => CooldownUntil = until;
         public void Dispose() { }
     }
 }

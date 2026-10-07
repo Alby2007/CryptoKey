@@ -42,10 +42,12 @@ internal static class FlapPolicy
     internal const int UnreadableTicksBeforeLock = 10;
 
     /// <summary>
-    /// Input furniture that legitimately lands on whatever desktop is
-    /// active (the language pill, the IME host) — winlogon spawning a
+    /// Input furniture that legitimately rides along on whatever desktop
+    /// is active (the language pill, the IME host) — winlogon spawning a
     /// foreign *app* onto the lock desktop is the intruder class; these
-    /// aren't. An intruder verdict requires a resolved name NOT here.
+    /// aren't. The name exempts INVISIBLE presence only — a window named
+    /// "ctfmon" that actually paints is still a foreign surface: binaries
+    /// rename themselves, so a name can't confer an intruder exemption.
     /// </summary>
     public static bool IsBenignDesktopResident(string procName)
         => procName.Equals("ctfmon", StringComparison.OrdinalIgnoreCase)
@@ -54,11 +56,12 @@ internal static class FlapPolicy
     /// <summary>Sentinel verdict for one foreign top-level window on the lock desktop.</summary>
     public enum ForeignWindowVerdict
     {
-        /// <summary>Input furniture — skip entirely (not even "foreign").</summary>
+        /// <summary>Invisible input furniture — skip entirely (not even "foreign").</summary>
         Benign,
         /// <summary>Visible foreign window — conclusive intruder, named or not.</summary>
         Intruder,
-        /// <summary>Invisible or otherwise inconclusive — accrues toward the storm latch.</summary>
+        /// <summary>Invisible foreign window, or a VISIBLE furniture-named one —
+        /// accrues toward the storm latch.</summary>
         Inconclusive,
     }
 
@@ -67,13 +70,18 @@ internal static class FlapPolicy
     /// window is conclusive even when the process name won't resolve
     /// (protected/elevated) — nothing legit paints on a private desktop.
     /// Invisible windows are inconclusive: a hidden thread can still plant
-    /// hooks, but it can't act as an intruder surface.
+    /// hooks, but it can't act as an intruder surface. A VISIBLE window
+    /// behind a furniture name lands in between: it isn't conclusive
+    /// (real IME furniture can paint briefly), but it must count — an
+    /// attacker binary renamed ctfmon.exe can't sit exempt forever.
     /// </summary>
     public static ForeignWindowVerdict ClassifyForeignWindow(
         bool visible, string? procName)
     {
         if (procName != null && IsBenignDesktopResident(procName))
-            return ForeignWindowVerdict.Benign;
+            return visible
+                ? ForeignWindowVerdict.Inconclusive
+                : ForeignWindowVerdict.Benign;
         return visible ? ForeignWindowVerdict.Intruder : ForeignWindowVerdict.Inconclusive;
     }
 

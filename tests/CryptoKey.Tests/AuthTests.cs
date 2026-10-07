@@ -607,6 +607,42 @@ public class AuthTests : IDisposable
     }
 
     [Fact]
+    public void Reenrolled_while_locked_keeps_the_phrase_freeze()
+    {
+        // The phrase freeze is live-surface state, not config state —
+        // `reenrolled` (ungated on an install with no account) must not
+        // thaw it: 3 fails → freeze → reenrolled → fresh counter while
+        // still locked is a rate-limit bypass.
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        ConfigStore.Save(cfg); // ReloadConfig reads from disk
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+        svc.Start();
+        Assert.StartsWith("ok", svc.DispatchCommand("lock"));
+
+        var surface = TestPlatform.TestLockSurfaceFactory.Last
+            ?? throw new InvalidOperationException("no lock surface");
+        for (int i = 0; i < 3; i++)
+        {
+            surface.Submit("AAAAA-BBBBB-CCCCC-DDDDD");
+            // PBKDF2 runs off-thread; the result lands via the dispatcher.
+            Assert.True(SpinWait.SpinUntil(
+                () => surface.FailedAttempts > i, TimeSpan.FromSeconds(10)),
+                $"failed attempt #{i + 1} never landed");
+        }
+        Assert.Equal(3, svc.FailedAttempts);
+        Assert.NotNull(surface.CooldownUntil); // the 15s freeze latched
+
+        Assert.StartsWith("ok", svc.DispatchCommand("reenrolled"));
+
+        Assert.Equal(GuardState.Locked, svc.State);
+        Assert.Equal(3, svc.FailedAttempts);   // counter survived
+        Assert.NotNull(surface.CooldownUntil); // freeze survived
+    }
+
+    [Fact]
     public void Signed_in_session_arms_autolock_at_startup()
     {
         KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());

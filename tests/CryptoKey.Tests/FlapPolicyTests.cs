@@ -151,10 +151,18 @@ public class FlapPolicyTests
         => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Inconclusive,
             FlapPolicy.ClassifyForeignWindow(visible: false, null));
 
-    [Fact]
-    public void Furniture_is_benign_even_when_visible()
-        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Benign,
-            FlapPolicy.ClassifyForeignWindow(visible: true, "ctfmon"));
+    [Theory]
+    [InlineData("ctfmon")]
+    [InlineData("TextInputHost")]
+    public void Visible_window_named_like_furniture_is_inconclusive_not_benign(string proc)
+        // The name check ran BEFORE the visibility check — a binary renamed
+        // ctfmon.exe could paint a visible window on the lock desktop fully
+        // exempt (not even counted toward the storm latch). Furniture's
+        // exemption now covers invisible presence only; a painting window
+        // can't hide behind a name, but isn't instantly conclusive either —
+        // real IME furniture can flicker visible legitimately.
+        => Assert.Equal(FlapPolicy.ForeignWindowVerdict.Inconclusive,
+            FlapPolicy.ClassifyForeignWindow(visible: true, procName: proc));
 
     [Fact]
     public void Furniture_is_benign_when_invisible()

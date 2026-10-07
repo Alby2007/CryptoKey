@@ -194,6 +194,9 @@ internal sealed class GuardService : IDisposable
     /// <summary>Marshals work onto the pump the monitor owns (IPC dispatch goes through it).</summary>
     public IUiDispatcher UiDispatcher => _ui;
 
+    /// <summary>Test seam: the live phrase-failure counter (backoff state).</summary>
+    internal int FailedAttempts => _failedAttempts;
+
     /// <summary>The encrypted-vault lifecycle service — the Vault page and CLI drive it.</summary>
     public VaultService Vault => _vault;
 
@@ -550,14 +553,22 @@ internal sealed class GuardService : IDisposable
             _auth.BindConfig(_config);
             _monitor.SetTargetSerial(fresh.DeviceSerial); // also triggers a re-check
             _monitor.SetPollInterval(fresh.Guard.PollIntervalMs);
-            _failedAttempts = 0;
             _lastVerifyFailure = null;
             _verifiedEdge = false;
             _tamperNote = null;
             _keyVerifiedNow = false;
             _staleKeyPresent = false;
-            _cooldownUntil = null;
-            _surface.SetCooldown(null);
+            if (State != GuardState.Locked)
+            {
+                // The phrase freeze is a property of the live attack
+                // surface, not the config — a reload while locked must
+                // not thaw it, or `reenrolled` (ungated on pre-account
+                // installs) is a backoff bypass: 3 fails → freeze →
+                // reenrolled → fresh counter while still locked.
+                _failedAttempts = 0;
+                _cooldownUntil = null;
+                _surface.SetCooldown(null);
+            }
             _lastAttest = AttestState.Ok;
             _vault.ReloadConfig();
             Log($"Re-enrolled — now watching serial {fresh.DeviceSerial}.");
