@@ -1,14 +1,25 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Security.Principal;
 
 namespace CryptoKey;
 
 /// <summary>
-/// Secure lock surface: a private Windows desktop ("CryptoKeyLock") that the
-/// session is switched onto while locked. Nothing else exists there — no
-/// taskbar, no apps, no focus to steal, and Task Manager can't see the form.
-/// Input containment is structural; the low-level hooks still run on the
-/// lock thread to feed the phrase buffer and arm the panic combo.
+/// Secure lock surface: a private Windows desktop ("CKL-&lt;random&gt;")
+/// that the session is switched onto while locked. Nothing else exists
+/// there — no taskbar, no apps, no focus to steal, and Task Manager can't
+/// see the form. Input containment is structural; the low-level hooks
+/// still run on the lock thread to feed the phrase buffer and arm the
+/// panic combo.
+///
+/// The desktop is hardened at creation: a fresh CSPRNG name per
+/// engagement (pre-created attacker objects can't be squatted on — and a
+/// collision on a fresh name is treated as hostile and abandoned), a DACL
+/// granting only this user + SYSTEM, and a High-integrity NO_WRITE_UP
+/// label when the guard is elevated — so same-user code can't attach a
+/// windowless keyboard hook to siphon the recovery phrase (the intruder
+/// sentinel only sees windows).
 ///
 /// Lifecycle: Engage captures the user's input desktop BEFORE switching,
 /// spawns an STA lock thread (SetThreadDesktop is its first statement),
@@ -17,13 +28,12 @@ namespace CryptoKey;
 /// ReleaseInput (fail-dead, any thread) switches back and unhooks without
 /// waiting on anything.
 ///
-/// Squatter eviction: CreateDesktop REOPENS the named object, so a foreign
-/// process parked on CryptoKeyLock (a CAD-spawned Task Manager) persists
-/// across engagements and would trip the intruder sentinel forever —
-/// looping the user through OS-locks. The lock thread evicts squatters
-/// before any of our windows/hooks exist (WM_CLOSE → kill → verify); an
-/// unkillable one abandons the name entirely and retries on a fresh
-/// "CryptoKeyLock-N" — definitionally clean.
+/// Squatter eviction: foreign processes parked on the lock desktop (a
+/// CAD-spawned Task Manager survives across engagements) would trip the
+/// intruder sentinel forever — looping the user through OS-locks. The
+/// lock thread evicts squatters before any of our windows/hooks exist
+/// (WM_CLOSE → kill → verify); an unkillable one abandons the object
+/// entirely and retries under a fresh random name — definitionally clean.
 /// </summary>
 internal sealed class SecureLockSurface : ILockSurface
 {
@@ -31,10 +41,11 @@ internal sealed class SecureLockSurface : ILockSurface
     public event Action? PanicRequested;
     public event Action<string>? SecurityEvent;
 
-    // The active lock desktop's name — starts at the shared base name; a
-    // surviving squatter suffixes it. Read by the flap monitor per tick.
-    private string _desktopName = FlapPolicy.LockDesktop;
-    private int _nameSuffix;
+    // The active lock desktop's name — a fresh CSPRNG name per creation
+    // (an attacker can't pre-create/squat on a name they can't predict,
+    // and a same-user keylogger can't windowless-hook a desktop it can't
+    // attach to under the ACL). Read by the flap monitor per tick.
+    private string _desktopName = NewDesktopName();
     private volatile bool _squatterResident; // set by the lock thread's eviction pass
 
     private readonly bool _devMode;
@@ -113,6 +124,83 @@ internal sealed class SecureLockSurface : ILockSurface
         }
     }
 
+    /// <summary>CSPRNG lock-desktop name — "CKL-" + 12 hex chars.</summary>
+    private static string NewDesktopName()
+        => "CKL-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6));
+
+    /// <summary>
+    /// Create the lock desktop with a random name and an explicit security
+    /// descriptor — the two halves of one defense. The name stops a
+    /// pre-created attacker object being reopened (CreateDesktop would
+    /// happily do so — a collision on a fresh random name is treated as
+    /// hostile: abandon + rename, never reuse). The DACL (this user +
+    /// SYSTEM, nothing else) plus a High-integrity NO_WRITE_UP label when
+    /// the guard is elevated stop same-user/medium-IL code attaching a
+    /// windowless hook or window to it — the sentinel only enumerates
+    /// windows, so the ACL is what stands between the phrase and a
+    /// lock-desktop keylogger. Failure → the caller falls back to the
+    /// overlay; a null-descriptor desktop is never silently created.
+    /// </summary>
+    private bool CreateLockDesktop()
+    {
+        for (int collision = 0; collision < 4; collision++)
+        {
+            _desktopName = NewDesktopName();
+            IntPtr sd = BuildSecurityDescriptor();
+            if (sd == IntPtr.Zero)
+            {
+                _engageError = "couldn't build the desktop security descriptor";
+                return false;
+            }
+            var sa = new NativeMethods.SECURITY_ATTRIBUTES
+            {
+                nLength = Marshal.SizeOf<NativeMethods.SECURITY_ATTRIBUTES>(),
+                lpSecurityDescriptor = sd,
+                bInheritHandle = false,
+            };
+            IntPtr h = NativeMethods.CreateDesktopSecured(_desktopName,
+                IntPtr.Zero, IntPtr.Zero, 0, NativeMethods.DESKTOP_ALL, ref sa);
+            int err = Marshal.GetLastWin32Error();
+            NativeMethods.LocalFree(sd);
+            if (h == IntPtr.Zero)
+            {
+                _engageError = $"CreateDesktop failed (err {err})";
+                return false;
+            }
+            if (err == NativeMethods.ERROR_ALREADY_EXISTS)
+            {
+                // The fresh name already had an object — squat or freak
+                // collision; either way we never attach to it.
+                NativeMethods.CloseDesktop(h);
+                continue;
+            }
+            _hLock = h;
+            return true;
+        }
+        _engageError = "lock desktop name collided repeatedly";
+        return false;
+    }
+
+    /// <summary>
+    /// DACL: this user + SYSTEM, full access — nothing else can open the
+    /// object for hooks/windows. Elevated adds a High-integrity
+    /// NO_WRITE_UP mandatory label so a medium-IL process (the realistic
+    /// same-user attacker) can't get write-class rights at all. A
+    /// non-elevated guard omits the SACL: it can't claim a HI label, and
+    /// parsing one would only risk a create failure on a stripped-down
+    /// token.
+    /// </summary>
+    private static IntPtr BuildSecurityDescriptor()
+    {
+        string sid = WindowsIdentity.GetCurrent().User?.Value ?? "WD";
+        string sddl = $"D:(A;;GA;;;{sid})(A;;GA;;;SY)";
+        if (new WindowsPrincipal(WindowsIdentity.GetCurrent())
+                .IsInRole(WindowsBuiltInRole.Administrator))
+            sddl += "S:(ML;;NW;;;HI)";
+        return NativeMethods.ConvertSddlToSecurityDescriptor(sddl, 1,
+            out IntPtr sd, IntPtr.Zero) ? sd : IntPtr.Zero;
+    }
+
     private bool EngageCore()
     {
         // _engaged (not _form) is authoritative: _form clears in the lock
@@ -160,11 +248,9 @@ internal sealed class SecureLockSurface : ILockSurface
 
             if (_hLock == IntPtr.Zero)
             {
-                _hLock = NativeMethods.CreateDesktop(_desktopName, IntPtr.Zero, IntPtr.Zero,
-                    0, NativeMethods.DESKTOP_ALL, IntPtr.Zero);
-                if (_hLock == IntPtr.Zero)
+                if (!CreateLockDesktop())
                 {
-                    _engageError = "CreateDesktop failed";
+                    _engageError ??= "CreateDesktop failed";
                     CloseInputHandle();
                     return false;
                 }
@@ -194,11 +280,11 @@ internal sealed class SecureLockSurface : ILockSurface
                 TearDownLockThread();
                 if (occupied && attempt < 2)
                 {
-                    // Unkillable squatter — drop our handle to the shared
-                    // object and reopen under a unique name.
+                    // Unkillable squatter — drop our handle to the object
+                    // and reopen under a fresh random name (clean by
+                    // construction — the squatter stays stranded).
                     NativeMethods.CloseDesktop(_hLock);
                     _hLock = IntPtr.Zero;
-                    _desktopName = $"{FlapPolicy.LockDesktop}-{++_nameSuffix}";
                     continue;
                 }
                 return false;
@@ -708,24 +794,39 @@ internal sealed class SecureLockSurface : ILockSurface
     /// if the lock thread already died its hooks died with it). Clears
     /// _engaged first — reaching here with the flag stale is what made a
     /// dead lock pump report "still engaged" forever.
+    ///
+    /// A release while the session was switched onto us also OS-locks: this
+    /// path is only ever fail-dead (pump death, fatal policy), and letting
+    /// input loose on an unattended open desktop is the failure this exists
+    /// to prevent. LockWorkStation double-duties as the last resort switch —
+    /// it pulls the session to Winlogon even when SwitchBack can't.
     /// </summary>
     public void ReleaseInput()
     {
+        bool wasEngaged = _engaged;
         _engaged = false;
         // Bounded retry — the session is stranded until this switch lands.
-        // If it still fails, keep the watchdog alive (fires on process
-        // death) rather than kill the last rescue path.
         bool back = SwitchBack();
         for (int i = 0; i < 3 && !back; i++)
         {
             Thread.Sleep(200);
             back = SwitchBack();
         }
+        if (wasEngaged)
+        {
+            try { NativeMethods.LockWorkStation(); }
+            catch (Exception) { }
+        }
         if (!back)
-            return;
+            return; // watchdog stays alive — fires on process death
         try { _locker?.Unlock(); }
         catch (Exception) { }
         StopWatchdog();
+        if (_hLock != IntPtr.Zero)
+        {
+            NativeMethods.CloseDesktop(_hLock);
+            _hLock = IntPtr.Zero;
+        }
     }
 
     /// <summary>Nothing else exists on the lock desktop — no clip to re-assert.</summary>
@@ -762,6 +863,13 @@ internal sealed class SecureLockSurface : ILockSurface
             t.Join(2500);
         _lockThread = null;
         CloseInputHandle();
+        // Per-engagement object: drop our handle so the named desktop dies
+        // with it — the next engage mints a fresh random name.
+        if (_hLock != IntPtr.Zero)
+        {
+            NativeMethods.CloseDesktop(_hLock);
+            _hLock = IntPtr.Zero;
+        }
     }
 
     private void CloseInputHandle()

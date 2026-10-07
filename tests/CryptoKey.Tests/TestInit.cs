@@ -215,9 +215,11 @@ internal static class TestPlatform
         }
     }
 
-    private sealed class TestSystemActions : ISystemActions
+    internal sealed class TestSystemActions : ISystemActions
     {
-        public void LockScreen() { }
+        /// <summary>OS-lock calls — the fail-dead test spies on this.</summary>
+        public static int LockScreenCalls;
+        public void LockScreen() => LockScreenCalls++;
         public uint IdleMilliseconds() => 0;
         public void ReleaseInputDesktop() { }
     }

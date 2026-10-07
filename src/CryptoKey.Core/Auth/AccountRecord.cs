@@ -26,6 +26,16 @@ internal sealed class AccountRecord
     public int VerifierIterations { get; set; } = VerifierIterationsCurrent;
 
     /// <summary>
+    /// The explicit "protection off" latch — set only by a gated
+    /// <c>auth signout</c>, cleared by any real sign-in. Persisted inside
+    /// the attested record so it survives restarts AND can't be flipped in
+    /// the file without tripping the keyfile MAC (the canon accounthash
+    /// slot carries it). This is the ONLY thing that disarms auto-lock on
+    /// a bound install — token expiry/offline/restart no longer do.
+    /// </summary>
+    public bool SignedOut { get; set; }
+
+    /// <summary>
     /// All verifier fields populated — an incomplete record fails closed.
     /// Iterations are bounded BOTH ways: too low weakens the verifier, too
     /// high turns <see cref="VerifyPassword"/> into a hang (a crafted

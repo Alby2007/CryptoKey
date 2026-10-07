@@ -176,24 +176,9 @@ internal static class KeyVerifier
         foreach (string volume in disk.VolumePaths)
         {
             string path = KeyFilePath(volume);
-            byte[] file;
-            try
+            if (!TryReadKeyfile(path, out byte[] file, out string readError))
             {
-                file = File.ReadAllBytes(path);
-            }
-            catch (IOException)
-            {
-                lastError = $"keyfile missing at {path}";
-                continue;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                lastError = $"keyfile unreadable at {path}";
-                continue;
-            }
-            catch (Exception ex)
-            {
-                lastError = $"keyfile read error at {path}: {ex.Message}";
+                lastError = readError;
                 continue;
             }
 
@@ -260,6 +245,74 @@ internal static class KeyVerifier
         AttestState.Mismatch => " · ATTESTATION MISMATCH",
         _ => "",
     };
+
+    /// <summary>Largest plausible keyfile — the v2 envelope is ~400 bytes.</summary>
+    private const int MaxKeyfileBytes = 4096;
+
+    /// <summary>A stalling device gets this long to answer, then loses the poll.</summary>
+    private const int KeyfileReadTimeoutMs = 2000;
+
+    /// <summary>
+    /// Reads a keyfile on a sacrificial thread with a hard size cap and a
+    /// hard timeout. A hostile device that reports our serial can serve a
+    /// <c>.cryptokey</c> that never completes (or never ends) — an
+    /// unbounded ReadAllBytes on the engine thread would park the poll
+    /// loop, and on the classic surface starve the input hooks long enough
+    /// for Windows to silently unhook them. A timed-out thread leaks parked
+    /// in the kernel; it's background and bounded, and the next poll gets
+    /// a fresh one — the engine thread never stalls.
+    /// </summary>
+    private static bool TryReadKeyfile(string path, out byte[] file, out string error)
+    {
+        file = Array.Empty<byte>();
+        byte[]? result = null;
+        string? err = null;
+        var done = new ManualResetEventSlim();
+        var t = new Thread(() =>
+        {
+            try
+            {
+                if (new FileInfo(path).Length > MaxKeyfileBytes)
+                    err = "oversized";
+                else
+                    result = File.ReadAllBytes(path);
+            }
+            catch (FileNotFoundException) { err = "missing"; }
+            catch (DirectoryNotFoundException) { err = "missing"; }
+            catch (UnauthorizedAccessException) { err = "unreadable"; }
+            catch (IOException ex) { err = $"io: {ex.Message}"; }
+            catch (Exception ex) { err = ex.Message; }
+            finally { done.Set(); }
+        })
+        { IsBackground = true, Name = "CryptoKey.KeyfileRead" };
+        t.Start();
+
+        if (!done.Wait(KeyfileReadTimeoutMs))
+        {
+            error = $"keyfile read timed out at {path} (stalling device)";
+            return false;
+        }
+        if (result == null)
+        {
+            error = err switch
+            {
+                "missing" => $"keyfile missing at {path}",
+                "unreadable" => $"keyfile unreadable at {path}",
+                "oversized" => $"keyfile oversized at {path} — refused",
+                _ => $"keyfile read error at {path}: {err ?? "unknown"}",
+            };
+            return false;
+        }
+        // Grew between the stat and the read — still refused.
+        if (result.Length > MaxKeyfileBytes)
+        {
+            error = $"keyfile oversized at {path} — refused";
+            return false;
+        }
+        file = result;
+        error = "";
+        return true;
+    }
 
     /// <summary>
     /// Writes a pre-wrapped v2 envelope to every volume that already has a

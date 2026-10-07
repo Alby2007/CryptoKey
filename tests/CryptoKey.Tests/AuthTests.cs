@@ -589,9 +589,8 @@ public class AuthTests : IDisposable
     [Fact]
     public void Autolock_is_disarmed_without_a_signed_in_session()
     {
-        // The account session is the master switch for the lock machinery:
-        // unsigned, a key pull is just a USB event — the startup key-absent
-        // check must not engage the lock.
+        // No account bound at all — nothing to arm with. An UNBOUND install
+        // never auto-locks regardless of session machinery.
         KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
         cfg.Guard.Watchdog = false;
         cfg.Guard.UpdateCheckEnabled = false;
@@ -604,6 +603,55 @@ public class AuthTests : IDisposable
         // …but manual lock never gates — locking is always safe direction.
         Assert.StartsWith("ok", svc.DispatchCommand("lock"));
         Assert.Equal(GuardState.Locked, svc.State);
+    }
+
+    [Fact]
+    public void Bound_account_stays_armed_with_a_cold_session()
+    {
+        // THE fail-open fix: a bound account arms auto-lock even with NO
+        // session this run — expired tokens, an offline box, or a revoked
+        // refresh can't disarm it. (The audit's H1: session-gated arming
+        // let cutting the network for an hour switch protection off.)
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        var auth = new AuthService(Cfg, new ScriptHandler());
+        AuthService.SetCurrent(auth);
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+        Assert.False(auth.SessionLive);   // nobody signed in this run
+        Assert.True(auth.ArmedForAutoLock); // …but a bound install is armed
+
+        svc.Start(); // key absent → armed install locks
+        Assert.Equal(GuardState.Locked, svc.State);
+    }
+
+    [Fact]
+    public void Explicit_signout_latches_disarm_and_signin_rearms()
+    {
+        // The ONLY disarm is a gated `auth signout`: the latch persists in
+        // the record (survives restart) until a real sign-in clears it.
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        string trailer = " |auth " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("acct-pw"));
+        Assert.StartsWith("ok", svc.DispatchCommand("auth signout" + trailer));
+        Assert.True(cfg.Account.SignedOut);      // latch wrote to the record
+        Assert.False(AuthService.Current.ArmedForAutoLock);
+
+        svc.Start(); // key absent + signed out → stays unlocked
+        Assert.NotEqual(GuardState.Locked, svc.State);
+
+        string signin = "auth signin " + Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("acct-pw"));
+        Assert.StartsWith("ok", svc.DispatchCommand(signin));
+        Assert.False(cfg.Account.SignedOut);     // a real sign-in re-arms
+        Assert.True(AuthService.Current.ArmedForAutoLock);
     }
 
     [Fact]

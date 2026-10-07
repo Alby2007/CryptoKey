@@ -81,11 +81,52 @@ internal static class StartupManager
                     key.SetValue(ValueName, $"\"{exe}\" guard");
                 break;
             case StartupMode.Elevated:
+                // /rl highest + a user-writable exe = a logon-time privesc:
+                // any medium-IL process could swap the payload the task
+                // runs. Refuse unless the exe sits under machine-protected
+                // paths — the elevated helper copies it there first.
+                if (IsUserWritableLocation(exe))
+                    throw new InvalidOperationException(
+                        $"Elevated autostart needs a Program Files install — '{exe}' is user-writable.");
                 int rc = Schtasks($"/create /f /tn {TaskName} /sc onlogon /rl highest " +
                     $"/tr \"\\\"{exe}\\\" guard\"", out _);
                 if (rc != 0)
                     throw new InvalidOperationException($"schtasks /create failed (exit {rc})");
                 break;
+        }
+    }
+
+    /// <summary>
+    /// True when the path lives somewhere a medium-IL process can write —
+    /// i.e. anywhere that ISN'T Program Files or Windows. An elevated
+    /// scheduled task may only point at machine-protected locations.
+    /// </summary>
+    public static bool IsUserWritableLocation(string path)
+    {
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch (Exception) { return true; } // unparseable — treat as unsafe
+        foreach (string root in MachineProtectedRoots())
+        {
+            if (full.StartsWith(root + Path.DirectorySeparatorChar,
+                    StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return true;
+    }
+
+    private static IEnumerable<string> MachineProtectedRoots()
+    {
+        foreach (string? root in new[]
+        {
+            Environment.GetEnvironmentVariable("ProgramW6432"),
+            Environment.GetEnvironmentVariable("ProgramFiles"),
+            Environment.GetEnvironmentVariable("ProgramFiles(x86)"),
+            Environment.GetEnvironmentVariable("WINDIR"),
+        })
+        {
+            if (!string.IsNullOrEmpty(root))
+                yield return Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
         }
     }
 

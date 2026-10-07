@@ -47,6 +47,40 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
+    internal const int WM_QUIT = 0x0012;
+    internal const int WM_USER = 0x0400;
+
+    /// <summary>Classic-surface pump readiness marker — see ClassicLockSurface.</summary>
+    internal const int WM_CK_READY = WM_USER + 0x6B;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public UIntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+    }
+
+    [DllImport("user32.dll")]
+    internal static extern int GetMessage(ref MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    internal static extern IntPtr DispatchMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool PostThreadMessage(uint idThread, uint msg, UIntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetCurrentThreadId();
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr GetModuleHandle(string? lpModuleName);
 
@@ -236,6 +270,34 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr CreateDesktop(string lpszDesktop, IntPtr lpszDevice,
         IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, IntPtr lpsa);
+
+    /// <summary>SA-bearing variant — the lock desktop gets an explicit DACL/label.</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "CreateDesktopW")]
+    internal static extern IntPtr CreateDesktopSecured(string lpszDesktop, IntPtr lpszDevice,
+        IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, ref SECURITY_ATTRIBUTES lpsa);
+
+    /// <summary>Set when CreateDesktop returns a handle to an object that
+    /// already existed — a name we just minted colliding is hostile.</summary>
+    internal const int ERROR_ALREADY_EXISTS = 183;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SECURITY_ATTRIBUTES
+    {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool bInheritHandle;
+    }
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true,
+        EntryPoint = "ConvertStringSecurityDescriptorToSecurityDescriptorW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ConvertSddlToSecurityDescriptor(
+        string sddl, uint stringSDRevision, out IntPtr securityDescriptor,
+        IntPtr size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern IntPtr LocalFree(IntPtr hMem);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern IntPtr OpenDesktop(string lpszDesktop, int dwFlags,

@@ -186,20 +186,25 @@ internal sealed class TrayFlyout : Window
     {
         var auth = AuthService.Current;
         // Unsigned + an account is possible (bound record or a configured
-        // backend): the panel is a sign-in card, not a status readout —
-        // auto-lock is disarmed anyway, so "ARMED" would be a lie and an
-        // unauthorized observer gets nothing. Sign in fits a bound
-        // install; Create account only exists where no record does — on a
-        // bound box it would be a refused foreign rebind. Lock now hides:
-        // with protection off it's a dead affordance.
+        // backend): the panel is a sign-in card, not a status readout — an
+        // unauthorized observer gets nothing. Two honest flavors: an
+        // EXPLICIT sign-out latched protection off (the persisted flag);
+        // anything else unsigned still arms the key — the card says so.
+        // Sign in fits a bound install; Create account only exists where
+        // no record does — on a bound box it would be a refused foreign
+        // rebind. Lock now is hidden only when protection is genuinely
+        // off — while armed it's a working affordance.
         if (!auth.SessionLive && (auth.Gating || auth.Configured))
         {
+            bool armed = auth.ArmedForAutoLock;
             _key.State = KeyVisualState.Absent;
-            _word.Text = "Signed out";
+            _word.Text = armed ? "Sign in" : "Signed out";
             _word.FontSize = 17;
             _word.Foreground = Kit.ToneBrush(Tone.Neutral);
-            _reason.Text = "Protection is off until you sign in.";
-            _lock.IsVisible = false;
+            _reason.Text = armed
+                ? "Your key still locks this PC — sign in to manage it."
+                : "Protection is off until you sign in.";
+            _lock.IsVisible = armed;
             _signIn.IsVisible = true;
             _create.IsVisible = !auth.Gating;
             _setup.IsVisible = false;

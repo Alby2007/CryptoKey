@@ -63,6 +63,7 @@ internal sealed class GuardService : IDisposable
         _auth = AuthService.Current;
         _auth.BindConfig(config);
         _auth.RecordPersisted += OnAuthRecordPersisted;
+        _auth.ArmingChanged += OnArmingChanged;
 
         _monitor.PresenceChanged += OnPresenceChanged;
         _monitor.PresenceChecked += OnPresenceChecked;
@@ -844,9 +845,31 @@ internal sealed class GuardService : IDisposable
         };
     }
 
-    /// <summary>`cryptokey auth status` — the gate's read-only face.</summary>
+    /// <summary>`cryptokey auth …` — the gate's verbs.</summary>
     private string DispatchAuth(string[] parts)
     {
+        // `auth signin <b64 password>` — the sign-in op itself (open verb:
+        // it IS the credential check). Clears the signed-out latch →
+        // re-arms auto-lock; the verifier covers offline.
+        if (parts.Length > 1
+            && parts[1].Equals("signin", StringComparison.OrdinalIgnoreCase))
+        {
+            if (parts.Length < 3)
+                return "err AUTH_REQUIRED — resend as " +
+                    "'auth signin <base64 password>'";
+            string pw;
+            try
+            {
+                pw = System.Text.Encoding.UTF8.GetString(
+                    Convert.FromBase64String(parts[2]));
+            }
+            catch (Exception)
+            {
+                return "err malformed password — expected base64";
+            }
+            AuthResult r = _auth.TryUnlockOffline(pw);
+            return r.Ok ? "ok signed in — auto-lock armed" : $"err {r.Error}";
+        }
         if (parts.Length > 1
             && parts[1].Equals("signout", StringComparison.OrdinalIgnoreCase)
             && _auth.Authorized)
@@ -857,7 +880,8 @@ internal sealed class GuardService : IDisposable
         AccountRecord? rec = _auth.Record;
         return $"ok auth state={_auth.State.ToString().ToLowerInvariant()} " +
                $"email=\"{rec?.Email ?? "-"}\" " +
-               $"configured={_auth.Configured}";
+               $"configured={_auth.Configured} " +
+               $"armed={(_auth.ArmedForAutoLock ? "yes" : "no")}";
     }
 
     /// <summary>
@@ -985,13 +1009,20 @@ internal sealed class GuardService : IDisposable
     /// <summary>Live-apply the reduce-motion setting to the lock surface.</summary>
     public void ApplyMotion(bool enabled) => _surface.SetAnimations(enabled);
 
-    /// <summary>Fail-dead: free input (and the input desktop) — fatal-error path.</summary>
+    /// <summary>
+    /// Fail-dead: free input (and the input desktop) — fatal-error path.
+    /// A release while LOCKED also drops the session to OS auth: the one
+    /// thing worse than a stranded lock is input restored to an open
+    /// desktop with nobody watching.
+    /// </summary>
     public void ReleaseInput()
     {
         _surface.ReleaseInput();
         // Fail-dead frees the policies with the lock — restore is a no-op
         // when nothing was applied.
         Platform.Services.LockPolicies.Restore(Log);
+        if (State == GuardState.Locked)
+            Platform.Services.SystemActions.LockScreen();
     }
 
     // Removal locks instantly (when armed). Arrival deliberately does nothing
@@ -1525,20 +1556,44 @@ internal sealed class GuardService : IDisposable
     private DateTime _lastNoSessionNoteUtc = DateTime.MinValue;
 
     /// <summary>
-    /// The account session is the master switch for auto-lock: unsigned,
-    /// key removal/startup/resume/idle are just USB events, not lock
-    /// triggers. Unlocking is never gated — the key and the recovery
-    /// phrase always open a locked box. Logged on a throttle — the idle
-    /// and pause-expiry paths call every tick while conditions hold.
+    /// Arming flipped — a bound install went signed-out (disarm) or got a
+    /// real sign-in (arm). Always logged; the disarm direction also alerts,
+    /// since "protection quietly went off" is exactly what a remote user
+    /// wants to hear about.
+    /// </summary>
+    private void OnArmingChanged(bool armed)
+    {
+        Log(armed
+            ? "Auto-lock armed — account signed in."
+            : "Auto-lock disarmed — account signed out (persists until sign-in).");
+        if (!armed)
+            Alert("Protection off",
+                "account signed out — auto-lock is disarmed until sign-in");
+        EmitSnapshot();
+    }
+
+    /// <summary>
+    /// Auto-lock arming: a BOUND install is armed unless the user
+    /// explicitly signed out (the persisted latch) — token freshness,
+    /// network reachability, and session state don't enter into it. That's
+    /// the fail-closed direction: an attacker can't disarm by cutting the
+    /// network or rebooting. An install with no account at all is never
+    /// armed (there's nothing to sign in with). Unlocking is never gated —
+    /// the key and the recovery phrase always open a locked box. Logged on
+    /// a throttle — the idle and pause-expiry paths call every tick while
+    /// conditions hold.
     /// </summary>
     private bool AutoLockDisarmed(string trigger)
     {
-        if (_auth.SessionLive)
+        if (_auth.ArmedForAutoLock)
             return false;
         if (DateTime.UtcNow - _lastNoSessionNoteUtc > TimeSpan.FromMinutes(1))
         {
             _lastNoSessionNoteUtc = DateTime.UtcNow;
-            Log($"Auto-lock disarmed ({trigger}) — no signed-in account session.");
+            Log($"Auto-lock disarmed ({trigger}) — " +
+                (_auth.Gating
+                    ? "account explicitly signed out."
+                    : "no account bound."));
         }
         return true;
     }

@@ -10,8 +10,9 @@ namespace CryptoKey.Ui.Tests;
 /// The tray flyout's two faces: unlocked it is a status + control panel;
 /// unsigned-with-account-possible it degrades to a sign-in card that
 /// leaks nothing — no armed state, key presence, vault row, or mutator
-/// affordances. Lock now hides there (auto-lock is disarmed anyway);
-/// Create account appears only where no record is bound.
+/// affordances. Bound-but-unsigned still ARMS auto-lock, so the card
+/// keeps a working "Lock now"; an explicit sign-out latches protection
+/// off and drops it. Create account appears only where no record is bound.
 /// </summary>
 public class TrayFlyoutTests : IDisposable
 {
@@ -30,7 +31,7 @@ public class TrayFlyoutTests : IDisposable
     }
 
     /// <summary>An account-bound install with no session: Gating, not Authorized.</summary>
-    private static void BindLockedAccount(GuardClient client)
+    private static void BindLockedAccount(GuardClient client, bool signedOut = false)
     {
         var auth = new AuthService(new SupabaseConfig
         {
@@ -39,6 +40,7 @@ public class TrayFlyoutTests : IDisposable
         }, null);
         KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
         cfg.Account = AccountRecord.Create("user-1", "a@b.c", "pw-123456");
+        cfg.Account.SignedOut = signedOut;
         auth.BindConfig(cfg);
         AuthService.SetCurrent(auth);
     }
@@ -63,20 +65,43 @@ public class TrayFlyoutTests : IDisposable
         => string.Join("", b.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text));
 
     [AvaloniaFact]
-    public void Locked_variant_is_a_signin_card_not_a_status_panel()
+    public void Bound_but_unsigned_is_an_armed_signin_card()
     {
+        // H1: unsigned ≠ disarmed — a bound record still arms auto-lock.
+        // The card is honest about it: "Sign in" head, real "Lock now".
         var (_, client, _) = Harness.Guard();
         BindLockedAccount(client);
         TrayFlyout f = Show(client);
 
         var visible = Buttons(f).Where(b => b.IsVisible).Select(Label).ToList();
         Assert.Contains(visible, l => l.Contains("Sign in"));
-        Assert.DoesNotContain(visible, l => l.Contains("Lock now")
-            || l.Contains("Create account")
+        Assert.Contains(visible, l => l.Contains("Lock now"));
+        Assert.DoesNotContain(visible, l => l.Contains("Create account")
             || l.Contains("Pause") || l.Contains("Resume")
             || l.Contains("Open CryptoKey") || l.Contains("Mount") || l.Contains("Open"));
 
-        // The masked head: no real state word leaks — "Signed out".
+        var texts = f.GetVisualDescendants().OfType<TextBlock>()
+            .Where(t => t.IsVisible).Select(t => t.Text).ToList();
+        Assert.Contains("Sign in", texts);
+        Assert.Contains(texts, t => t != null && t.Contains("still locks"));
+        Assert.DoesNotContain(texts, t => t is "ARMED" or "PAUSED" or "UNLOCKED");
+    }
+
+    [AvaloniaFact]
+    public void Explicit_signout_is_a_disarmed_signin_card()
+    {
+        // H1: the persisted SignedOut latch is the ONLY unsigned state
+        // that disarms — its card says "Signed out" and hides Lock now.
+        var (_, client, _) = Harness.Guard();
+        BindLockedAccount(client, signedOut: true);
+        TrayFlyout f = Show(client);
+
+        var visible = Buttons(f).Where(b => b.IsVisible).Select(Label).ToList();
+        Assert.Contains(visible, l => l.Contains("Sign in"));
+        Assert.DoesNotContain(visible, l => l.Contains("Lock now")
+            || l.Contains("Create account")
+            || l.Contains("Pause") || l.Contains("Resume"));
+
         var texts = f.GetVisualDescendants().OfType<TextBlock>()
             .Where(t => t.IsVisible).Select(t => t.Text).ToList();
         Assert.Contains("Signed out", texts);

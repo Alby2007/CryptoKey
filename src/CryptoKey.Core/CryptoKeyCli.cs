@@ -35,10 +35,29 @@ internal static class CryptoKeyCli
         }
     }
 
-    /// <summary>%LOCALAPPDATA%\CryptoKey — the self-install target.</summary>
-    public static string InstallDir => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CryptoKey");
+    /// <summary>
+    /// The self-install target. Elevated processes install to Program
+    /// Files — an elevated autostart pointed at a user-writable dir is a
+    /// privesc (any medium-IL process could swap the payload the
+    /// highest-rights task runs). Machine-protected only when elevated;
+    /// per-user installs stay in %LOCALAPPDATA%.
+    /// </summary>
+    public static string InstallDir
+    {
+        get
+        {
+            if (Platform.Services.Ipc.Elevated)
+            {
+                string pf = Environment.GetEnvironmentVariable("ProgramW6432")
+                    ?? Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+                if (!string.IsNullOrEmpty(pf))
+                    return Path.Combine(pf, "CryptoKey");
+            }
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CryptoKey");
+        }
+    }
 
     /// <summary>The release tag this build would ship as: "v0.9.0+abc123".</summary>
     public static string ReleaseTag => "v" + BuildStamp;
@@ -98,8 +117,23 @@ internal static class CryptoKeyCli
             case "lock":
                 return SendIpc("lock");
             case "auth":
-                // `auth status` / `auth signout` — piped to a live guard;
-                // signout is gated like any mutator.
+                // `auth status` / `auth signout` / `auth signin` — piped to
+                // a live guard; signout is gated like any mutator. signin
+                // IS the credential check (open verb): masked prompt, sent
+                // as a base64 positional arg — clears the signed-out latch
+                // and re-arms auto-lock.
+                if (args.Length > 1
+                    && args[1].Equals("signin", StringComparison.OrdinalIgnoreCase))
+                {
+                    string? pw = ReadPassword("Account password: ");
+                    if (pw == null)
+                    {
+                        Console.WriteLine("error: no password supplied");
+                        return 1;
+                    }
+                    return SendIpc("auth signin " + Convert.ToBase64String(
+                        System.Text.Encoding.UTF8.GetBytes(pw)));
+                }
                 if (args.Length > 1
                     && args[1].Equals("signout", StringComparison.OrdinalIgnoreCase))
                     return SendIpcGated("auth signout");

@@ -53,41 +53,60 @@ internal sealed class LockScreen : IDisposable
             f.Hide();
     }
 
-    public void SetAnimations(bool enabled)
+    /// <summary>
+    /// The forms are engine-thread objects, but hook events now arrive on
+    /// the dedicated hook thread — marshal the cosmetic update back over.
+    /// BeginInvoke never blocks the hook, and a swallowed failure must
+    /// never take a hook callback (or the pump) down.
+    /// </summary>
+    private void OnFormsThread(Action a)
+    {
+        try
+        {
+            LockForm? f = _forms.Count > 0 ? _forms[0] : null;
+            if (f != null && f.IsHandleCreated && f.InvokeRequired)
+                f.BeginInvoke(a);
+            else
+                a();
+        }
+        catch (Exception) { }
+    }
+
+    public void SetAnimations(bool enabled) => OnFormsThread(() =>
     {
         _animations = enabled;
         foreach (LockForm f in _forms)
             f.SetAnimations(enabled);
-    }
+    });
 
-    public void SetPassphraseLength(int len)
+    public void SetPassphraseLength(int len) => OnFormsThread(() =>
     {
         _passLen = len;
         foreach (LockForm f in _forms)
             f.SetPassphraseLength(len);
-    }
+    });
 
-    public void SetStatus(string message)
+    public void SetStatus(string message) => OnFormsThread(() =>
     {
         _status = message;
         foreach (LockForm f in _forms)
             f.SetStatus(message);
-    }
+    });
 
-    public void SetFailedAttempts(int count)
+    public void SetFailedAttempts(int count) => OnFormsThread(() =>
     {
         _failedAttempts = count;
         foreach (LockForm f in _forms)
             f.SetFailedAttempts(count);
-    }
+    });
 
     /// <summary>Phrase-input freeze deadline — countdown paints live until expiry.</summary>
-    public void SetCooldown(DateTime? until)
+    public void SetCooldown(DateTime? until) => OnFormsThread(() =>
     {
         _cooldownUntil = until;
         foreach (LockForm f in _forms)
             f.SetCooldown(until);
-    }
+    });
 
     private void BuildForms()
     {

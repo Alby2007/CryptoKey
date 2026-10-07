@@ -36,7 +36,10 @@ internal sealed class InputLocker : IDisposable
     private readonly byte[] _keyState = new byte[256];
     private bool _capsOn;
     private bool _numOn;
-    private DateTime _cooldownUntil = DateTime.MinValue;
+    // Tick count, not DateTime — the engine thread writes it (cooldown
+    // starts/clears) while the hook thread reads it inside the callback;
+    // a torn DateTime read could flake exactly once, ticks can't tear.
+    private long _cooldownTicks;
 
     private IntPtr _kbHook = IntPtr.Zero;
     private IntPtr _mouseHook = IntPtr.Zero;
@@ -66,7 +69,7 @@ internal sealed class InputLocker : IDisposable
         }
         ClipCursor();
         WipeBuffer();
-        _cooldownUntil = DateTime.MinValue;
+        Interlocked.Exchange(ref _cooldownTicks, 0);
         _capsOn = ToggledOn(NativeMethods.VK_CAPITAL);
         _numOn = ToggledOn(NativeMethods.VK_NUMLOCK);
         PassphraseLengthChanged?.Invoke(0);
@@ -86,7 +89,7 @@ internal sealed class InputLocker : IDisposable
     /// during a cooldown can't stack the penalty. Null clears it.
     /// </summary>
     public void SetCooldownUntil(DateTime? until)
-        => _cooldownUntil = until ?? DateTime.MinValue;
+        => Interlocked.Exchange(ref _cooldownTicks, until?.Ticks ?? 0);
 
     public void Unlock() => RemoveHooks();
 
@@ -141,7 +144,7 @@ internal sealed class InputLocker : IDisposable
                 }
 
                 // Cooldown: keys die here — no buffer, no Enter, no counting.
-                if (DateTime.Now < _cooldownUntil)
+                if (DateTime.Now.Ticks < Interlocked.Read(ref _cooldownTicks))
                     return (IntPtr)1;
 
                 switch (vk)

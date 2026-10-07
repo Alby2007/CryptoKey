@@ -130,11 +130,9 @@ internal sealed class AuthService
 
     /// <summary>
     /// A signed-in session is driving this run — live bearer tokens or the
-    /// offline verifier armed. The account session is the master switch
-    /// for the guard's auto-lock machinery (key removal, startup, resume,
-    /// idle, pause-expiry): unsigned, key pulls are just USB events.
-    /// Unlock paths never consult it — the key and the recovery phrase
-    /// always open a locked box; locking is the safe direction.
+    /// offline verifier armed. This gates the APP surface (dashboard,
+    /// mutators) — auto-lock arming no longer consults it: see
+    /// <see cref="ArmedForAutoLock"/>.
     /// </summary>
     public bool SessionLive
     {
@@ -144,6 +142,26 @@ internal sealed class AuthService
                 return _unlocked || (_tokens?.Live ?? false);
         }
     }
+
+    /// <summary>
+    /// Should the key still lock this machine? TRUE whenever the install is
+    /// account-bound (<see cref="Gating"/>) and the user hasn't explicitly
+    /// signed out — deliberately independent of token freshness. A reboot
+    /// with expired tokens, an offline box, or a revoked refresh all stay
+    /// ARMED: arming is the fail-closed direction and an attacker can't
+    /// disarm by cutting the network. Only a gated `auth signout` (which
+    /// persists <see cref="AccountRecord.SignedOut"/> in the attested
+    /// record) disarms; the next real sign-in re-arms. Unlocking never
+    /// consults this either way — key and phrase always open a locked box.
+    /// </summary>
+    public bool ArmedForAutoLock =>
+        Gating && Record?.SignedOut != true;
+
+    /// <summary>
+    /// Arming flipped — the engine logs it and alerts on disarm. Fires only
+    /// on real transitions (sign-out latch set / cleared), not per-call.
+    /// </summary>
+    public event Action<bool>? ArmingChanged;
 
     public AuthGateState State
     {
@@ -339,7 +357,14 @@ internal sealed class AuthService
                 ? "No account is linked on this install."
                 : "Wrong password.");
         }
-        lock (_sync) _unlocked = true;
+        bool armedNow;
+        lock (_sync)
+        {
+            _unlocked = true;
+            armedNow = ClearSignedOutLocked();
+        }
+        if (armedNow)
+            ArmingChanged?.Invoke(true);
         NoteSuccess();
         return new AuthResult(true, null, Offline: true);
     }
@@ -789,13 +814,31 @@ internal sealed class AuthService
     /// </summary>
     public event Action? SessionEnded;
 
-    /// <summary>Best-effort remote logout; the local session always ends.</summary>
+    /// <summary>
+    /// Best-effort remote logout; the local session always ends. Also the
+    /// ONLY op that disarms auto-lock: the latch is persisted inside the
+    /// attested record (a failed save just means the disarm doesn't
+    /// survive restart — the fail-safe direction).
+    /// </summary>
     public async Task<AuthResult> SignOut()
     {
+        bool armedBefore;
         AuthTokens? tokens;
-        lock (_sync) { tokens = _tokens; _tokens = null; _unlocked = false; }
+        lock (_sync)
+        {
+            armedBefore = ArmedForAutoLock;
+            tokens = _tokens; _tokens = null; _unlocked = false;
+            if (_record is { } rec && !rec.SignedOut)
+            {
+                rec.SignedOut = true;
+                try { PersistLocked(); }
+                catch (Exception) { /* in-memory latch only — restart re-arms */ }
+            }
+        }
         TokenStore.Clear();
         SessionEnded?.Invoke();
+        if (armedBefore && !ArmedForAutoLock)
+            ArmingChanged?.Invoke(false);
         if (Configured && tokens?.AccessToken is { Length: > 0 } access)
         {
             try
@@ -807,6 +850,23 @@ internal sealed class AuthService
             catch (Exception) { /* remote sign-out is best-effort */ }
         }
         return new AuthResult(true, null);
+    }
+
+    /// <summary>
+    /// A real sign-in clears the explicit disarm latch — the user who can
+    /// produce the password intends protection back on. Persisted so the
+    /// cleared state survives; the record write re-attests on next verify.
+    /// Caller holds <see cref="_sync"/>; returns true when the latch moved
+    /// (fire <see cref="ArmingChanged"/> after unlocking).
+    /// </summary>
+    private bool ClearSignedOutLocked()
+    {
+        if (_record?.SignedOut != true)
+            return false;
+        _record.SignedOut = false;
+        try { PersistLocked(); }
+        catch (Exception) { /* non-durable clear — restart keeps it signed out */ }
+        return true;
     }
 
     /// <summary>

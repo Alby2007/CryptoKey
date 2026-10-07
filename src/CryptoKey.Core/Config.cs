@@ -535,6 +535,11 @@ internal static class ConfigStore
             + (includeEpoch ? "|vaultepoch=" + config.VaultEpoch : "")
             + (accountField
                 ? "|accounthash=" + (config.Account?.VerifierHash ?? "-")
+                    // The signed-out latch rides inside the covered slot —
+                    // an off-app flip to disarm mismatches like any canon
+                    // field. No new accepted form: the canon derives from
+                    // the live record, so both states resolve themselves.
+                    + (config.Account?.SignedOut == true ? ":signedout" : "")
                 : "");
     }
 

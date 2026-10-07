@@ -995,7 +995,24 @@ internal static class Program
     private static int SetStartupMode(StartupMode mode)
     {
         try
-        {            StartupManager.SetMode(mode);
+        {
+            // Elevated autostart may only point at a machine-protected exe.
+            // This helper IS elevated (spawned runas) — when the running
+            // copy is per-user, lift the whole payload into Program Files
+            // and register THAT exe, so the task's image can't be swapped
+            // by a medium-IL process.
+            string exe = Application.ExecutablePath;
+            if (mode == StartupMode.Elevated
+                && StartupManager.IsUserWritableLocation(exe))
+            {
+                string sourceDir = Path.GetFullPath(AppContext.BaseDirectory)
+                    .TrimEnd(Path.DirectorySeparatorChar);
+                string pfDir = CryptoKeyCli.InstallDir; // elevated → Program Files
+                CopyTree(sourceDir, pfDir);
+                exe = Path.Combine(pfDir, Path.GetFileName(exe));
+                Console.WriteLine($"Lifted install to {pfDir}");
+            }
+            StartupManager.SetMode(mode, exe);
             return 0;
         }
         catch (Exception ex)
