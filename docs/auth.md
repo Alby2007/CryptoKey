@@ -4,18 +4,24 @@ A cloud identity layer (Supabase Auth, email + password) that gates the
 **app surface** — the dashboard, the tray's mutating items, and the CLI's
 sensitive verbs — with an offline grace path for when the network is gone.
 
-It is deliberately **not** a workstation lock factor. The USB key and the
-recovery phrase remain the only things that unlock a locked session, and
-the guard engages and holds a lock with no account, no session, and no
-network. This document is the contract for what the account does and
-doesn't cover.
+It is the **master switch** — the account session owns the whole
+protection surface, including the auto-lock machinery itself.
+
+The split is directional: **unlocking is never gated.** The USB key and
+the recovery phrase always open a locked box, and an explicit `lock`
+always works — locking is the safe direction. But *arming* is
+session-scoped: with nobody signed in, a key pull is just a USB event —
+auto-lock (removal, startup-absent, resume, idle, pause-expiry) stays
+disarmed until a session signs in. Sign out and the machine stops
+protecting itself; sign back in and the key is the lock again.
 
 ## What the account gates
 
 | Surface | Gated | Open |
 |---|---|---|
 | Dashboard window | opens only after auth | — |
-| Tray | pause / resume / quit | lock now |
+| Tray | pause / resume / quit; the flyout renders a sign-in card while gated out | lock now |
+| Auto-lock | armed only while a session is signed in (removal, idle, startup, resume, pause-expiry) | — |
 | IPC verbs | `pause`, `resume`, `quit`, `reenrolled`, `vault <mutator>`, `update apply` | `status`, `lock`, `vault status`, `update status/check`, `auth status`, `open`, `deeplink` |
 | CLI | same verbs via `cryptokey <verb>` (masked password prompt on `AUTH_REQUIRED`) | `status`, `lock`, `enroll` without a bound account |
 
@@ -124,9 +130,11 @@ password policy are project settings in the Supabase dashboard — set the
 `cryptokey://recover` redirect under Auth → URL Configuration.
 
 A missing/invalid `supabase.json` is a visible banner on the auth window,
-never a crash: online flows report "Supabase isn't configured", offline
-grace keeps working for a linked account, and an install that never
-enrolled an account runs exactly like before — the guard is never gated.
+never a crash: online flows report "Supabase isn't configured" and
+offline grace keeps working for a linked account. An install that never
+enrolled an account keeps its mutators open — there is no credential to
+check — but auto-lock stays disarmed until a session exists to sign in:
+no account means no armed protection.
 
 ## Failure & tamper behavior
 
@@ -140,8 +148,9 @@ enrolled an account runs exactly like before — the guard is never gated.
 
 ## Explicitly out of scope
 
-Settings sync, multi-device management, licensing, and any role for the
-account in workstation locking. The threat model for the lock itself —
-private desktop, intruder sentinel, watchdog, USB key, recovery phrase —
-lives in `security-model.md`; the account layer adds an app-side identity
-gate and nothing else.
+Settings sync, multi-device management, and licensing. The account is the
+master switch for *arming* protection but is never an *unlock* factor —
+the USB key and recovery phrase open a locked box with or without a
+session. The threat model for the lock itself — private desktop,
+intruder sentinel, watchdog, USB key, recovery phrase — lives in
+`security-model.md`.

@@ -251,9 +251,12 @@ cryptokey (desktop app)
           straight to the wizard (a backend-less install stays usable).
 ```
 
-`guard`/headless modes never touch the account: the engine starts, the
-IPC gate answers `AUTH_REQUIRED` on mutating verbs, and the lock factors
-stay exactly the USB key + recovery phrase.
+`guard`/headless modes never touch the account UI: the engine starts, the
+IPC gate answers `AUTH_REQUIRED` on mutating verbs, and the unlock
+factors stay exactly the USB key + recovery phrase. The session still
+owns arming, though — `MaybeAutoLock`/idle-lock check
+`AuthService.SessionLive`, so a signed-out guard reports but doesn't
+lock; unlocking a locked box never consults the session.
 
 ## Pause semantics
 
@@ -261,4 +264,5 @@ stay exactly the USB key + recovery phrase.
 re-pausing extends the timer. Expiry is checked on every poll
 (`CheckPauseExpiry`): returns to `Unlocked`, then if the key is still
 absent, `MaybeAutoLock` fires immediately — a pause ending with the drive
-out locks on the spot rather than at the next removal.
+out locks on the spot rather than at the next removal (while a session
+is signed in — unsigned, the master switch leaves it disarmed).

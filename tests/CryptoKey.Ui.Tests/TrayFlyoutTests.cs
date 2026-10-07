@@ -69,10 +69,10 @@ public class TrayFlyoutTests : IDisposable
         Assert.DoesNotContain(visible, l => l.Contains("Pause") || l.Contains("Resume")
             || l.Contains("Open CryptoKey") || l.Contains("Mount") || l.Contains("Open"));
 
-        // The masked head: no real state word leaks — "Locked", neutral tone.
+        // The masked head: no real state word leaks — "Signed out".
         var texts = f.GetVisualDescendants().OfType<TextBlock>()
             .Where(t => t.IsVisible).Select(t => t.Text).ToList();
-        Assert.Contains("Locked", texts);
+        Assert.Contains("Signed out", texts);
         Assert.DoesNotContain(texts, t => t is "ARMED" or "PAUSED" or "UNLOCKED");
     }
 

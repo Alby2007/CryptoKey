@@ -459,7 +459,9 @@ internal sealed class GuardService : IDisposable
                 }
                 // Paused/Locked suppress it; the gate stops re-locking on
                 // the same idle streak after a key-present auto-unlock.
-                if (mins <= 0 || State != GuardState.Unlocked)
+                // No signed-in session → idle is just idle (master switch).
+                if (mins <= 0 || State != GuardState.Unlocked
+                    || AutoLockDisarmed($"idle {mins} min"))
                     return;
                 switch (_idleGate.Check(idleMs))
                 {
@@ -1371,11 +1373,34 @@ internal sealed class GuardService : IDisposable
         UnlockNow();
     }
 
+    private DateTime _lastNoSessionNoteUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// The account session is the master switch for auto-lock: unsigned,
+    /// key removal/startup/resume/idle are just USB events, not lock
+    /// triggers. Unlocking is never gated — the key and the recovery
+    /// phrase always open a locked box. Logged on a throttle — the idle
+    /// and pause-expiry paths call every tick while conditions hold.
+    /// </summary>
+    private bool AutoLockDisarmed(string trigger)
+    {
+        if (_auth.SessionLive)
+            return false;
+        if (DateTime.UtcNow - _lastNoSessionNoteUtc > TimeSpan.FromMinutes(1))
+        {
+            _lastNoSessionNoteUtc = DateTime.UtcNow;
+            Log($"Auto-lock disarmed ({trigger}) — no signed-in account session.");
+        }
+        return true;
+    }
+
     private void MaybeAutoLock(string reason)
     {
         if (State == GuardState.Locked || State == GuardState.Paused)
             return;
         if (!_config.Guard.LockOnRemoval)
+            return;
+        if (AutoLockDisarmed(reason))
             return;
         LockNow(reason);
     }

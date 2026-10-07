@@ -128,6 +128,23 @@ internal sealed class AuthService
         }
     }
 
+    /// <summary>
+    /// A signed-in session is driving this run — live bearer tokens or the
+    /// offline verifier armed. The account session is the master switch
+    /// for the guard's auto-lock machinery (key removal, startup, resume,
+    /// idle, pause-expiry): unsigned, key pulls are just USB events.
+    /// Unlock paths never consult it — the key and the recovery phrase
+    /// always open a locked box; locking is the safe direction.
+    /// </summary>
+    public bool SessionLive
+    {
+        get
+        {
+            lock (_sync)
+                return _unlocked || (_tokens?.Live ?? false);
+        }
+    }
+
     public AuthGateState State
     {
         get

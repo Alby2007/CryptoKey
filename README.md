@@ -178,12 +178,13 @@ design while locked).
 
 ## Account (optional cloud identity)
 
-A **Supabase Auth** account (email + password) gates the dashboard and the
-sensitive commands — pause/resume/quit, vault mutators, `update apply`,
-and the in-app settings — without ever touching the lock itself. The USB
-key and recovery phrase remain the only things that unlock a locked PC,
-and the guard engages and holds a lock with no account, no session, and
-no network. See [`docs/auth.md`](docs/auth.md) for the full model.
+A **Supabase Auth** account (email + password) is the master switch: it
+gates the dashboard, the sensitive commands — pause/resume/quit, vault
+mutators, `update apply`, in-app settings — **and the auto-lock machinery
+itself**. Signed out, a key pull is just a USB event; signed in, the key
+locks the machine the moment it leaves. Unlocking is never gated — the
+USB key and recovery phrase always open a locked PC, and manual `lock`
+always works. See [`docs/auth.md`](docs/auth.md) for the full model.
 
 Setup: drop `supabase.json` beside the exe (copy `supabase.example.json`)
 with your project's `projectUrl` and **anon** key — the anon key is meant

@@ -177,11 +177,12 @@ internal sealed class TrayFlyout : Window
             // readout — an unauthorized observer doesn't get armed state,
             // key presence, the vault row, or control affordances. Dimmed
             // key art leaks nothing; Lock now stays because it only makes
-            // the box safer.
+            // the box safer. And the account session is the master switch —
+            // auto-lock itself is off while nobody's signed in.
             _key.State = KeyVisualState.Absent;
-            _word.Text = "Locked";
+            _word.Text = "Signed out";
             _word.Foreground = Kit.ToneBrush(Tone.Neutral);
-            _reason.Text = "Sign in to view status and controls.";
+            _reason.Text = "Protection is off until you sign in.";
             _lock.IsVisible = true;
             _signIn.IsVisible = true;
             _resume.IsVisible = false;

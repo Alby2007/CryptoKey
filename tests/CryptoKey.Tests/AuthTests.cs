@@ -585,4 +585,41 @@ public class AuthTests : IDisposable
             Encoding.UTF8.GetBytes("acct-pw"));
         Assert.StartsWith("ok", svc.DispatchCommand("auth signout" + trailer));
     }
+
+    [Fact]
+    public void Autolock_is_disarmed_without_a_signed_in_session()
+    {
+        // The account session is the master switch for the lock machinery:
+        // unsigned, a key pull is just a USB event — the startup key-absent
+        // check must not engage the lock.
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        AuthService.SetCurrent(new AuthService(Cfg, new ScriptHandler()));
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        svc.Start(); // no USB enumerated → the startup auto-lock check fires
+        Assert.NotEqual(GuardState.Locked, svc.State);
+
+        // …but manual lock never gates — locking is always safe direction.
+        Assert.StartsWith("ok", svc.DispatchCommand("lock"));
+        Assert.Equal(GuardState.Locked, svc.State);
+    }
+
+    [Fact]
+    public void Signed_in_session_arms_autolock_at_startup()
+    {
+        KeyConfig cfg = TestDisk.NewConfig(TestDisk.RandomSecret());
+        cfg.Account = AccountRecord.Create("u1", "a@b.c", "acct-pw");
+        cfg.Guard.Watchdog = false;
+        cfg.Guard.UpdateCheckEnabled = false;
+        var auth = new AuthService(Cfg, new ScriptHandler());
+        AuthService.SetCurrent(auth);
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+        // ctor binds the record — the offline verifier can arm the session.
+        Assert.True(auth.TryUnlockOffline("acct-pw").Ok);
+
+        svc.Start(); // key absent at startup + live session → locks.
+        Assert.Equal(GuardState.Locked, svc.State);
+    }
 }
