@@ -340,6 +340,10 @@ internal static class ConfigStore
                 HashNormalized(recoveryPhrase, passSalt, CurrentPbkdf2Iterations)),
             PassphraseIterations = CurrentPbkdf2Iterations,
             V2Only = true, // new enrollments always write v2 envelopes — raw never accepted
+            // L2 — new enrollments lock the one-generation clone window
+            // shut: a stale keyfile never counts as the key factor. The
+            // stored value rides in existing configs unchanged.
+            Guard = { StrictTamper = true },
         };
     }
 
@@ -406,6 +410,16 @@ internal static class ConfigStore
     /// (force-migration; the enrolled key is the regeneration hatch).
     /// </summary>
     public static bool VerifyPassphrase(KeyConfig config, ReadOnlySpan<char> phrase)
+        => VerifyPassphrase(config.PassphraseHash, config.PassphraseSalt,
+            config.PassphraseIterations, phrase);
+
+    /// <summary>
+    /// Verify against a caller-snapshotted hash triple — the off-thread
+    /// phrase path can't touch the live <see cref="KeyConfig"/> (a
+    /// re-enroll mid-hash could tear the three fields across writes).
+    /// </summary>
+    internal static bool VerifyPassphrase(string hashB64, string saltB64,
+        int iterations, ReadOnlySpan<char> phrase)
     {
         // 64 chars covers any sane credential — anything that normalizes
         // past the buffer can't be the canonical phrase, so fail closed.
@@ -415,9 +429,9 @@ internal static class ConfigStore
             int n = RecoveryPhrase.Normalize(phrase, buf);
             if (n > buf.Length)
                 return false;
-            byte[] salt = Convert.FromBase64String(config.PassphraseSalt);
-            byte[] expected = Convert.FromBase64String(config.PassphraseHash);
-            byte[] derived = HashPassphrase(buf[..n], salt, config.PassphraseIterations);
+            byte[] salt = Convert.FromBase64String(saltB64);
+            byte[] expected = Convert.FromBase64String(hashB64);
+            byte[] derived = HashPassphrase(buf[..n], salt, iterations);
             try
             {
                 return CryptographicOperations.FixedTimeEquals(derived, expected);
@@ -566,6 +580,14 @@ internal static class ConfigStore
                     // field. No new accepted form: the canon derives from
                     // the live record, so both states resolve themselves.
                     + (config.Account?.SignedOut == true ? ":signedout" : "")
+                    // L3 — the pinned Supabase project rides the same slot:
+                    // editing the record's ProjectUrl to match a swapped
+                    // supabase.json mismatches the MAC like any canon field.
+                    + (config.Account?.ProjectUrl is { Length: > 0 } proj
+                        ? ":proj=" + Convert.ToHexString(SHA256.HashData(
+                            Encoding.UTF8.GetBytes(proj.TrimEnd('/')
+                                .ToLowerInvariant())))[..12].ToLowerInvariant()
+                        : "")
                 : "");
     }
 

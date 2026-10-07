@@ -27,6 +27,8 @@ internal sealed class GuardService : IDisposable
     private string? _lastVerifyFailure;
     private DateTime? _pausedUntil;
     private int _failedAttempts;
+    private int _phraseBusyFlag; // CAS-claimed: one PBKDF2 attempt in flight (L1)
+    private int _phraseTicket;   // bumped per attempt + per session — orphans stale results
     private StatusSnapshot? _lastSnapshot;
     private bool _verifiedEdge;
     private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
@@ -198,6 +200,8 @@ internal sealed class GuardService : IDisposable
 
     /// <summary>Test seam: the live phrase-failure counter (backoff state).</summary>
     internal int FailedAttempts => _failedAttempts;
+    internal int PhraseTicket => Volatile.Read(ref _phraseTicket);   // test seam
+    internal int PhraseBusy => Volatile.Read(ref _phraseBusyFlag);   // test seam
 
     /// <summary>The encrypted-vault lifecycle service — the Vault page and CLI drive it.</summary>
     public VaultService Vault => _vault;
@@ -575,6 +579,7 @@ internal sealed class GuardService : IDisposable
                 // reenrolled → fresh counter while still locked.
                 _failedAttempts = 0;
                 _cooldownUntil = null;
+                PersistPhraseThrottle();
                 _surface.SetCooldown(null);
             }
             _lastAttest = AttestState.Ok;
@@ -922,7 +927,8 @@ internal sealed class GuardService : IDisposable
         return $"ok auth state={_auth.State.ToString().ToLowerInvariant()} " +
                $"email=\"{rec?.Email ?? "-"}\" " +
                $"configured={_auth.Configured} " +
-               $"armed={(_auth.ArmedForAutoLock ? "yes" : "no")}";
+               $"armed={(_auth.ArmedForAutoLock ? "yes" : "no")}" +
+               (_auth.TrustRootMismatch ? " trustroot=MISMATCH" : "");
     }
 
     /// <summary>
@@ -1523,6 +1529,26 @@ internal sealed class GuardService : IDisposable
             return;
         }
 
+        // L1 — one attempt in flight: without this, every Enter spawns a
+        // parallel PBKDF2 and brute-force throughput multiplies by cores
+        // while the backoff ladder only counts landed results. The claim is
+        // an atomic CAS (submits arrive on the surface's thread) — dropped
+        // attempts are treated like cooldown input: wiped and ignored,
+        // and crucially they do NOT bump the ticket, so they can't orphan
+        // the in-flight attempt's result.
+        if (Interlocked.CompareExchange(ref _phraseBusyFlag, 1, 0) != 0)
+        {
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(attempt.AsSpan()));
+            return;
+        }
+        int ticket = Interlocked.Increment(ref _phraseTicket);
+        // L1/L6 — snapshot the verifier inputs HERE: the pool task must
+        // never read _config (a re-enroll can swap it mid-hash and tear
+        // the read across the hash/salt/iters triple).
+        string snapHash = _config.PassphraseHash;
+        string snapSalt = _config.PassphraseSalt;
+        int snapIters = _config.PassphraseIterations;
+
         UnlockPolicy policy = _config.Guard.UnlockPolicy;
         // Is the input even phrase-shaped? A failed verify of a valid
         // XXXXX-XXXXX-XXXXX-XXXXX is "wrong phrase"; anything else is most
@@ -1545,7 +1571,7 @@ internal sealed class GuardService : IDisposable
             bool ok;
             try
             {
-                ok = ConfigStore.VerifyPassphrase(_config, attempt);
+                ok = ConfigStore.VerifyPassphrase(snapHash, snapSalt, snapIters, attempt);
             }
             catch (Exception)
             {
@@ -1558,17 +1584,34 @@ internal sealed class GuardService : IDisposable
 
             try
             {
-                _ui.Post(new Action(() => OnPassphraseResult(ok, policy, notPhraseShaped)));
+                _ui.Post(new Action(() =>
+                    OnPassphraseResult(ok, policy, notPhraseShaped, ticket, snapHash)));
             }
             catch (Exception)
             {
-                // UI thread is gone — the process is exiting anyway.
+                // UI thread is gone — release the slot so a later session
+                // isn't wedged by a result that can never land.
+                Interlocked.Exchange(ref _phraseBusyFlag, 0);
             }
         });
     }
 
-    private void OnPassphraseResult(bool ok, UnlockPolicy policy, bool notPhraseShaped)
+    private void OnPassphraseResult(bool ok, UnlockPolicy policy,
+        bool notPhraseShaped, int ticket, string snapHash)
     {
+        // Orphaned by a session change (unlock/lock bumped the ticket) or a
+        // post that raced a re-engage — the busy slot belongs to whoever
+        // holds the current ticket, so don't touch it here.
+        if (ticket != Volatile.Read(ref _phraseTicket))
+            return;
+        Interlocked.Exchange(ref _phraseBusyFlag, 0);
+        // Re-enroll mid-hash: the live verifier moved under the snapshot.
+        // A match against the retired hash must not unlock; ask again.
+        if (snapHash != _config.PassphraseHash)
+        {
+            _surface.SetStatus("Configuration changed — try again.");
+            return;
+        }
         if (!ok)
         {
             _failedAttempts++;
@@ -1595,12 +1638,16 @@ internal sealed class GuardService : IDisposable
             {
                 _surface.SetStatus("Incorrect recovery phrase — try again.");
             }
+            // L6 — the ladder survives restarts: persist BEFORE returning so
+            // a crash mid-freeze still holds the cooldown.
+            PersistPhraseThrottle();
             return;
         }
 
         // Correct phrase — now the policy gate decides.
         _failedAttempts = 0;
         _cooldownUntil = null;
+        PersistPhraseThrottle();
         _surface.SetCooldown(null);
         _surface.SetFailedAttempts(0);
 
@@ -1703,12 +1750,38 @@ internal sealed class GuardService : IDisposable
         LockNow(reason);
     }
 
+    /// <summary>L6 — push the live ladder into the sealed throttle file.</summary>
+    private void PersistPhraseThrottle()
+    {
+        ThrottleState t = ThrottleStore.Shared;
+        t.PhraseFailures = _failedAttempts;
+        t.PhraseCooldownUntilUtc = _cooldownUntil?.ToUniversalTime() ?? default;
+        ThrottleStore.Save();
+    }
+
+    /// <summary>L6 — adopt the persisted ladder: a restart mid-freeze (or a
+    /// deliberate relaunch) doesn't hand the brute-forcer a fresh counter.</summary>
+    private void AdoptPhraseThrottle()
+    {
+        ThrottleState t = ThrottleStore.Shared;
+        _failedAttempts = t.PhraseFailures;
+        _cooldownUntil = t.PhraseCooldownUntilUtc is { } u && u > DateTime.UtcNow
+            ? u.ToLocalTime() : null;
+    }
+
     private void LockNow(string reason)
     {
         if (State == GuardState.Locked)
             return;
         _pausedUntil = null;
-        _failedAttempts = 0;
+        // The failure counter no longer resets per lock session — the
+        // persisted ladder carries over so re-engages don't reset it either.
+        AdoptPhraseThrottle();
+        // A PBKDF2 orphaned by the previous session's teardown must not
+        // wedge this one — bump the ticket so its result is ignored and
+        // release the claim for the new session's first attempt.
+        Interlocked.Increment(ref _phraseTicket);
+        Interlocked.Exchange(ref _phraseBusyFlag, 0);
         _unlockDeferLogged = false; // fresh lock session — next deferral logs once
         _keyVerifiedNow = false; // fresh lock session — poll re-arms if the key verifies
         _vault.KeyGone(); // the vault seals with the session — before the surface drops
@@ -1751,6 +1824,12 @@ internal sealed class GuardService : IDisposable
         else
         {
             _surface.ResetStatus();
+            // L6 — a freeze persisted across the restart still binds: the
+            // surface must see the adopted countdown, not just the fields.
+            if (_cooldownUntil is DateTime frozenUntil)
+                _surface.SetCooldown(frozenUntil);
+            if (_failedAttempts > 0)
+                _surface.SetFailedAttempts(_failedAttempts);
         }
     }
 
@@ -1759,8 +1838,15 @@ internal sealed class GuardService : IDisposable
         if (State != GuardState.Locked)
             return;
         _lastVerifyFailure = null;
-        // Cooldown dies with the lock session — in-memory only per design.
+        // Cooldown dies with the lock session — memory AND the persisted
+        // ladder (a proven unlock is the only legitimate reset). Any
+        // in-flight verify is orphaned too: its result must not land as a
+        // "failure" against the session that just opened.
         _cooldownUntil = null;
+        _failedAttempts = 0;
+        PersistPhraseThrottle();
+        Interlocked.Increment(ref _phraseTicket);
+        Interlocked.Exchange(ref _phraseBusyFlag, 0);
         _surface.SetCooldown(null);
         // Disengage returns input (and the input desktop) before teardown.
         // If the session couldn't be switched back, the surface stays alive

@@ -108,9 +108,11 @@ automatically when the server is unreachable. Boundaries:
   sign-in rewrites it. To revoke offline immediately, sign out (the
   verifier survives sign-out — it's the identity, not the session) or
   delete the account section in `config.json` and relink.
-- An in-memory throttle (5 failures → 30 s cooldown, doubling to 15 min)
-  rate-limits local attempts; it resets on success and is not durable —
-  the verifier record is the hard bound, not the throttle.
+- A throttle (5 failures → 30 s cooldown, doubling to 15 min) rate-limits
+  local attempts; it resets on success and persists in DPAPI-sealed
+  `throttle.dat` — a restart doesn't refund the ladder. A same-user
+  attacker can delete the file (fresh ladder, nothing more); the verifier
+  record is the hard bound, not the throttle.
 
 ## Integrity: the verifier is attestation-bound
 
@@ -143,8 +145,11 @@ account entirely — the gate lifts; the install is simply unenrolled.
 
 ## Setup (Supabase)
 
-`supabase.json` beside the executable (or `CRYPTOKEY_SUPABASE_JSON`
-points elsewhere):
+`supabase.json` beside the executable — the only location a shipped
+Release build reads (the file is the auth trust root: a user-writable
+fallback would let a swapped copy steer every credential). Debug builds
+additionally honor `CRYPTOKEY_SUPABASE_JSON` and a copy beside the
+config dir, for tests/relocated dev installs:
 
 ```json
 { "projectUrl": "https://xyz.supabase.co", "anonKey": "eyJ…" }

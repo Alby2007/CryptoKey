@@ -67,6 +67,10 @@ internal sealed class AlertsPage : Page
             _urlSave.Stop();
             string url = (_url.Text ?? "").Trim();
             Save(g => g.AlertUrl = url);
+            // L4 — saved URLs that aren't https get dropped at send time;
+            // say so NOW rather than discovering it on the first event.
+            if (url.Length > 0 && !AlertService.IsAllowedUrl(url))
+                Ctx.Toast("Alert URL must be https:// — it won't send otherwise.", true);
         };
         _url.TextChanged += (_, _) =>
         {
@@ -88,7 +92,7 @@ internal sealed class AlertsPage : Page
             caps.Webcam ? captureGrid : null);
 
         var remote = Kit.Section("Remote alerts", IconData.Webhook,
-            "Security events POST to any webhook — an ntfy.sh topic pings your phone.",
+            "Security events POST to any https webhook — an ntfy.sh topic pings your phone.",
             Kit.Row("Alert URL", null, _url),
             Kit.Row("Test the endpoint", "Sends the URL in the field, not the saved one — a bad URL should fail now, not during an attack.",
                 Kit.Btn("Send test", IconData.Zap, "small", SendTest)));
@@ -159,6 +163,11 @@ internal sealed class AlertsPage : Page
         if (url.Length == 0)
         {
             Ctx.Toast("Set an alert URL first.", true);
+            return;
+        }
+        if (!AlertService.IsAllowedUrl(url))
+        {
+            Ctx.Toast("Alert URL must be https:// — plain http is refused.", true);
             return;
         }
         AlertService.Send(url, "Test", "test alert — CryptoKey is armed", Client.Log);

@@ -26,6 +26,7 @@ public class AuthTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear(); // L6 — persisted throttles must not leak
     }
 
     public void Dispose()
@@ -33,6 +34,7 @@ public class AuthTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     /// <summary>A queued-response HttpMessageHandler for the REST flows.</summary>

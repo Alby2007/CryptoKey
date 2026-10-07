@@ -6,8 +6,11 @@ namespace CryptoKey.Tests;
 /// M7 — fail-dead paths OS-lock a locked session instead of freeing input
 /// onto an unattended open desktop.
 /// </summary>
-public class FailDeadTests
+public class FailDeadTests : IDisposable
 {
+    public FailDeadTests() => ThrottleStore.Clear();
+    public void Dispose() => ThrottleStore.Clear();
+
     [Fact]
     public void ReleaseInput_while_locked_os_locks_the_session()
     {

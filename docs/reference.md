@@ -63,7 +63,8 @@ cryptokey apply-update --target <dir>           # spawned by update apply from t
                                                 # install dir, relaunches
 ```
 
-Flags: `--dev` enables the panic exit combo `Ctrl+Alt+Shift+F12`;
+Flags: `--dev` enables the panic exit combo `Ctrl+Alt+Shift+F12`
+(debug builds only — a shipped Release binary ignores the flag);
 `--takeover` waits on the guard mutex (elevated restart handoff);
 `--classic` forces the overlay lock for that launch.
 
@@ -151,13 +152,13 @@ land at the final name (matters most on FAT32/exFAT drives with no journal).
 | `Guard.Animations` | Dashboard/lock animations — default `true` |
 | `Guard.Sounds` | Synthesized cues: lock thunk, unlock chime, tamper-storm alarm — default `true` |
 | `Guard.UnlockPolicy` | `KeyOrPassphrase` (default) · `KeyAndPassphrase` · `KeyOnly` — enum-as-string |
-| `Guard.StrictTamper` | Stale keyfiles never count as the key factor — default `false` |
+| `Guard.StrictTamper` | Stale keyfiles never count as the key factor — default `true` for new enrollments; older configs keep their stored value |
 | `Guard.LockMode` | `"secure"` (default) · `"overlay"` — anything else → secure (fail-closed parse) |
 | `Guard.Watchdog` | Persistent supervisor process — default `true`. Off → stands it down and keeps it down |
 | `Guard.LockPolicies` | Hide Task Manager/sign-out/power affordances while locked — default `true`. Priors (any registry kind) backed up to `lockpolicies.json`, restored verbatim on unlock |
 | `Guard.IdleLockMinutes` | Lock after N minutes without input (`GetLastInputInfo`) — `0` = off (default). Fires only from Unlocked; Paused suppresses it. One warn (~20 s before, as a balloon) + one lock per idle streak — both re-arm only after input returns, so a present key's auto-unlock can't flap |
 | `Guard.WebcamOnTamper` | Snapshot the webcam on tamper events (bad phrase, clone flag, break-glass) — `false` = off (default, privacy opt-in). Stills land in `captures/` as DPAPI-sealed `.cap` files (viewable only by this app on this user; legacy cleartext captures still render), trimmed to 50 |
-| `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any webhook; `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
+| `Guard.AlertUrl` | POST endpoint for security events — ntfy.sh topic or any **https** webhook (plain `http:` is refused at send time); `""` (default) = off. Payload: `machine: event` text + `Title` header, 4 s timeout, fire-and-forget |
 | `Guard.VaultEnabled` | Vault feature gate — default `false` until the first `vault create` (the Vault page enables it on create) |
 | `Guard.VaultAutoMount` | Mount as soon as the key verifies — default `true` |
 | `Guard.VaultImagePath` | Image location — default `%LOCALAPPDATA%\CryptoKey\vault.ckv` |

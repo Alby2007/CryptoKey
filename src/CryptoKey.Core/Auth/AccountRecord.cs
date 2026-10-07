@@ -26,6 +26,14 @@ internal sealed class AccountRecord
     public int VerifierIterations { get; set; } = VerifierIterationsCurrent;
 
     /// <summary>
+    /// The Supabase project this install bound under — pinned at create so
+    /// a swapped <c>supabase.json</c> is detected rather than followed:
+    /// refresh tokens and passwords must never reach a foreign project.
+    /// "" on records written before the pin existed.
+    /// </summary>
+    public string ProjectUrl { get; set; } = "";
+
+    /// <summary>
     /// The explicit "protection off" latch — set only by a gated
     /// <c>auth signout</c>, cleared by any real sign-in. Persisted inside
     /// the attested record so it survives restarts AND can't be flipped in
@@ -51,7 +59,7 @@ internal sealed class AccountRecord
     /// the server, verifier derived locally from the password in hand.
     /// </summary>
     public static AccountRecord Create(string userId, string email,
-        ReadOnlySpan<char> password)
+        ReadOnlySpan<char> password, string? projectUrl = null)
     {
         byte[] salt = RandomNumberGenerator.GetBytes(VerifierSaltBytes);
         byte[] hash = Derive(password, salt, VerifierIterationsCurrent);
@@ -62,6 +70,7 @@ internal sealed class AccountRecord
             VerifierSalt = Convert.ToBase64String(salt),
             VerifierHash = Convert.ToBase64String(hash),
             VerifierIterations = VerifierIterationsCurrent,
+            ProjectUrl = projectUrl?.TrimEnd('/') ?? "",
         };
     }
 

@@ -21,6 +21,7 @@ public class TrayFlyoutTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     public void Dispose()
@@ -28,6 +29,7 @@ public class TrayFlyoutTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     /// <summary>An account-bound install with no session: Gating, not Authorized.</summary>

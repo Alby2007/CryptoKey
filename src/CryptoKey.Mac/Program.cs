@@ -31,7 +31,7 @@ internal static class Program
             string url = args[0];
             if (IpcClient.Send("deeplink " + url, 600) != null)
                 return 0;
-            return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+            return Guard(DevFlags.ParseDev(args),
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                 headless: false, openDashboard: true, deepLink: url);
         }
@@ -39,7 +39,7 @@ internal static class Program
         // Bare `cryptokey` (optionally --dev/--takeover/--headless) = the
         // desktop app. Avalonia tier by default; --headless forces the pump.
         if (args.Length == 0 || args[0].StartsWith("--"))
-            return Guard(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+            return Guard(DevFlags.ParseDev(args),
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                 args.Contains("--headless", StringComparer.OrdinalIgnoreCase),
                 openDashboard: true);
@@ -55,7 +55,7 @@ internal static class Program
                 // Hidden dev smoke: engage the real lock surface (tap +
                 // capture + windows) for a few seconds, then release.
                 // --dev arms the panic combo; --headless skips the windows.
-                return UiTest(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                return UiTest(DevFlags.ParseDev(args),
                     args.Contains("--headless", StringComparer.OrdinalIgnoreCase));
             case "install":
                 return MacInstall.Install();
@@ -360,7 +360,7 @@ internal static class Program
         Console.WriteLine("  cryptokey install       Copy to ~/Applications + LaunchAgent autostart");
         Console.WriteLine("  cryptokey uninstall     Remove the LaunchAgent (binary stays)");
         Console.WriteLine();
-        Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Opt+Shift+F12");
+        Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Opt+Shift+F12 (debug builds only)");
         Console.WriteLine("  --headless         run without windows/tray (capture+tap only)");
         Console.WriteLine("  NOTE: the lock needs Accessibility permission (event tap) —");
         Console.WriteLine("        approve the prompt in Privacy & Security → Accessibility.");

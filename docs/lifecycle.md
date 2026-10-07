@@ -260,7 +260,8 @@ freeze           —   —   15s  30s  60s  120s 240s 300s (cap)
 Enforced inside `WH_KEYBOARD_LL` — the hook returns 1 before buffering,
 so input during a freeze is eaten, not counted. The panic combo is checked
 before the gate. `LockScreen`/`LockForm` paints the amber countdown from
-`_cooldownUntil`; the counter is in-memory and dies with the lock session.
+`_cooldownUntil`; the counter persists in sealed `throttle.dat` — a
+proven unlock (key or phrase) is the only reset, not a restart.
 
 ## Launch routing — the account gate
 

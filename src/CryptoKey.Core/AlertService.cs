@@ -12,11 +12,27 @@ internal static class AlertService
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(4) };
     private static int _failureLogged;
 
+    /// <summary>
+    /// L4 — only absolute https URLs are alert targets: the payload carries
+    /// the machine name and the lock/tamper timeline; a plaintext POST
+    /// hands that to any network watcher (and a planted http URL would
+    /// have done exactly that).
+    /// </summary>
+    public static bool IsAllowedUrl(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out Uri? u)
+           && u.Scheme == Uri.UriSchemeHttps;
+
     /// <summary>Queue an event push. "" url = alerting off. Never throws.</summary>
     public static void Send(string url, string title, string body, Action<string>? log = null)
     {
         if (string.IsNullOrWhiteSpace(url))
             return;
+        if (!IsAllowedUrl(url))
+        {
+            if (Interlocked.Exchange(ref _failureLogged, 1) == 0)
+                log?.Invoke("Alert URL must be https://… — event dropped.");
+            return;
+        }
         _ = Task.Run(async () =>
         {
             try

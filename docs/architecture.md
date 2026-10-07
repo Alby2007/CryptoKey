@@ -110,6 +110,7 @@ writes, PBKDF2) is pushed off it, because a stalled hook callback hits
 | Registry config backup | `HKCU\Software\CryptoKey\Config` | Third config copy (same JSON, REG_SZ) — survives a folder wipe; Load falls through to it and rewrites the files |
 | `session.dat` | `%APPDATA%\CryptoKey\` | Supabase bearer pair, protector-sealed (DPAPI/Keychain, entropy-tagged) — the account session, never in `config.json` |
 | `account.pending.json` | `%APPDATA%\CryptoKey\` | Pre-enrollment account staging — created before `config.json` exists, folded into `KeyConfig.Account` at commit |
+| `throttle.dat` | `%APPDATA%\CryptoKey\` | Phrase + auth attempt ladders, protector-sealed — persists the counters across restarts so a relaunch can't refund the brute-force budget |
 | `supabase.json` | beside the exe | `{projectUrl, anonKey}` — the Supabase project wiring (anon key is public-by-design); missing = auth UI banners, guard unaffected |
 | `cryptokey://` | `HKCU\Software\Classes\cryptokey` | URL scheme → the running exe (deep links forward over the pipe); macOS: a minimal `CryptoKey.app` wrapper + `lsregister` |
 | `captures\*.cap` | `%APPDATA%\CryptoKey\captures\` | Webcam tamper stills (opt-in) — DPAPI-sealed per user+machine, newest 50 kept |
@@ -240,7 +241,7 @@ The tree splits into a platform-neutral core (`src/CryptoKey.Core`,
 | `Auth/AuthService.cs` | The one account authority — GoTrue REST (signup/token/recover/verify/user/logout), session lifecycle, offline-grace verifier, local throttle, the `Authorize` gate for mutating ops |
 | `Auth/AccountRecord.cs` | `config.json`'s account section — identity + PBKDF2-SHA256(600k) verifier, inside the keyfile attestation MAC via `\|accounthash=` |
 | `Auth/TokenStore.cs` | `session.dat` — protector-sealed bearer persistence, corrupt/foreign → no session |
-| `Auth/SupabaseConfig.cs` | `supabase.json` loader — env override → beside-exe → beside-config |
+| `Auth/SupabaseConfig.cs` | `supabase.json` loader — beside-exe only in Release; the env override + beside-config fallbacks are debug-build dev seams. Bound installs also pin the project URL in the attested account record — a swapped file is refused, not followed |
 
 ### `src/CryptoKey.Win` — Windows host (`cryptokey.exe`)
 

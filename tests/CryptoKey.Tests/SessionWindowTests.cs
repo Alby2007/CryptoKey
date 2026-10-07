@@ -28,6 +28,7 @@ public class SessionWindowTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     public void Dispose()
@@ -37,6 +38,7 @@ public class SessionWindowTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     private sealed class ScriptHandler : HttpMessageHandler

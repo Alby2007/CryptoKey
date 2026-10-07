@@ -74,9 +74,9 @@ internal sealed class AuthService
     private DateTime _gateUntil;   // ordinary gated ops pass while open
     private DateTime _freshUntil;  // destructive ops pass while open
     private bool _attestationClean = true;
-    private int _failures;           // local attempt limiter (in-memory speedbump)
-    private DateTime _lockedUntil;
-    private int _cooldownSeconds = 30;
+    // L6 — the attempt limiter lives in ThrottleStore.Shared (DPAPI-sealed
+    // on disk): a guard restart no longer hands a brute-forcer a fresh
+    // ladder. _sync still guards the in-memory view of it.
     private bool _refreshing;
 
     /// <summary>How long a verified sign-in authorizes gated ops.
@@ -113,6 +113,25 @@ internal sealed class AuthService
 
     /// <summary>supabase.json parsed — without it no online flow can run.</summary>
     public bool Configured => _cfg != null;
+
+    /// <summary>
+    /// L3 — a bound install's trust root can't move: the record pins the
+    /// Supabase project it was created under, so a swapped supabase.json is
+    /// detected, not followed — refresh tokens and passwords must never
+    /// reach a foreign project. The pin rides inside the keyfile-attested
+    /// record, so editing it off-app trips attestation like any canon
+    /// field. Unbound installs have nothing to compare — the file itself
+    /// is the root until first bind.
+    /// </summary>
+    public bool TrustRootMismatch
+        => _cfg != null
+           && Record?.ProjectUrl is { Length: > 0 } pinned
+           && !string.Equals(pinned, _cfg.ProjectUrl.TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase);
+
+    private const string TrustRootError =
+        "supabase.json points at a different project than this install is " +
+        "bound to — restore the original file or relink the account";
 
     /// <summary>
     /// The bound account record — config-attested once enrolled, the
@@ -218,7 +237,8 @@ internal sealed class AuthService
         {
             lock (_sync)
             {
-                double left = (_lockedUntil - DateTime.UtcNow).TotalSeconds;
+                double left = (ThrottleStore.Shared.AuthLockedUntilUtc
+                    - DateTime.UtcNow).TotalSeconds;
                 return Math.Max(0, (int)Math.Ceiling(left));
             }
         }
@@ -304,13 +324,16 @@ internal sealed class AuthService
     {
         lock (_sync)
         {
-            _failures++;
-            if (_failures >= 5)
+            ThrottleState t = ThrottleStore.Shared;
+            t.AuthFailures++;
+            if (t.AuthFailures >= 5)
             {
-                _lockedUntil = DateTime.UtcNow.AddSeconds(_cooldownSeconds);
-                _cooldownSeconds = Math.Min(_cooldownSeconds * 2, 900);
-                _failures = 0;
+                t.AuthLockedUntilUtc =
+                    DateTime.UtcNow.AddSeconds(t.AuthCooldownSeconds);
+                t.AuthCooldownSeconds = Math.Min(t.AuthCooldownSeconds * 2, 900);
+                t.AuthFailures = 0;
             }
+            ThrottleStore.Save(); // inside _sync — mutations are serialized
         }
     }
 
@@ -318,9 +341,11 @@ internal sealed class AuthService
     {
         lock (_sync)
         {
-            _failures = 0;
-            _cooldownSeconds = 30;
-            _lockedUntil = default;
+            ThrottleState t = ThrottleStore.Shared;
+            t.AuthFailures = 0;
+            t.AuthCooldownSeconds = 30;
+            t.AuthLockedUntilUtc = default;
+            ThrottleStore.Save();
         }
     }
 
@@ -507,10 +532,12 @@ internal sealed class AuthService
             }
             AccountRecord? prev = _record;
             if (user is { } u)
-                _record = AccountRecord.Create(u.Id, u.Email, password);
+                _record = AccountRecord.Create(u.Id, u.Email, password,
+                    _cfg?.ProjectUrl);
             else if (emailFallback != null)
                 _record = AccountRecord.Create(
-                    _record?.UserId ?? "unknown", emailFallback, password);
+                    _record?.UserId ?? "unknown", emailFallback, password,
+                    _cfg?.ProjectUrl);
             try { PersistLocked(); }
             catch (Exception ex)
             {
@@ -535,6 +562,8 @@ internal sealed class AuthService
     {
         if (!Configured)
             return AuthResult.Fail("Supabase isn't configured (supabase.json).");
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError);
         if (Throttled(out string throttleErr))
             return AuthResult.Fail(throttleErr);
         try
@@ -587,6 +616,8 @@ internal sealed class AuthService
         }
         if (!Configured)
             return OfflineOr(email, password);
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError); // fail loudly, not offline-quiet
         if (Throttled(out string throttleErr))
             return AuthResult.Fail(throttleErr);
         try
@@ -634,7 +665,7 @@ internal sealed class AuthService
                         AccountRecord? prev = _record;
                         _record = AccountRecord.Create(
                             _record?.UserId ?? "unknown",
-                            email.Trim(), password);
+                            email.Trim(), password, _cfg?.ProjectUrl);
                         try { PersistLocked(); }
                         catch (Exception ex)
                         {
@@ -683,6 +714,8 @@ internal sealed class AuthService
     {
         AuthTokens? tokens;
         lock (_sync) tokens = _tokens;
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError); // the refresh token stays home
         if (!Configured || tokens is not { Renewable: true })
             return AuthResult.Fail("no session to refresh");
         try
@@ -730,6 +763,8 @@ internal sealed class AuthService
     {
         if (!Configured)
             return AuthResult.Fail("Supabase isn't configured (supabase.json).");
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError);
         try
         {
             using var req = Json(Req(HttpMethod.Post, "/recover"), new { email });
@@ -761,6 +796,8 @@ internal sealed class AuthService
     {
         if (!Configured)
             return AuthResult.Fail("Supabase isn't configured (supabase.json).");
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError);
         try
         {
             using var req = Json(Req(HttpMethod.Post, "/verify"),
@@ -800,7 +837,8 @@ internal sealed class AuthService
             lock (_sync)
             {
                 AccountRecord? prev = _record;
-                _record = AccountRecord.Create(user.Value.Id, user.Value.Email, newPassword);
+                _record = AccountRecord.Create(user.Value.Id, user.Value.Email,
+                    newPassword, _cfg?.ProjectUrl);
                 try { PersistLocked(); }
                 catch (Exception ex)
                 {
@@ -837,6 +875,8 @@ internal sealed class AuthService
             return AuthResult.Fail("current password is wrong");
         if (!Configured)
             return AuthResult.Fail("Supabase isn't configured (supabase.json).");
+        if (TrustRootMismatch)
+            return AuthResult.Fail(TrustRootError);
 
         AuthedResult send = await AuthedSend(() =>
             Json(Req(HttpMethod.Put, "/user"), new { password = newPassword }));
@@ -907,7 +947,8 @@ internal sealed class AuthService
         SessionEnded?.Invoke();
         if (armedBefore && !ArmedForAutoLock)
             ArmingChanged?.Invoke(false);
-        if (Configured && tokens?.AccessToken is { Length: > 0 } access)
+        if (Configured && !TrustRootMismatch
+            && tokens?.AccessToken is { Length: > 0 } access)
         {
             try
             {

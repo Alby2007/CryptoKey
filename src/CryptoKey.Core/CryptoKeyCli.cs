@@ -108,7 +108,7 @@ internal static class CryptoKeyCli
                 return Status();
             case "guard":
                 return host.RunGuard(
-                    args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                    DevFlags.ParseDev(args),
                     args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                     args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
             case "open":
@@ -162,7 +162,7 @@ internal static class CryptoKeyCli
                     && args[1].Equals("--parent", StringComparison.OrdinalIgnoreCase)
                     && int.TryParse(args[2], out int guardPid))
                     return Watchdog.Run(guardPid,
-                        args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+                        DevFlags.ParseDev(args),
                         args.Contains("--classic", StringComparer.OrdinalIgnoreCase));
                 Console.WriteLine("usage: cryptokey watchdog --parent <pid>");
                 return 1;

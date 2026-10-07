@@ -24,6 +24,7 @@ public class UnenrollUiTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     public void Dispose()
@@ -31,6 +32,7 @@ public class UnenrollUiTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     private static IEnumerable<Button> Buttons(Visual root)

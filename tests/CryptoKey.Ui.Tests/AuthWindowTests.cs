@@ -20,6 +20,7 @@ public class AuthWindowTests : IDisposable
         AuthService.SetCurrent(new AuthService(null, null)); // unconfigured
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     public void Dispose()
@@ -27,6 +28,7 @@ public class AuthWindowTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
     }
 
     private static AuthWindow Show(AuthMode mode, Func<bool>? keyPresent = null,

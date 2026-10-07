@@ -16,6 +16,7 @@ public class UnenrollTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
         TestPlatform.TestUsbEnumerator.Disks.Clear();
     }
 
@@ -24,6 +25,7 @@ public class UnenrollTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
         TestPlatform.TestUsbEnumerator.Disks.Clear();
     }
 

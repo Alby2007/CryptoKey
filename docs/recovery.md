@@ -87,7 +87,8 @@ flock + watchdog + `KeepAlive=Crashed`. See [macos.md](macos.md).
 ## The escape hatches, ranked
 
 1. **Recovery phrase** — normal failsafe (unless `KeyOnly`, by design).
-2. **Panic combo** `Ctrl+Alt+Shift+F12` — `--dev` only; disengages first, then exits.
+2. **Panic combo** `Ctrl+Alt+Shift+F12` — `--dev` only, and debug builds
+   only (a shipped Release binary never arms it); disengages first, then exits.
 3. **Watchdog** — automatic on guard death while secure-locked.
 4. **`cryptokey --release-desktop`** — manual desktop rescue, independent of IPC/hooks; also restores lock policies. Reachable while locked only from another logged-in session (Switch user) — after a reboot, Win+R works.
 5. **`--classic`** — skips the desktop machinery entirely on next launch.

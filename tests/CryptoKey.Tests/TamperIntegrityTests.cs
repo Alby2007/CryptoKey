@@ -15,6 +15,7 @@ public class TamperIntegrityTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
         TestPlatform.TestUsbEnumerator.Disks.Clear();
     }
 
@@ -23,6 +24,7 @@ public class TamperIntegrityTests : IDisposable
         AuthService.SetCurrent(null);
         TokenStore.Clear();
         AuthService.PendingStore.Clear();
+        ThrottleStore.Clear();
         TestPlatform.TestUsbEnumerator.Disks.Clear();
     }
 
@@ -56,6 +58,16 @@ public class TamperIntegrityTests : IDisposable
         cfg.Guard.IdleLockMinutes += 7;
         mon.FireChecked(disk);
         Assert.Contains("integrity=dirty", svc.DispatchCommand("status"));
+
+        // The first verify edge kicked off a background rotation — under
+        // StrictTamper (L2 default) a mid-rotation poll reads the drive as
+        // stale and unverifies it. Spin until the rewrite lands and the
+        // key verifies current again.
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            mon.FireChecked(disk);
+            return svc.DispatchCommand("status").Contains("keyVerified=True");
+        }, TimeSpan.FromSeconds(15)), "rotated keyfile never re-verified");
 
         // Holding the key alone doesn't heal it — accept is explicit. The
         // re-attest rewrite lands on a later poll (the write is async), so

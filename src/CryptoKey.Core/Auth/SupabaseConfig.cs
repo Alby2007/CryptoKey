@@ -30,18 +30,29 @@ internal sealed class SupabaseConfig
            && AnonKey.Length >= 20;
 
     /// <summary>
-    /// Resolution order: <c>CRYPTOKEY_SUPABASE_JSON</c> (tests/relocated
-    /// installs), then supabase.json beside the exe, then beside config.json.
+    /// Release builds resolve supabase.json ONLY beside the executable —
+    /// the shipped install dir. The env-var override and the config-dir
+    /// fallback exist for tests/dev and are compiled out of Release: both
+    /// are user-writable paths, and this file is the auth trust root — a
+    /// swapped copy would steer every credential somewhere else. Bound
+    /// installs additionally pin the project in the account record
+    /// (<see cref="AuthService.TrustRootMismatch"/>).
     /// </summary>
     public static string CandidatePath()
     {
+#if DEBUG
         if (Environment.GetEnvironmentVariable("CRYPTOKEY_SUPABASE_JSON")
                 is { Length: > 0 } overridePath)
             return overridePath;
+#endif
         string besideExe = Path.Combine(AppContext.BaseDirectory, "supabase.json");
         if (File.Exists(besideExe))
             return besideExe;
+#if DEBUG
         return Path.Combine(ConfigStore.ConfigDir, "supabase.json");
+#else
+        return besideExe; // missing — TryLoad reports "not configured"
+#endif
     }
 
     /// <summary>

@@ -77,7 +77,8 @@ the windows render dot counts and status text only, never characters.
 `cryptokey uitest` engages the real surface for 3s without enrollment.
 
 Unlock: reinsert the key (serial + keyfile verify, same ratchet) or type
-the recovery phrase. `--dev` arms the panic combo `Ctrl+Opt+Shift+F12`.
+the recovery phrase. `--dev` arms the panic combo `Ctrl+Opt+Shift+F12`
+(debug builds only — Release ignores the flag).
 
 ## Not yet / won't
 

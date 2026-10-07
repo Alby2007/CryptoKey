@@ -81,7 +81,7 @@ internal static class Program
 
         // Bare `cryptokey` (optionally `--dev`) = desktop app: guard + dashboard.
         if (args.Length == 0 || args[0].StartsWith("--"))
-            return Gui(args.Contains("--dev", StringComparer.OrdinalIgnoreCase),
+            return Gui(DevFlags.ParseDev(args),
                 args.Contains("--takeover", StringComparer.OrdinalIgnoreCase),
                 args.Contains("--classic", StringComparer.OrdinalIgnoreCase),
                 deepLink: null);
@@ -323,9 +323,10 @@ internal static class Program
         string installedExe = Path.Combine(targetDir, "cryptokey.exe");
 
         // Flags the relaunch/handoff paths forward so a --dev guard doesn't
-        // silently lose its panic combo.
+        // silently lose its panic combo. (ParseDev is Release-compiled-out —
+        // a shipped build never forwards the flag either.)
         string modeFlags =
-            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
+            (DevFlags.ParseDev(args) ? " --dev" : "") +
             (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
 
         bool relaunchInstalled = false;
@@ -509,7 +510,7 @@ internal static class Program
         string backupDir = targetDir + ".prev";
         string installedExe = Path.Combine(targetDir, "cryptokey.exe");
         string modeFlags =
-            (args.Contains("--dev", StringComparer.OrdinalIgnoreCase) ? " --dev" : "") +
+            (DevFlags.ParseDev(args) ? " --dev" : "") +
             (args.Contains("--classic", StringComparer.OrdinalIgnoreCase) ? " --classic" : "");
 
         Console.WriteLine($"CryptoKey {CryptoKeyCli.BuildStamp} — applying update to {targetDir}");
@@ -1059,7 +1060,7 @@ internal static class Program
         Console.WriteLine("  cryptokey update        Check for a newer signed release");
         Console.WriteLine("  cryptokey update --apply  Download, verify + install it (asks the live guard)");
         Console.WriteLine();
-        Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12");
+        Console.WriteLine("  --dev              enables emergency exit combo Ctrl+Alt+Shift+F12 (debug builds only)");
         Console.WriteLine("  --classic          force the overlay lock (skip the private desktop)");
         Console.WriteLine("  --release-desktop  escape hatch: switch input back to the Default");
         Console.WriteLine("                     desktop if the session ever strands on the lock desktop");
