@@ -30,6 +30,13 @@ internal sealed class EnrollmentFlow
     /// <summary>The currently enrolled config, if any (re-enroll keeps its guard prefs).</summary>
     public KeyConfig? Existing { get; }
 
+    /// <summary>
+    /// Test/wizard hook: returns the live guard's `vault status` reply, or
+    /// null when no guard answers. Defaults to a real IPC probe.
+    /// </summary>
+    internal Func<string?> VaultStatusProbe { get; set; }
+        = () => IpcClient.Send("vault status", 1500);
+
     public UsbDisk? Disk { get; private set; }
     public string? Volume { get; private set; }
 
@@ -123,6 +130,20 @@ internal sealed class EnrollmentFlow
         if (!_confirmed)
             return new(false, "The recovery phrase hasn't been confirmed.", null, null, warnings);
 
+        // Re-enrollment with a vault image on disk: the image's key slots are
+        // wrapped under the CURRENT device secret — the new secret unwraps
+        // nothing. The image survives only if a live guard holds the vault
+        // open (the next verify re-wraps the slots onto the new key). Any
+        // other outcome — sealed, dead, corrupt, or no guard to ask — means
+        // committing now would brick the vault silently: refuse instead.
+        if (Existing != null)
+        {
+            string img = string.IsNullOrWhiteSpace(Existing.Guard.VaultImagePath)
+                ? VaultService.DefaultImagePath : Existing.Guard.VaultImagePath;
+            if (File.Exists(img) && !VaultOpenForReenroll(out string vErr))
+                return new(false, vErr, null, null, warnings);
+        }
+
         byte[] secret = RandomNumberGenerator.GetBytes(SecretBytes);
         try
         {
@@ -137,6 +158,12 @@ internal sealed class EnrollmentFlow
             // config (and its epoch), so re-enroll must carry it too or an
             // old vault image could replay below its attested seq.
             fresh.VaultEpoch = Existing?.VaultEpoch ?? 0;
+            // A fresh secret IS a new generation: carry the counter forward.
+            // Restarting at 1 could collide with the gen an open vault last
+            // verified — the re-wrap that keeps its slots alive fires only
+            // on a gen change, so an equal gen would silently brick it.
+            if (Existing != null)
+                fresh.RotationCount = Existing.RotationCount + 1;
             configure?.Invoke(fresh.Guard);
 
             string keyPath = KeyVerifier.KeyFilePath(Volume);
@@ -190,5 +217,37 @@ internal sealed class EnrollmentFlow
         {
             CryptographicOperations.ZeroMemory(secret);
         }
+    }
+
+    /// <summary>
+    /// Re-enroll is vault-safe only while the vault is OPEN — the volume key
+    /// must be in memory for the slot re-wrap that lands on the next verify.
+    /// Accepts the guard's `vault status` reply; unsealed/mounted/needsdriver
+    /// all mean the volume key is held. Anything else (or no reply) refuses.
+    /// </summary>
+    private bool VaultOpenForReenroll(out string error)
+    {
+        error = "";
+        string? reply = VaultStatusProbe();
+        const string guidance = "open the vault first (insert the current " +
+            "key, then `cryptokey vault unseal`), or delete it with " +
+            "`cryptokey vault delete` — re-enrolling now would orphan the image";
+        if (reply != null)
+        {
+            int i = reply.IndexOf("state=", StringComparison.Ordinal);
+            if (i >= 0)
+            {
+                string state = reply[(i + "state=".Length)..].Split(' ')[0];
+                if (state is "unsealed" or "mounted" or "needsdriver")
+                    return true;
+                error = $"a vault image exists and the vault is {state} — " + guidance;
+                return false;
+            }
+            error = "couldn't read the vault state — " + guidance;
+            return false;
+        }
+        error = "a vault image exists and no guard is running to re-wrap it — " +
+            "start the app, " + guidance;
+        return false;
     }
 }

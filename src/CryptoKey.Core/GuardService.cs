@@ -592,8 +592,8 @@ internal sealed class GuardService : IDisposable
 
     /// <summary>
     /// `unenroll` — remove the key binding while keeping the install.
-    /// Phrase-verified (ownership proof — the phrase is also what keeps
-    /// vault recovery and manual-lock escape possible), refused while
+    /// Phrase-verified (ownership proof — the kept phrase still escapes a
+    /// manual lock), refused while
     /// locked (removing the key there is just an unlock bypass), and
     /// blocked while a vault image exists (vault content is keyed to this
     /// enrollment — delete the vault first). Clears ONLY the key material;
@@ -968,7 +968,8 @@ internal sealed class GuardService : IDisposable
     private string DispatchVault(string[] parts)
     {
         if (parts.Length < 2)
-            return "err usage: vault status|mount|unmount|seal|unseal|create [mb]";
+            return "err usage: vault status|mount|unmount|seal|unseal|" +
+                "create [mb]|rekey|delete|accept-rollback|tpm-bind|tpm-unbind|recover";
         switch (parts[1].ToLowerInvariant())
         {
             case "status":
@@ -1008,6 +1009,11 @@ internal sealed class GuardService : IDisposable
                     ? m : _config.Guard.VaultSizeMb;
                 return _vault.TryCreate(mb, out string cErr)
                     ? "ok vault created" : $"err {cErr}";
+            case "rekey":
+                // Rotate the volume key — forward secrecy for vault data.
+                // Needs the vault open; dismounts + reopens around the swap.
+                return _vault.TryRekey(out string kErr)
+                    ? "ok vault rekeyed — volume key rotated" : $"err {kErr}";
             case "delete":
                 return _vault.TryDeleteImage(out string dErr)
                     ? "ok vault deleted" : $"err {dErr}";

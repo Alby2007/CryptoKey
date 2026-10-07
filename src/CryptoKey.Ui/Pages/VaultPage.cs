@@ -32,6 +32,7 @@ internal sealed class VaultPage : Page
     private readonly Button _close;
 
     private readonly ToggleSwitch _autoMount;
+    private readonly Button _rekey;
     private readonly SettingCombo _letter = new() { MinWidth = 110 };
     private readonly TextBlock _imagePath = Kit.Txt("", "mono", "dim");
     private readonly Slider _idle = new() { Minimum = 0, Maximum = 60, SmallChange = 1, TickFrequency = 1, IsSnapToTickEnabled = true, Width = 220 };
@@ -63,7 +64,7 @@ internal sealed class VaultPage : Page
             Content = Kit.PageScroll(Kit.V(16,
                 Kit.PageHeader("Vault", "An encrypted drive that only exists while your key is in."), b));
             _ringBox = _createRow = _actions = new StackPanel();
-            _create = _mount = _open = _close = _tpmBtn = new Button();
+            _create = _mount = _open = _close = _tpmBtn = _rekey = new Button();
             _accept = _unbind = _reformat = _delete = new HoldButton("", IconData.Close);
             _autoMount = new ToggleSwitch();
             _tpmCard = new Border();
@@ -89,6 +90,7 @@ internal sealed class VaultPage : Page
         _accept.Confirmed += AcceptRollback;
         _open = Kit.Btn("Open in file manager", IconData.Folder, "", OpenDrive);
         _close = Kit.Btn("Close vault", IconData.Close, "ghost", CloseVault);
+        _rekey = Kit.Btn("Rekey", IconData.Refresh, "", Rekey);
         _actions = Kit.H(10, _mount, _accept, _open, _close);
 
         var heroText = Kit.V(10, _badge, _title, _detail, _driver, _createRow, _actions);
@@ -139,7 +141,10 @@ internal sealed class VaultPage : Page
                 () => Ctx.Host.RevealFile(_facts?.ImagePath ?? ""))),
             _imagePath,
             Kit.Row("Seal after idle", "Dismount and drop keys after this much inactivity.",
-                Kit.H(12, _idle, _idleText)));
+                Kit.H(12, _idle, _idleText)),
+            Kit.Row("Rotate volume key",
+                "Re-encrypt every chunk under a fresh key — old ciphertext snapshots die. The vault re-opens around the swap.",
+                _rekey));
         _imagePath.Margin = new Thickness(0, -6, 0, 12);
 
         // ---- Machine binding ----
@@ -230,6 +235,7 @@ internal sealed class VaultPage : Page
             _open.IsEnabled = v.OpenEnabled;
             Kit.SetLabel(_open, v.OpenEnabled ? $"Open {f.MountPoint}" : "Open in file manager", IconData.Folder);
             _close.IsEnabled = v.CloseEnabled;
+            _rekey.IsEnabled = v.CloseEnabled; // same gate: the vault is open
 
             _autoMount.IsChecked = f.AutoMount;
             _autoMount.IsEnabled = v.AutoMountEnabled;
@@ -351,6 +357,17 @@ internal sealed class VaultPage : Page
         // verify tick; Unseal (or a key pull/reinsert) brings it back.
         string? err = await Client.Query<string?>((s, _) => s.Vault.TrySeal(out string e) ? null : e);
         Report(err, "Vault closed — Unseal or reinsert the key to reopen.");
+        Refresh();
+    }
+
+    private async void Rekey()
+    {
+        // Forward secrecy: every chunk + the manifest re-encrypt under a
+        // fresh volume key; the vault dismounts and re-opens around the
+        // file swap. Non-destructive — no hold needed.
+        _rekey.IsEnabled = false;
+        string? err = await Client.Query<string?>((s, _) => s.Vault.TryRekey(out string e) ? null : e);
+        Report(err is null ? null : $"Rekey failed — {err}", "Vault rekeyed — volume key rotated.");
         Refresh();
     }
 

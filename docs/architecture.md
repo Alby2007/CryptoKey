@@ -130,10 +130,13 @@ header page (4 KiB) ×2 — primary at 0, identical shadow at 4096
   manifestSeq[2] u64 | chunkCount u32 | chunkRegionBase u64
   v3 extension (starts at the old @192 checksum offset):
     extLen u16 | tpmPepperBlob 256B | recPepperBlob 64B | recIters u32
-    headerCheck 8B — truncated SHA-256 of page[0..518); a torn-but-plausible
+  v4 extension (v4 images extend the region once more):
+    headerMac 32B — HMAC-SHA256(volKey, page[0..518)) — every header field
+                    authenticates; the checksum alone only proves "not torn"
+    headerCheck 8B — truncated SHA-256 of page[0..550); a torn-but-plausible
                      primary rejects and the shadow carries the open
-  (v2 images keep the @192 check and no extension — reads accept both;
-   the next header write upgrades to v3 in place)
+  (v2/v3 images read unchanged and upgrade on the next header write; the
+   extLen field slides the checksum so any future span still parses)
 manifest slot A + slot B (4 MiB each, fixed)
   magic u32 | seq u64 | plainLen u32 | nonce 12B | tag 16B | ct
 chunk region (fills the rest of the image)
@@ -155,9 +158,21 @@ chunk region (fills the rest of the image)
   is rebuilt from the node tree — allocated chunks the manifest forgot
   reclaim, garbage free entries clamp, and a doubly-referenced chunk
   fails the open as Corrupt instead of double-freeing.
-- **Chunks** are write-through, independently framed; chunk index is AAD.
-  Reads on tag failure raise an I/O error (`CrcError` at the Dokan seam),
-  never plaintext.
+- **Chunks** are write-through, independently framed; AAD binds index AND
+  a per-chunk **write generation** kept in the (authenticated, seq-fenced)
+  manifest — a stale frame swapped back into its slot rejects on the tag.
+  Generation 0 is the legacy index-only AAD, so pre-generation images read
+  unchanged; every new write bumps the generation. Reads on tag failure
+  raise an I/O error (`CrcError` at the Dokan seam), never plaintext.
+- **Header MAC** (v4): `HMAC-SHA256(volKey, page[0..mac))` authenticates the
+  slots, seqs, flags, and pepper blobs — the old unkeyed checksum stays as
+  the torn-write check. Verified on open after slot unwrap; a forged or
+  field-edited page fails as `Tampered` rather than opening misconfigured.
+- **Rekey** (`vault rekey`, needs the vault open): the volume key itself
+  rotates — the whole image is re-encrypted into a `<img>.rekey` sibling,
+  then swapped in (`<img>.rekey-bak` covers the mid-swap crash; open paths
+  settle the artifacts). Slots re-wrap under the current secret, the
+  manifest seq rides forward, and generation fencing carries over.
 - **Secrets** live in `PinnedBuffer`s (GC can't move them); the service
   copies caller buffers in, zeroes them out, and zeroes everything on
   `KeyGone`/dispose. Derived KEKs are scoped arrays, zeroed after each use.

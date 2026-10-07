@@ -162,7 +162,11 @@ internal sealed class VaultService : IDisposable
         lock (this)
         {
             bool retryOpen = false;
-            if (_secretGen == gen && _secret != null)
+            // "Same secret" is a byte comparison, not a gen compare — a
+            // re-enroll whose counter collides with the last fed gen must
+            // still take the rewrap path below or the vault bricks.
+            if (_secret != null
+                && CryptographicOperations.FixedTimeEquals(_secret.Bytes, secret))
             {
                 // Same secret re-verifying — normally a no-op. A manual
                 // Close-vault holds for the rest of the session — the
@@ -718,6 +722,85 @@ internal sealed class VaultService : IDisposable
             }
             KickAutoMount(_opSeq);
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Rotate the volume key itself — forward secrecy for vault data: every
+    /// chunk and the manifest re-encrypt under a fresh key, and the slots
+    /// re-wrap under the current device secret (+pepper on bound images).
+    /// The copy builds beside the image (<c>.rekey</c>) and swaps in — a
+    /// crash mid-op leaves the prior image recoverable via
+    /// <c>.rekey-bak</c>, which the open paths settle automatically.
+    /// Requires the vault open (the volume key is the plaintext).
+    /// </summary>
+    public bool TryRekey(out string error)
+    {
+        lock (this)
+        {
+            error = "";
+            if (_vol == null || _secret == null)
+            {
+                error = "unlock the vault first";
+                return false;
+            }
+            if (_vol.TpmBound && _pepper == null)
+            {
+                // Can't happen through the open paths (a bound image needs
+                // the pepper to open, and it's retained) — refuse anyway so
+                // the new slots never wrap under an unpeppered KEK.
+                error = "machine pepper not held — re-open the vault first";
+                return false;
+            }
+            string img = ImagePath, tmp = img + ".rekey", bak = img + ".rekey-bak";
+            VaultVolume? fresh = null;
+            byte[]? kek = null;
+            try
+            {
+                DismountLocked(); // the image file must be swappable
+                ++_opSeq;         // pending open/mount against the old vol drops
+                _vol.RekeyTo(tmp, _secret.Bytes, _pepper?.Bytes, _secretGen);
+                _vol.Dispose();
+                _vol = null;
+                File.Move(img, bak, overwrite: true);
+                File.Move(tmp, img);
+                VaultHeader? hdr = VaultVolume.PeekHeader(img);
+                kek = VaultFormat.DeriveKek(_secret.Bytes, hdr!.Salt, _pepper?.Bytes);
+                if (!VaultVolume.TryOpen(img, kek, out fresh,
+                        out VaultOpenError oe, out _))
+                    throw new VaultException($"rekeyed image won't open ({oe})");
+                _vol = fresh;
+                fresh = null;
+                try { File.Delete(bak); } catch (Exception) { }
+                SetState(VaultState.Unsealed);
+                KickAutoMount(_opSeq);
+                _log("Vault rekeyed — the volume key rotated; " +
+                    "every chunk re-encrypted under it.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                fresh?.Dispose();
+                error = ex.Message;
+                // Mid-swap crash geometry: restore the pre-rekey image if the
+                // main path is missing; the next probe settles the rest.
+                try
+                {
+                    if (!File.Exists(img) && File.Exists(bak))
+                        File.Move(bak, img);
+                }
+                catch (Exception) { }
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch (Exception) { }
+                if (_vol == null)
+                    SetState(ImageExists ? VaultState.Sealed : VaultState.NoImage);
+                _log($"Vault rekey failed ({ex.Message}) — prior image restored.");
+                return false;
+            }
+            finally
+            {
+                if (kek != null)
+                    CryptographicOperations.ZeroMemory(kek);
+            }
         }
     }
 

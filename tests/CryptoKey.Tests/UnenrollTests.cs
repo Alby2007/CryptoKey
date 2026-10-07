@@ -77,7 +77,7 @@ public class UnenrollTests : IDisposable
         Assert.NotNull(loaded);
         Assert.False(loaded!.Enrolled);
         Assert.Equal("a@b.c", loaded.Account?.Email);
-        // The kept phrase still verifies — manual lock + vault recovery need it.
+        // The kept phrase still verifies — the manual-lock escape needs it.
         Assert.True(ConfigStore.VerifyPassphrase(loaded, "passphrase-ok"));
 
         Assert.False(svc.Snapshot().Enrolled);

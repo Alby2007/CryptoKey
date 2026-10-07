@@ -26,6 +26,9 @@ internal enum VaultOpenError
     BadFormat,
     /// <summary>The KEK unwrapped no key slot — wrong-generation secret. Permanent.</summary>
     Sealed,
+    /// <summary>The v4 header MAC rejected — the page parses but was edited
+    /// after signing (checksums only catch tears, not tampering).</summary>
+    Tampered,
     /// <summary>Both manifest slots rejected — unrecoverable corruption.</summary>
     Corrupt,
     /// <summary>The image is TPM-bound and the pepper couldn't be recovered —
@@ -67,6 +70,7 @@ internal sealed class VaultVolume : IDisposable
     private readonly SortedDictionary<string, VaultNode> _nodes =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly SortedSet<int> _free = new();
+    private uint[] _gens;          // per-chunk-id write generations — sealed in the manifest
     private int _highWater;
     private ulong _manifestSeq;
     private bool _dirty;
@@ -77,6 +81,7 @@ internal sealed class VaultVolume : IDisposable
         _img = img;
         _volKey = volKey;
         _header = header;
+        _gens = new uint[(int)header.ChunkCount];
     }
 
     public string ImagePath => _img.Name;
@@ -110,11 +115,12 @@ internal sealed class VaultVolume : IDisposable
     /// </summary>
     public static VaultHeader? PeekHeader(string path, out VaultOpenError error)
     {
+        SettleRekeyArtifacts(path);
         try
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite);
-            VaultHeader? h = ReadHeaderEither(fs);
+            (VaultHeader? h, _) = ReadHeaderEither(fs);
             error = h == null ? VaultOpenError.BadFormat : VaultOpenError.None;
             return h;
         }
@@ -128,10 +134,37 @@ internal sealed class VaultVolume : IDisposable
     }
 
     /// <summary>
+    /// Rekey-swap cleanup — a crash mid-<see cref="RekeyTo"/>-swap can leave
+    /// <c>.rekey</c> (incomplete copy — discard) or <c>.rekey-bak</c>
+    /// (the pre-swap image — restore when the main file is missing, delete
+    /// when both exist: the swapped-in file is the fresher image).
+    /// </summary>
+    private static void SettleRekeyArtifacts(string path)
+    {
+        string tmp = path + ".rekey", bak = path + ".rekey-bak";
+        try
+        {
+            if (File.Exists(tmp))
+                File.Delete(tmp);
+        }
+        catch (Exception) { }
+        try
+        {
+            if (!File.Exists(path) && File.Exists(bak))
+                File.Move(bak, path);
+            else if (File.Exists(bak) && File.Exists(path))
+                File.Delete(bak); // crash between swap and delete — main is newer
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>
     /// Primary header page, falling back to the shadow copy — a torn
     /// WriteHeader leaves one intact page. Null only when both reject.
+    /// The raw page rides along for the keyed-MAC check in
+    /// <see cref="TryOpen"/> (v4+).
     /// </summary>
-    private static VaultHeader? ReadHeaderEither(FileStream fs)
+    private static (VaultHeader? Header, byte[]? Page) ReadHeaderEither(FileStream fs)
     {
         foreach (long at in new[] { 0L, VaultFormat.ShadowBase })
         {
@@ -141,14 +174,14 @@ internal sealed class VaultVolume : IDisposable
                 continue;
             try
             {
-                return VaultFormat.ReadHeader(page);
+                return (VaultFormat.ReadHeader(page), page);
             }
             catch (VaultException)
             {
                 // torn/garbage — try the other copy
             }
         }
-        return null;
+        return (null, null);
     }
 
     /// <summary>
@@ -238,10 +271,11 @@ internal sealed class VaultVolume : IDisposable
         PinnedBuffer? volKey = null;
         try
         {
+            SettleRekeyArtifacts(path);
             // FileShare.Read: read-only peeks (header/status probes from a
             // second process) are allowed; no second writer can ever open.
             fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-            VaultHeader? header = ReadHeaderEither(fs);
+            (VaultHeader? header, byte[]? page) = ReadHeaderEither(fs);
             if (header == null)
             {
                 error = VaultOpenError.BadFormat;
@@ -264,6 +298,14 @@ internal sealed class VaultVolume : IDisposable
                 error = VaultOpenError.Sealed;
                 return false;
             }
+            // v4+: the header's fields (slots, seqs, flags, pepper blobs)
+            // authenticate under the volume key — a field-level edit that
+            // survived the checksum dies here. v≤3 skips (no MAC on disk).
+            if (page != null && !VaultFormat.VerifyHeaderMac(volKey.Bytes, page))
+            {
+                error = VaultOpenError.Tampered;
+                return false;
+            }
 
             var vol = new VaultVolume(fs, volKey, header);
             vol.LoadManifest(volKey.Bytes); // throws VaultIntegrity on both-slots-dead
@@ -280,6 +322,90 @@ internal sealed class VaultVolume : IDisposable
         {
             fs?.Dispose();
             volKey?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Write a complete copy of this image at <paramref name="dstPath"/>
+    /// under a FRESH volume key — the rekey op's file half. Chunks
+    /// re-encrypt at their recorded generations, the manifest re-seals at
+    /// the same seq, and the slots re-wrap under <paramref name="secret"/>
+    /// (+pepper on bound images). The source file is untouched — the
+    /// caller swaps files and reopens; a crash mid-copy only orphans the
+    /// <c>.rekey</c> sibling.
+    /// </summary>
+    public void RekeyTo(string dstPath, byte[] secret, byte[]? pepper, uint gen)
+    {
+        lock (_gate)
+        {
+            Flush(); // manifest seq + chunk gens are final before the copy
+            byte[] salt = RandomNumberGenerator.GetBytes(VaultFormat.SaltLen);
+            byte[] kek = VaultFormat.DeriveKek(secret, salt, pepper);
+            byte[] vk = RandomNumberGenerator.GetBytes(VaultFormat.VolKeyLen);
+            bool done = false;
+            try
+            {
+                var header = new VaultHeader(
+                    VaultFormat.FormatVersion, _header.Flags, salt,
+                    new[]
+                    {
+                        VaultFormat.WrapVolumeKey(kek, vk, gen, 0),
+                        VaultFormat.WrapVolumeKey(kek, vk, gen, 1),
+                    },
+                    0, 0, _header.ChunkCount, VaultFormat.DataOffset);
+                header.TpmBlob = _header.TpmBlob;
+                header.RecBlob = _header.RecBlob;
+                header.RecIters = _header.RecIters;
+                int mslot = (int)(_manifestSeq & 1);
+                if (mslot == 0) header.ManifestSeq0 = _manifestSeq;
+                else header.ManifestSeq1 = _manifestSeq;
+
+                string? dir = Path.GetDirectoryName(Path.GetFullPath(dstPath));
+                if (dir != null)
+                    Directory.CreateDirectory(dir);
+                using var dst = new FileStream(dstPath, FileMode.Create,
+                    FileAccess.ReadWrite, FileShare.None);
+                dst.SetLength(VaultFormat.DataOffset
+                    + (long)header.ChunkCount * VaultFormat.ChunkSize);
+                byte[] buf = new byte[VaultFormat.ChunkPayload];
+                try
+                {
+                    for (int id = 0; id < _highWater; id++)
+                    {
+                        if (_free.Contains(id))
+                            continue; // unreferenced — the zero region is never read
+                        ReadChunk(id, buf); // a tampered frame throws — honest abort
+                        byte[] frame = VaultFormat.EncryptChunk(vk, id, _gens[id], buf);
+                        dst.Position = VaultFormat.ChunkOffset(VaultFormat.DataOffset, id);
+                        dst.Write(frame, 0, frame.Length);
+                    }
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(buf);
+                }
+                byte[] blob = VaultFormat.SealManifest(vk, mslot,
+                    _manifestSeq, SerializeManifest());
+                dst.Position = VaultFormat.ManifestBase
+                    + (long)mslot * VaultFormat.ManifestSlotSize;
+                dst.Write(blob, 0, blob.Length);
+                byte[] page = VaultFormat.WriteHeader(header, vk);
+                dst.Position = VaultFormat.ShadowBase;
+                dst.Write(page, 0, page.Length);
+                dst.Position = 0;
+                dst.Write(page, 0, page.Length);
+                dst.Flush(true);
+                done = true;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(kek);
+                CryptographicOperations.ZeroMemory(vk);
+                if (!done)
+                {
+                    try { File.Delete(dstPath); } catch (Exception) { }
+                }
+            }
         }
     }
 
@@ -744,15 +870,19 @@ internal sealed class VaultVolume : IDisposable
         _img.Position = VaultFormat.ChunkOffset(_header.ChunkRegionBase, id);
         if (_img.Read(frame, 0, frame.Length) < frame.Length)
             throw new VaultIntegrityException($"short read on chunk {id}");
-        if (!VaultFormat.TryDecryptChunk(_volKey.Bytes, id, frame, dst4096))
+        if (!VaultFormat.TryDecryptChunk(_volKey.Bytes, id, _gens[id], frame, dst4096))
             throw new VaultIntegrityException($"chunk {id} tag rejected — tampered or corrupt");
     }
 
     private void WriteChunk(int id, ReadOnlySpan<byte> src4096)
     {
-        byte[] frame = VaultFormat.EncryptChunk(_volKey.Bytes, id, src4096);
+        // The generation bumps on EVERY write — a stale frame of this slot
+        // (old gen, old nonce) can never replay under the manifest's AAD.
+        uint gen = ++_gens[id];
+        byte[] frame = VaultFormat.EncryptChunk(_volKey.Bytes, id, gen, src4096);
         _img.Position = VaultFormat.ChunkOffset(_header.ChunkRegionBase, id);
         _img.Write(frame, 0, frame.Length);
+        _dirty = true; // gens live in the manifest — a write must persist it
     }
 
     // --------------------------------------------------------------- manifest
@@ -781,8 +911,8 @@ internal sealed class VaultVolume : IDisposable
     private void WriteHeader()
     {
         // Shadow first, primary last: a torn flush leaves the primary —
-        // the page readers prefer — intact.
-        byte[] page = VaultFormat.WriteHeader(_header);
+        // the page readers prefer — intact. The v4 MAC keys under volKey.
+        byte[] page = VaultFormat.WriteHeader(_header, _volKey.Bytes);
         _img.Position = VaultFormat.ShadowBase;
         _img.Write(page, 0, page.Length);
         _img.Position = 0;
@@ -847,9 +977,13 @@ internal sealed class VaultVolume : IDisposable
     // keys: encrypted under the volume key, so filenames stay confidential.
     private sealed class ManifestDto
     {
-        [JsonPropertyName("v")] public int V { get; set; } = 1;
+        [JsonPropertyName("v")] public int V { get; set; } = 2;
         [JsonPropertyName("hw")] public int HighWater { get; set; }
         [JsonPropertyName("free")] public List<int> Free { get; set; } = new();
+        /// <summary>Per-chunk-id write generation — the chunk-AAD fence. Absent
+        /// on v1 manifests (pre-generation images): every id reads as gen 0,
+        /// which is the legacy index-only AAD form.</summary>
+        [JsonPropertyName("g")] public List<uint> Gens { get; set; } = new();
         [JsonPropertyName("nodes")] public List<NodeDto> Nodes { get; set; } = new();
     }
 
@@ -872,6 +1006,7 @@ internal sealed class VaultVolume : IDisposable
         {
             HighWater = _highWater,
             Free = _free.ToList(),
+            Gens = _gens.ToList(),
             Nodes = _nodes.Select(kv => new NodeDto
             {
                 P = kv.Key, N = kv.Value.Name, D = kv.Value.IsDir, S = kv.Value.Size,
@@ -907,6 +1042,14 @@ internal sealed class VaultVolume : IDisposable
                 { IsDir = true, Attrs = FileAttributes.Directory | FileAttributes.Hidden };
         foreach (int id in dto.Free)
             _free.Add(id);
+        // Generations beyond the chunk count are a structural lie — same bar
+        // as the freelist/high-water checks in RebuildFreeList.
+        if (dto.Gens.Count > ChunkCount)
+            throw new VaultIntegrityException(
+                $"manifest carries {dto.Gens.Count} chunk generations for {ChunkCount} chunks");
+        Array.Clear(_gens);
+        for (int i = 0; i < dto.Gens.Count; i++)
+            _gens[i] = dto.Gens[i];
         _highWater = dto.HighWater;
         RebuildFreeList(); // owns _dirty — every change class must persist
     }

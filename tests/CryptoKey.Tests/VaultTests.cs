@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using Xunit;
@@ -62,7 +63,8 @@ public class VaultTests : IDisposable
             RandomNumberGenerator.GetBytes(VaultFormat.SaltLen), slots,
             41, 40, 1234, (ulong)VaultFormat.DataOffset);
 
-        VaultHeader back = VaultFormat.ReadHeader(VaultFormat.WriteHeader(header));
+        VaultHeader back = VaultFormat.ReadHeader(
+            VaultFormat.WriteHeader(header, TestDisk.RandomSecret()));
         Assert.Equal(header.Version, back.Version);
         Assert.Equal(header.Salt, back.Salt);
         Assert.Equal((41ul, 40ul), (back.ManifestSeq0, back.ManifestSeq1));
@@ -223,6 +225,251 @@ public class VaultTests : IDisposable
             Assert.True(vol.TryGet("\\first.txt", out _));   // epoch seq 2 survived
             Assert.False(vol.TryGet("\\second.txt", out _)); // torn seq 3 rolled back
         }
+    }
+
+    // ----------------------------------------- M9: gens, header MAC, rekey
+
+    [Fact]
+    public void Chunk_generation_binds_into_the_frame()
+    {
+        byte[] vk = RandomNumberGenerator.GetBytes(VaultFormat.VolKeyLen);
+        byte[] pt = new byte[VaultFormat.ChunkPayload];
+        pt[0] = 7;
+        byte[] legacy = VaultFormat.EncryptChunk(vk, 3, 0, pt); // gen 0 = old form
+        byte[] gen5 = VaultFormat.EncryptChunk(vk, 3, 5, pt);
+        byte[] dst = new byte[VaultFormat.ChunkPayload];
+
+        Assert.True(VaultFormat.TryDecryptChunk(vk, 3, 0, legacy, dst));
+        Assert.Equal(pt, dst);
+        Assert.True(VaultFormat.TryDecryptChunk(vk, 3, 5, gen5, dst));
+        // A gen-bound frame never verifies under another generation —
+        // swapping an old frame back into its slot is a tag rejection.
+        Assert.False(VaultFormat.TryDecryptChunk(vk, 3, 0, gen5, dst));
+        Assert.False(VaultFormat.TryDecryptChunk(vk, 3, 5, legacy, dst));
+        Assert.False(VaultFormat.TryDecryptChunk(vk, 4, 5, gen5, dst));
+    }
+
+    [Fact]
+    public void Swapped_back_older_chunk_frame_fails_the_tag()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        byte[] payload = new byte[VaultFormat.ChunkPayload];
+        int chunkId;
+        byte[] staleFrame;
+        {
+            using VaultVolume vol = VaultVolume.Create(path, 16, secret, 1);
+            Assert.Equal(VaultResult.Ok, vol.CreateFile("\\a", out _));
+            payload[0] = 0xAA;
+            Assert.Equal(VaultResult.Ok, vol.Write("\\a", 0, payload, out _));
+            Assert.True(vol.TryGet("\\a", out VaultNode n));
+            chunkId = n.Chunks[0];
+            // Snapshot the gen-1 frame the attacker squirrels away.
+            using var peek = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite);
+            staleFrame = new byte[VaultFormat.ChunkSize];
+            peek.Position = VaultFormat.ChunkOffset(VaultFormat.DataOffset, chunkId);
+            peek.ReadExactly(staleFrame);
+            payload[0] = 0xBB;
+            Assert.Equal(VaultResult.Ok, vol.Write("\\a", 0, payload, out _)); // gen 2
+        } // Dispose flushes the manifest — gens land on disk
+
+        // The honest read still works before the swap-back.
+        using (var vol = Open(path, secret))
+        {
+            byte[] dst = new byte[VaultFormat.ChunkPayload];
+            Assert.Equal(dst.Length, vol.Read("\\a", 0, dst));
+            Assert.Equal(0xBB, dst[0]);
+        }
+
+        // Swap the stale frame back in at the same physical slot.
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            fs.Position = VaultFormat.ChunkOffset(VaultFormat.DataOffset, chunkId);
+            fs.Write(staleFrame);
+        }
+        using (var vol = Open(path, secret))
+        {
+            byte[] dst = new byte[VaultFormat.ChunkPayload];
+            var ex = Assert.Throws<VaultIntegrityException>(
+                () => vol.Read("\\a", 0, dst));
+            Assert.Contains("tag rejected", ex.Message);
+        }
+    }
+
+    [Fact]
+    public void Tampered_v4_header_fails_the_keyed_mac()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+        Assert.Equal(4u, VaultVolume.PeekHeader(path)!.Version);
+
+        // Flip the TpmBound flag, then repair the unkeyed checksum — the
+        // page parses fine; only the volKey MAC can catch it.
+        foreach (long at in new[] { 0L, VaultFormat.ShadowBase })
+        {
+            byte[] page = new byte[VaultFormat.HeaderSize];
+            using (var rd = new FileStream(path, FileMode.Open, FileAccess.Read))
+            {
+                rd.Position = at;
+                rd.ReadExactly(page);
+            }
+            page[12] ^= (byte)VaultFormat.FlagTpmBound;
+            SHA256.HashData(page.AsSpan(0, 550)).AsSpan(0, 8)
+                .CopyTo(page.AsSpan(550));
+            using var wr = new FileStream(path, FileMode.Open, FileAccess.Write);
+            wr.Position = at;
+            wr.Write(page);
+        }
+
+        Assert.True(VaultVolume.PeekHeader(path)!.TpmBound); // peek sees the lie
+        byte[] kek = KekFor(path, secret);
+        try
+        {
+            Assert.False(VaultVolume.TryOpen(path, kek, out _,
+                out VaultOpenError err, out _));
+            Assert.Equal(VaultOpenError.Tampered, err);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+        }
+    }
+
+    [Fact]
+    public void V3_image_opens_and_upgrades_to_v4_on_next_header_write()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+
+        // Downgrade both header pages in place: v3 layout (extLen 334,
+        // checksum at 518 covering [0..518)) — the MAC bytes stay on disk
+        // but the v3 reader never interprets them.
+        foreach (long at in new[] { 0L, VaultFormat.ShadowBase })
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+            byte[] page = new byte[VaultFormat.HeaderSize];
+            fs.Position = at;
+            fs.ReadExactly(page);
+            BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(8), 3);
+            BinaryPrimitives.WriteUInt16LittleEndian(page.AsSpan(192), 334);
+            SHA256.HashData(page.AsSpan(0, 518)).AsSpan(0, 8)
+                .CopyTo(page.AsSpan(518));
+            fs.Position = at;
+            fs.Write(page);
+        }
+        Assert.Equal(3u, VaultVolume.PeekHeader(path)!.Version);
+
+        using (var vol = Open(path, secret))
+            vol.Flush(); // any header write upgrades the page
+        Assert.Equal(VaultFormat.FormatVersion,
+            VaultVolume.PeekHeader(path)!.Version);
+    }
+
+    [Fact]
+    public void Rekeyed_copy_keeps_data_and_rotates_every_frame()
+    {
+        string path = Img(), dst = Img("vault.rekey");
+        byte[] secret = TestDisk.RandomSecret();
+        byte[] payload = new byte[VaultFormat.ChunkPayload + 17];
+        RandomNumberGenerator.Fill(payload);
+        int chunkId;
+        byte[] oldFrame;
+        {
+            using var vol = VaultVolume.Create(path, 16, secret, 1);
+            vol.CreateFile("\\a", out _);
+            vol.Write("\\a", 0, payload, out _);
+            Assert.True(vol.TryGet("\\a", out VaultNode n));
+            chunkId = n.Chunks[0];
+            using (var rd = new FileStream(path, FileMode.Open, FileAccess.Read,
+                       FileShare.ReadWrite))
+            {
+                oldFrame = new byte[VaultFormat.ChunkSize];
+                rd.Position = VaultFormat.ChunkOffset(VaultFormat.DataOffset, chunkId);
+                rd.ReadExactly(oldFrame);
+            }
+            vol.RekeyTo(dst, secret, null, 1);
+        }
+
+        // The copy opens under the same device secret (new salt → new KEK,
+        // new volKey): data and generation fence carry over.
+        byte[] newFrame;
+        using (var vol2 = Open(dst, secret))
+        {
+            byte[] buf = new byte[payload.Length];
+            Assert.Equal(payload.Length, vol2.Read("\\a", 0, buf));
+            Assert.Equal(payload, buf);
+            Assert.True(vol2.TryGet("\\a", out VaultNode n2));
+            using (var rd = new FileStream(dst, FileMode.Open, FileAccess.Read,
+                       FileShare.ReadWrite))
+            {
+                newFrame = new byte[VaultFormat.ChunkSize];
+                rd.Position = VaultFormat.ChunkOffset(VaultFormat.DataOffset, n2.Chunks[0]);
+                rd.ReadExactly(newFrame);
+            }
+        }
+        Assert.False(oldFrame.SequenceEqual(newFrame)); // ciphertext rotated
+        // The manifest seq rides forward — the epoch fence isn't disturbed.
+        // The copy writes only the newest seq's slot, so compare the max.
+        ulong MaxSeq(VaultHeader h) => Math.Max(h.ManifestSeq0, h.ManifestSeq1);
+        Assert.Equal(MaxSeq(VaultVolume.PeekHeader(path)!),
+            MaxSeq(VaultVolume.PeekHeader(dst)!));
+    }
+
+    [Fact]
+    public void Service_rekey_swaps_the_image_and_stays_mounted()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        var mounter = new TestMounter();
+        using var vault = new VaultService(c, mounter, _ => { });
+        vault.KeyVerified(secret.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string err), err);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State);
+
+        Assert.True(vault.TryRekey(out string rerr), rerr);
+        Assert.True(vault.WaitForPendingOps());
+        Assert.Equal(VaultState.Mounted, vault.State); // remounted around the swap
+        Assert.False(File.Exists(path + ".rekey"));
+        Assert.False(File.Exists(path + ".rekey-bak"));
+        Assert.True(File.Exists(path));
+    }
+
+    [Fact]
+    public void Rekey_refuses_while_sealed()
+    {
+        string path = Img();
+        using (VaultVolume.Create(path, 16, TestDisk.RandomSecret(), 1)) { }
+        KeyConfig c = VaultConfig(path);
+        using var vault = new VaultService(c, new TestMounter(), _ => { });
+        Assert.False(vault.TryRekey(out string err));
+        Assert.Contains("unlock", err);
+    }
+
+    [Fact]
+    public void Rekey_swap_artifacts_settle_on_probe()
+    {
+        string path = Img();
+        byte[] secret = TestDisk.RandomSecret();
+        using (VaultVolume.Create(path, 16, secret, 1)) { }
+
+        // Crash between the swap's halves: bak holds the pre-rekey image,
+        // main is missing — the probe restores it.
+        File.Move(path, path + ".rekey-bak");
+        Assert.NotNull(VaultVolume.PeekHeader(path));
+        Assert.False(File.Exists(path + ".rekey-bak"));
+
+        // Crash after the swap but before the delete: main wins.
+        File.Move(path, path + ".rekey-bak");
+        File.WriteAllBytes(path + ".rekey", new byte[4]); // stray tmp too
+        Assert.NotNull(VaultVolume.PeekHeader(path));
+        Assert.False(File.Exists(path + ".rekey-bak"));
+        Assert.False(File.Exists(path + ".rekey"));
+        using (Open(path, secret)) { }
     }
 
     // ----------------------------------------------------------------- tree
@@ -668,6 +915,32 @@ public class VaultTests : IDisposable
         byte[] kekA = KekFor(path, genA);
         Assert.False(VaultVolume.TryOpen(path, kekA, out _, out _, out _));
         CryptographicOperations.ZeroMemory(kekA);
+    }
+
+    [Fact]
+    public void Same_gen_different_secret_still_rewraps_slots()
+    {
+        // Re-enroll collision guard: a fresh secret at a gen the service
+        // already fed (a restarted RotationCount, or any counter collision)
+        // must still fire the slot re-wrap — comparing generations alone
+        // would early-return and brick the vault on its next seal.
+        string path = Img();
+        byte[] genA = TestDisk.RandomSecret();
+        KeyConfig c = VaultConfig(path);
+        var mounter = new TestMounter();
+        using var vault = new VaultService(c, mounter, _ => { });
+
+        vault.KeyVerified(genA.ToArray(), 1);
+        Assert.True(vault.TryCreate(16, out string cerr), cerr);
+        Assert.True(vault.WaitForPendingOps());
+
+        byte[] genB = TestDisk.RandomSecret();
+        vault.KeyVerified(genB.ToArray(), 1); // same gen — different secret
+        Assert.True(vault.WaitForPendingOps());
+        vault.KeyGone();
+
+        using (Open(path, genB)) { } // slot A re-wrapped under B
+        using (Open(path, genA)) { } // slot B keeps A inside the heal window
     }
 
     // ------------------------------------------------------------ regressions

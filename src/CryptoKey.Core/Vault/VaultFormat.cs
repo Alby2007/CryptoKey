@@ -32,6 +32,16 @@ namespace CryptoKey;
 ///   514 recIters u32          — PBKDF2 iters frozen at enroll
 ///   518 headerCheck 8B        — SHA-256 of page[0..518), truncated
 ///
+/// v4 adds a keyed header MAC inside the ext region (the checksum alone
+/// only catches torn writes — a deliberate edit produced a perfectly
+/// valid page):
+///   518 headerMac 32B         — HMAC-SHA256(volKey, page[0..518))
+///   550 headerCheck 8B        — SHA-256 of page[0..550), truncated
+/// The MAC keys under the VOLUME key, not the device-secret KEK — the
+/// writer always holds volKey, and a forged header can't survive unwrap
+/// anyway (the slots would fail first). v≤3 images read unchanged and
+/// gain the MAC on their next header write.
+///
 /// The pepper is a 32B machine-binding secret: when Flags.TpmBound is set
 /// the KEK is HMAC(secret, label ‖ salt ‖ pepper), so the image opens only
 /// where the TPM (or the recovery phrase) can reproduce the pepper. The
@@ -45,6 +55,10 @@ namespace CryptoKey;
 ///
 /// chunk i at chunkRegionBase + i*ChunkSize (4124B):
 ///   nonce 12B | tag 16B | ciphertext 4096B
+///   AAD = "CKVCHUNK"‖index‖gen — the per-chunk write generation lives in
+///   the (authenticated, seq-fenced) manifest, so a swapped-in OLDER frame
+///   of the same position fails the tag. gen 0 is the pre-generation form:
+///   AAD = "CKVCHUNK"‖index — images written before gens verify unchanged.
 /// </code>
 ///
 /// Two-layer keys: a random 256-bit volume key seals every chunk + the
@@ -56,8 +70,8 @@ internal static class VaultFormat
 {
     internal static readonly byte[] HeaderMagic = "CKVAULT\x01"u8.ToArray();
 
-    internal const uint FormatVersion = 3;
-    internal const uint MinFormatVersion = 2; // v2 images read + upgrade on next header write
+    internal const uint FormatVersion = 4;
+    internal const uint MinFormatVersion = 2; // v2/v3 images read + upgrade on next header write
     internal const uint ManifestMagic = 0x4D564B43; // "CKVM" little-endian
     internal const uint ManifestFormat = 1;
 
@@ -101,6 +115,12 @@ internal static class VaultFormat
     internal const int RecBlobLen = 64;
     private const int OffRecIters = OffRecBlob + RecBlobLen; // 514
     private const int OffCheckV3 = OffRecIters + 4;          // 518
+    // v4 extends the region once more — the keyed MAC, then the checksum
+    // still last (it always terminates the ext span).
+    private const int OffMac = OffCheckV3;                   // 518
+    internal const int HeaderMacLen = 32;
+    private const int OffCheckV4 = OffMac + HeaderMacLen;    // 550
+    private const int ExtLenV4 = OffCheckV4 + CheckLen - OffExt; // 366
 
     private const int CheckLen = 8; // truncated SHA-256 of page[0..checkOff)
 
@@ -144,9 +164,10 @@ internal static class VaultFormat
         uint version = BinaryPrimitives.ReadUInt32LittleEndian(page[OffVersion..]);
         if (version is < MinFormatVersion or > FormatVersion)
             throw new VaultException($"unsupported vault format v{version}");
-        // v2: check @192 covers page[0..192); v3: check ends the ext region,
-        // so extLen > 334 (a future extension) slides the check along with it.
-        int checkOff = version == 2 ? OffCheckV2 : V3CheckOff(page);
+        // v2: check @192 covers page[0..192); v3+: check ends the ext
+        // region, so extLen > the version's minimum (a future extension)
+        // slides the check along with it.
+        int checkOff = version == 2 ? OffCheckV2 : ExtCheckOff(page, version);
         if (!SHA256.HashData(page[..checkOff]).AsSpan(0, CheckLen)
                 .SequenceEqual(page.Slice(checkOff, CheckLen)))
             throw new VaultException("header checksum mismatch — torn write");
@@ -174,20 +195,28 @@ internal static class VaultFormat
             h.RecBlob = page.Slice(OffRecBlob, RecBlobLen).ToArray();
             h.RecIters = BinaryPrimitives.ReadUInt32LittleEndian(page[OffRecIters..]);
         }
+        if (version >= 4)
+            h.Mac = page.Slice(OffMac, HeaderMacLen).ToArray();
         return h;
     }
 
-    private static int V3CheckOff(ReadOnlySpan<byte> page)
+    private static int ExtCheckOff(ReadOnlySpan<byte> page, uint version)
     {
         uint extLen = BinaryPrimitives.ReadUInt16LittleEndian(page[OffExt..]);
         int checkOff = OffExt + (int)extLen - CheckLen;
-        if (extLen < ExtLenV3 || checkOff + CheckLen > HeaderSize)
+        int need = version >= 4 ? ExtLenV4 : ExtLenV3;
+        if (extLen < need || checkOff + CheckLen > HeaderSize)
             throw new VaultException("header extension length out of range");
         return checkOff;
     }
 
-    /// <summary>Always writes v3 — a v2 image upgrades on its next header write.</summary>
-    internal static byte[] WriteHeader(in VaultHeader h)
+    /// <summary>
+    /// Always writes v4 — a v2/v3 image upgrades on its next header write.
+    /// <paramref name="macKey"/> is the volume key: the MAC authenticates
+    /// every header field (slots, seqs, flags, blobs) against deliberate
+    /// edits — the checksum alone only proves "not torn".
+    /// </summary>
+    internal static byte[] WriteHeader(in VaultHeader h, byte[] macKey)
     {
         byte[] page = new byte[HeaderSize];
         HeaderMagic.CopyTo(page, 0);
@@ -205,13 +234,30 @@ internal static class VaultFormat
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffManifestSeq + 8), h.ManifestSeq1);
         BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffChunkCount), h.ChunkCount);
         BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(OffChunkBase), h.ChunkRegionBase);
-        BinaryPrimitives.WriteUInt16LittleEndian(page.AsSpan(OffExt), ExtLenV3);
+        BinaryPrimitives.WriteUInt16LittleEndian(page.AsSpan(OffExt), ExtLenV4);
         h.TpmBlob.AsSpan(0, TpmBlobLen).CopyTo(page.AsSpan(OffTpmBlob));
         h.RecBlob.AsSpan(0, RecBlobLen).CopyTo(page.AsSpan(OffRecBlob));
         BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(OffRecIters), h.RecIters);
-        SHA256.HashData(page.AsSpan(0, OffCheckV3)).AsSpan(0, CheckLen)
-            .CopyTo(page.AsSpan(OffCheckV3));
+        HMACSHA256.HashData(macKey, page.AsSpan(0, OffMac))
+            .CopyTo(page.AsSpan(OffMac));
+        SHA256.HashData(page.AsSpan(0, OffCheckV4)).AsSpan(0, CheckLen)
+            .CopyTo(page.AsSpan(OffCheckV4));
         return page;
+    }
+
+    /// <summary>
+    /// Keyed MAC check on a v4+ header page; v≤3 pages carry no MAC and
+    /// verify vacuously (the checksum already ran in <see cref="ReadHeader"/>).
+    /// Call only after the volume key is unwrapped.
+    /// </summary>
+    internal static bool VerifyHeaderMac(byte[] volKey, ReadOnlySpan<byte> page)
+    {
+        uint version = BinaryPrimitives.ReadUInt32LittleEndian(page[OffVersion..]);
+        if (version < 4)
+            return true;
+        return CryptographicOperations.FixedTimeEquals(
+            HMACSHA256.HashData(volKey, page[..OffMac]),
+            page.Slice(OffMac, HeaderMacLen));
     }
 
     // -------------------------------------------------------------- key slots
@@ -310,7 +356,8 @@ internal static class VaultFormat
     internal static long ChunkOffset(ulong chunkRegionBase, int index)
         => (long)chunkRegionBase + (long)index * ChunkSize;
 
-    internal static byte[] EncryptChunk(byte[] volKey, int index, ReadOnlySpan<byte> plaintext)
+    internal static byte[] EncryptChunk(byte[] volKey, int index, uint gen,
+        ReadOnlySpan<byte> plaintext)
     {
         if (plaintext.Length != ChunkPayload)
             throw new ArgumentException($"chunk plaintext must be {ChunkPayload}B");
@@ -320,12 +367,12 @@ internal static class VaultFormat
         using var gcm = new AesGcm(volKey, TagLen);
         gcm.Encrypt(nonce, plaintext,
             frame.AsSpan(NonceLen + TagLen, ChunkPayload),
-            frame.AsSpan(NonceLen, TagLen), ChunkAad(index));
+            frame.AsSpan(NonceLen, TagLen), ChunkAad(index, gen));
         return frame;
     }
 
     /// <summary>Decrypt a chunk frame into <paramref name="dst"/>; false = tag rejection (tamper).</summary>
-    internal static bool TryDecryptChunk(byte[] volKey, int index,
+    internal static bool TryDecryptChunk(byte[] volKey, int index, uint gen,
         ReadOnlySpan<byte> frame, Span<byte> dst)
     {
         if (frame.Length != ChunkSize || dst.Length < ChunkPayload)
@@ -336,7 +383,7 @@ internal static class VaultFormat
             gcm.Decrypt(frame[..NonceLen],
                 frame.Slice(NonceLen + TagLen, ChunkPayload),
                 frame.Slice(NonceLen, TagLen),
-                dst[..ChunkPayload], ChunkAad(index));
+                dst[..ChunkPayload], ChunkAad(index, gen));
             return true;
         }
         catch (CryptographicException)
@@ -345,11 +392,19 @@ internal static class VaultFormat
         }
     }
 
-    private static byte[] ChunkAad(int index)
+    /// <summary>
+    /// gen 0 keeps the pre-generation form (index only) — chunks written
+    /// before the manifest tracked generations still verify; every write
+    /// under the new code bumps past 0.
+    /// </summary>
+    private static byte[] ChunkAad(int index, uint gen)
     {
-        byte[] aad = new byte[ChunkAadLabel.Length + 8];
+        byte[] aad = new byte[ChunkAadLabel.Length + 8 + (gen == 0 ? 0 : 4)];
         ChunkAadLabel.CopyTo(aad, 0);
         BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan(ChunkAadLabel.Length), index);
+        if (gen != 0)
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                aad.AsSpan(ChunkAadLabel.Length + 8), gen);
         return aad;
     }
 
@@ -440,6 +495,9 @@ internal sealed class VaultHeader
     public byte[] TpmBlob { get; set; } = new byte[VaultFormat.TpmBlobLen];
     public byte[] RecBlob { get; set; } = new byte[VaultFormat.RecBlobLen];
     public uint RecIters { get; set; }
+
+    // v4 extension — the keyed header MAC (all-zero on v≤3 pages).
+    public byte[] Mac { get; set; } = new byte[VaultFormat.HeaderMacLen];
 
     /// <summary>UX hint flag — see the format doc: it can't protect itself.</summary>
     public bool TpmBound => (Flags & VaultFormat.FlagTpmBound) != 0;

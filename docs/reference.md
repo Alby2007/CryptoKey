@@ -6,7 +6,10 @@
 cryptokey                        # dashboard app: guard + UI (add --dev, --takeover, --classic)
 cryptokey guard                  # tray daemon (same flags)
 cryptokey enroll                 # enroll the inserted removable drive — generates the recovery
-                                 # phrase (shown once, retyped to confirm); creates shortcuts
+                                 # phrase (shown once, retyped to confirm); creates shortcuts.
+                                 # Re-enrolling with a vault image on disk requires the vault
+                                 # OPEN (its slots re-wrap onto the new key on the next verify) —
+                                 # refused while the vault is sealed or no guard is running
 cryptokey unenroll               # remove the key binding: account-gated, prompts for the
                                  # recovery phrase; the install, account, phrase, and settings
                                  # stay — auto-lock is off until a new key enrolls. Refused
@@ -23,11 +26,12 @@ cryptokey vault status           # image state, key-slot generations, driver pre
 cryptokey vault mount            # IPC: mount now (guard running); standalone: foreground mount, Enter dismounts
 cryptokey vault unmount          # IPC: dismount now (guard running); standalone: driver-level unmount of the letter
 cryptokey vault seal / unseal    # IPC: close the vault (drop the volume key — holds for the session) / reopen it
+cryptokey vault rekey            # rotate the volume key — re-encrypts the whole image (needs the vault open)
 cryptokey vault delete           # delete the image entirely (IPC when a guard runs; destructive)
 cryptokey vault accept-rollback  # ratify a vault image that reads older than the attested epoch
 cryptokey vault tpm-bind [--strict]  # bind the image to this machine's TPM (prompts for the recovery phrase)
 cryptokey vault tpm-unbind       # remove the machine binding (image opens anywhere again)
-cryptokey vault recover          # unlock a TPM-locked vault with the recovery phrase
+cryptokey vault recover          # TPM-locked vault: phrase recovers the pepper (key still required)
 cryptokey install                # copy the payload to %LOCALAPPDATA%\CryptoKey and repoint
                                  # shortcuts + autostart at it; offers a live guard handoff
 cryptokey update                 # check GitHub Releases for a newer signed build
@@ -94,11 +98,12 @@ commands carry account passwords and the recovery phrase.
 | `vault status` | `ok vault state=… image=… exists=… driver=… mount=… idlemin=… epoch=… slots=… tpm=… used=… total=…` | state: `disabled`/`noimage`/`sealed`/`sealeddead`/`corrupt`/`needsdriver`/`unsealed`/`mounted`/`rolledback`/`tpmlocked`; `idlemin` = `VaultIdleMinutes`; `epoch` = attested manifest seq; `tpm` = `bound`/`-` |
 | `vault tpm-bind <phrase> [--strict]` | `ok vault bound to this machine` / `err …` | Wraps the pepper under the TPM + seals a phrase-recovery blob (omitted under `--strict`); needs the vault unsealed |
 | `vault tpm-unbind` | `ok vault unbound` / `err …` | Re-wraps slots pepperless + deletes the TPM key |
-| `vault recover <phrase>` | `ok vault unlocked via recovery phrase` / `err …` | Opens a `tpmlocked` vault via the sealed recovery blob |
+| `vault recover <phrase>` | `ok vault unlocked via recovery phrase` / `err …` | Opens a `tpmlocked` vault via the sealed recovery blob — the phrase substitutes for the TPM pepper only; the enrolled key must still be present |
 | `vault mount` / `vault unmount` | `ok mounted at V:\` / `ok unmounted` / `err …` | Mount needs the key in + driver present |
 | `vault seal` / `vault unseal` | `ok vault sealed` / `ok vault unsealing` / `err …` | Seal dismounts AND drops the volume key — auto-open stays suppressed until a key event or `unseal` |
 | `vault accept-rollback` | `ok vault re-synced` / `err …` | Ratifies a `rolledback` image — moves the attested epoch down to it and re-opens. Explicit user call only |
 | `vault create [mb]` | `ok vault created` / `err …` | Needs the verified key; defaults to `VaultSizeMb` |
+| `vault rekey` | `ok vault rekeyed — volume key rotated` / `err …` | Rotates the *volume key* (forward secrecy — chunk/secret rotation alone doesn't). Rebuilds the image beside it, swaps, re-opens; needs the vault unsealed. Crash-safe via `.rekey-bak` settle |
 | `open` | `ok opened` | Raises the dashboard — routed before `DispatchCommand` |
 | `deeplink <url>` | `ok` | Forwards a `cryptokey://` launch arg to the shell's deep-link handler — routed before `DispatchCommand` |
 | `auth status` | `ok auth state=… email=… configured=… armed=…` | Read-only account-gate state: `unconfigured`/`unenrolled`/`locked`/`offlineunlocked`/`online`; `armed=yes/no` — the signed-out latch |

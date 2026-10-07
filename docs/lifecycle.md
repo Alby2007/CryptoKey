@@ -34,8 +34,9 @@ removes the key binding without uninstalling — distinct from first-run
   password prompt for a verb that can't run);
 - refused while a **vault image exists** — vault contents are keyed to
   this enrollment; delete the vault first;
-- verifies the **recovery phrase** — ownership proof, and the phrase is
-  what keeps manual-lock escape and vault recovery possible afterward;
+- verifies the **recovery phrase** — ownership proof, and the kept phrase
+  is what still escapes a manual `lock` afterward (there is no vault left
+  to recover — the image had to be deleted first);
 - clears only the key material: `DeviceSerial`, `SecretSalt`,
   `SecretHash`, `PrevSecretHash`, `RotationCount`, `LastRotationUtc`;
 - keeps everything else: phrase, account record, all guard settings,

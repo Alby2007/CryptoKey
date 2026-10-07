@@ -61,8 +61,7 @@ internal sealed class KeyPage : Page
         removeWell.Child = Kit.V(10,
             Kit.Txt("This disarms auto-lock — pulling the drive then does nothing " +
                     "until a new key is set up. The recovery phrase stays (it still " +
-                    "unlocks a manual lock and can recover a vault), as do your " +
-                    "account and settings.", "body", "dim"),
+                    "unlocks a manual lock), as do your account and settings.", "body", "dim"),
             _removePhrase,
             Kit.H(8, _removeBtn,
                 Kit.Btn("Cancel", null, "ghost", () =>

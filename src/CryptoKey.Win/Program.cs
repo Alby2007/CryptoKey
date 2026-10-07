@@ -607,8 +607,9 @@ internal static class Program
 
         // A running guard owns the vault lifecycle — forward through the pipe.
         bool live = IpcClient.Send("status", 400) != null;
-        if (live && sub is "mount" or "unmount" or "create" or "status" or "delete"
-                or "accept-rollback" or "tpm-bind" or "tpm-unbind" or "recover")
+        if (live && sub is "mount" or "unmount" or "seal" or "unseal" or "close"
+                or "create" or "status" or "delete" or "accept-rollback"
+                or "tpm-bind" or "tpm-unbind" or "recover" or "rekey")
         {
             string cmd = $"vault {sub}";
             if (sub is "tpm-bind" or "recover")
@@ -653,6 +654,7 @@ internal static class Program
             "mount" => VaultMountStandalone(config),
             "unmount" => VaultUnmount(config),
             "delete" => VaultDelete(config),
+            "rekey" => VaultRekey(config),
             "accept-rollback" => VaultAcceptRollback(config),
             "tpm-bind" => VaultTpmBind(config, args),
             "tpm-unbind" => VaultTpmUnbind(config),
@@ -792,6 +794,20 @@ internal static class Program
         }
     }
 
+    /// <summary>Standalone rekey — the key verifies, the vault unseals, the
+    /// volume key rotates, and the fresh image swaps in.</summary>
+    private static int VaultRekey(KeyConfig config)
+    {
+        using var vault = new VaultService(config, Platform.Services.VaultMounts,
+            Console.WriteLine, tpm: Platform.Services.VaultTpm);
+        if (!FeedVerifiedSecret(config, vault))
+            return 1;
+        vault.WaitForPendingOps(); // the async unseal must land first
+        return vault.TryRekey(out string err)
+            ? OkSay("Vault rekeyed — volume key rotated")
+            : Fail(err);
+    }
+
     private static int VaultDelete(KeyConfig config)
     {
         using var vault = new VaultService(config, Platform.Services.VaultMounts, _ => { },
@@ -883,8 +899,8 @@ internal static class Program
 
     private static int VaultUsage()
     {
-        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|delete|accept-rollback|" +
-            "tpm-bind [--strict]|tpm-unbind|recover");
+        Console.WriteLine("usage: cryptokey vault create [mb]|status|mount|unmount|seal|unseal|" +
+            "rekey|delete|accept-rollback|tpm-bind [--strict]|tpm-unbind|recover");
         return 1;
     }
 

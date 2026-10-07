@@ -102,4 +102,114 @@ public class EnrollmentFlowTests
             ? File.ReadAllText(ConfigStore.ConfigPath) : null;
         Assert.Equal(before, after);
     }
+
+    // Re-enroll while a vault image exists: the image's key slots unwrap
+    // only under the CURRENT secret — a sealed vault can't re-wrap onto the
+    // new key and would die silently. Commit gates on a live vault-open
+    // report (or refuses outright when no guard answers).
+
+    /// <summary>Enrolled Existing + a file at its vault image path. The
+    /// caller disposes <paramref name="imagePath"/> when done — a leftover
+    /// path pointing at a deleted file can't gate the next test.</summary>
+    private static EnrollmentFlow ArmedFlow(out string imagePath)
+    {
+        KeyConfig existing = TestDisk.NewConfig(TestDisk.RandomSecret());
+        imagePath = Path.Combine(TestDisk.TempDir(), "vault.ckv");
+        File.WriteAllBytes(imagePath, new byte[16]); // contents never read
+        existing.Guard.VaultImagePath = imagePath;
+        ConfigStore.Save(existing);
+        var flow = new EnrollmentFlow();
+        Assert.NotNull(flow.Existing);
+        flow.SelectDisk(Disk("NEW-SERIAL", TestDisk.TempDir()));
+        flow.Confirm(flow.Phrase!);
+        return flow;
+    }
+
+    [Fact]
+    public void Commit_refuses_reenroll_while_the_vault_is_sealed()
+    {
+        var flow = ArmedFlow(out string imagePath);
+        try
+        {
+            string oldSerial = flow.Existing!.DeviceSerial;
+            flow.VaultStatusProbe = () => "ok vault state=sealed exists=yes";
+
+            EnrollResult r = flow.Commit();
+
+            Assert.False(r.Ok);
+            Assert.Contains("vault", r.Message);
+            Assert.Equal(oldSerial, ConfigStore.Load()!.DeviceSerial); // untouched
+        }
+        finally { File.Delete(imagePath); }
+    }
+
+    [Theory]
+    [InlineData("sealed")]
+    [InlineData("sealeddead")]
+    [InlineData("corrupt")]
+    [InlineData("tpmlocked")]
+    [InlineData("rolledback")]
+    [InlineData("disabled")]
+    public void Closed_vault_states_all_refuse_reenroll(string state)
+    {
+        var flow = ArmedFlow(out string imagePath);
+        try
+        {
+            flow.VaultStatusProbe = () => $"ok vault state={state} exists=yes";
+            Assert.False(flow.Commit().Ok);
+        }
+        finally { File.Delete(imagePath); }
+    }
+
+    [Theory]
+    [InlineData("unsealed")]
+    [InlineData("mounted")]
+    [InlineData("needsdriver")] // volume key held — driver presence doesn't matter
+    public void Open_vault_states_allow_reenroll(string state)
+    {
+        var flow = ArmedFlow(out string imagePath);
+        try
+        {
+            int oldCount = flow.Existing!.RotationCount;
+            flow.VaultStatusProbe = () => $"ok vault state={state} exists=yes";
+            EnrollResult r = flow.Commit();
+            Assert.True(r.Ok, r.Message);
+            // A fresh secret is a new generation — the counter rides forward
+            // so the open vault's slot re-wrap (gen-change triggered) fires.
+            Assert.Equal(oldCount + 1, r.Config!.RotationCount);
+        }
+        finally { File.Delete(imagePath); }
+    }
+
+    [Fact]
+    public void Commit_refuses_reenroll_when_no_guard_answers()
+    {
+        var flow = ArmedFlow(out string imagePath);
+        try
+        {
+            flow.VaultStatusProbe = () => null;
+            EnrollResult r = flow.Commit();
+            Assert.False(r.Ok);
+            Assert.Contains("vault", r.Message);
+        }
+        finally { File.Delete(imagePath); }
+    }
+
+    [Fact]
+    public void Vault_gate_skips_first_enrollment()
+    {
+        // No Existing config — there is no prior enrollment an image could
+        // be bound to, so a stray file at the image path can't veto setup.
+        // The load chain is primary → .bak → third copy — all three go.
+        foreach (string p in new[] { ConfigStore.ConfigPath,
+                 ConfigStore.BackupPath, TestInit.ThirdCopyPath })
+            if (File.Exists(p))
+                File.Delete(p);
+        var flow = new EnrollmentFlow();
+        Assert.Null(flow.Existing);
+        flow.SelectDisk(Disk("TEST-SERIAL", TestDisk.TempDir()));
+        flow.Confirm(flow.Phrase!);
+        flow.VaultStatusProbe = () => "ok vault state=sealed";
+        Assert.True(flow.Commit().Ok);
+    }
 }
