@@ -49,7 +49,10 @@ rest of the session.
   renews tokens inside 10 minutes of expiry; a rejected refresh ends the
   session, a network failure keeps it (grace).
 - **Sign out** (`/logout` best-effort) — clears `session.dat` and drops
-  this run's authorization regardless of whether the server heard.
+  this run's authorization regardless of whether the server heard. The
+  dashboard, flyout, and wizard close on `SessionEnded` — an open window
+  must not keep mutating after its authorization died (the same fires
+  when a dead refresh token leaves nothing authorized).
 - **Recovery** — `cryptokey://recover?token_hash=…&type=recovery` deep
   links (email → browser → app) land on the reset face: `verify` →
   `PUT /user` → new verifier.
@@ -83,10 +86,15 @@ automatically when the server is unreachable. Boundaries:
 
 - **Graft detection**: an attacker who edits `config.json` to insert
   *their* verifier trips `AttestState.Mismatch` on the next key verify —
-  and the engine refuses the password path entirely while the attestation
-  is dirty (`SetAttestationClean(false)`), so a forged record can't
-  authorize anything. Strict rule: once an account is bound, the
-  account-free historical canon forms are no longer accepted.
+  and while the attestation is dirty, **no** authorization path works:
+  the IPC `|auth` trailer, the offline verifier, online sign-in, and any
+  already-established session all refuse until the key-fenced Relink (or
+  recovery) flow rewrites the record — which is also the sanctioned heal.
+  Strict rule: once an account is bound, the account-free historical
+  canon forms are no longer accepted. **Honest bound:** the mismatch can
+  only be *detected* on a key verify — while the key is out, the local
+  verifier is the only check (a locked box mitigates this: no key = no
+  unlocked session to attack).
 - **Re-attestation**: signing in, changing the password, or relinking
   rewrites the verifier, which dirties the MAC — so those flows require
   the enrolled key present (the next verify re-wraps the envelope

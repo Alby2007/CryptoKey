@@ -111,10 +111,21 @@ internal sealed class AuthService
     /// </summary>
     public bool HasPending => PendingStore.Exists;
 
-    /// <summary>This run may perform gated ops: live session or verifier-unlocked.</summary>
+    /// <summary>
+    /// This run may perform gated ops: live session or verifier-unlocked —
+    /// AND the attestation must be clean. A grafted/edited account record
+    /// flips <see cref="_attestationClean"/> off on the next key verify;
+    /// while it's dirty NOTHING authorizes on any path (UI tollbooth,
+    /// IPC trailer, offline verifier) until a key-fenced relink or
+    /// recovery rewrites the record.
+    /// </summary>
     public bool Authorized
     {
-        get { lock (_sync) return _unlocked || (_tokens?.Live ?? false); }
+        get
+        {
+            lock (_sync)
+                return _attestationClean && (_unlocked || (_tokens?.Live ?? false));
+        }
     }
 
     public AuthGateState State
@@ -296,6 +307,12 @@ internal sealed class AuthService
     /// <summary>Same as <see cref="Authorize"/> for the auth window's offline path.</summary>
     public AuthResult TryUnlockOffline(string password)
     {
+        lock (_sync)
+        {
+            if (!_attestationClean)
+                return AuthResult.Fail(
+                    "account data failed integrity check — relink required");
+        }
         if (Throttled(out string throttleErr))
             return AuthResult.Fail(throttleErr);
         if (Record?.VerifyPassword(password) != true)
@@ -400,6 +417,9 @@ internal sealed class AuthService
         var user = ParseUser(root);
         lock (_sync)
         {
+            if (!allowRebind && !_attestationClean)
+                return AuthResult.Fail(
+                    "account data failed integrity check — relink required");
             if (!allowRebind && Record is { } bound
                 && !SameIdentity(bound, user, emailFallback))
             {
@@ -419,6 +439,11 @@ internal sealed class AuthService
                 _record = prev; // keep memory honest with the disk that refused
                 return AuthResult.Fail($"account record save failed: {ex.Message}");
             }
+            // A key-fenced record write IS the sanctioned heal — the pending
+            // reattest re-binds the whole canon on the next verify, so the
+            // dirty flag can lift now rather than one verify-cycle late.
+            if (!_attestationClean)
+                _attestationClean = true;
             _tokens = tokens;
             TokenStore.Save(tokens);
             _unlocked = true;
@@ -476,6 +501,12 @@ internal sealed class AuthService
     public async Task<AuthResult> SignIn(string email, string password,
         bool relink = false)
     {
+        lock (_sync)
+        {
+            if (!relink && !_attestationClean)
+                return AuthResult.Fail(
+                    "account data failed integrity check — relink required");
+        }
         if (!Configured)
             return OfflineOr(email, password);
         if (Throttled(out string throttleErr))
@@ -589,10 +620,14 @@ internal sealed class AuthService
             if (resp.StatusCode == HttpStatusCode.Unauthorized
                 || resp.StatusCode == HttpStatusCode.BadRequest)
             {
-                // Refresh token dead — the session is over; the local
-                // verifier still covers offline unlock.
+                // Refresh token dead — the online session is over. The
+                // local verifier still covers offline unlock, so
+                // _unlocked survives; only when nothing authorizes this
+                // run anymore does the session actually end.
                 lock (_sync) { _tokens = null; }
                 TokenStore.Clear();
+                if (!Authorized)
+                    SessionEnded?.Invoke();
                 return AuthResult.Fail("session expired — sign in again");
             }
             if (!resp.IsSuccessStatusCode)
@@ -674,15 +709,20 @@ internal sealed class AuthService
 
             lock (_sync)
             {
-                _tokens = tokens;
-                TokenStore.Save(tokens);
+                AccountRecord? prev = _record;
                 _record = AccountRecord.Create(user.Value.Id, user.Value.Email, newPassword);
-                _unlocked = true;
                 try { PersistLocked(); }
                 catch (Exception ex)
                 {
+                    _record = prev;
                     return AuthResult.Fail($"account record save failed: {ex.Message}");
                 }
+                // Key-fenced write = sanctioned heal (see Establish).
+                if (!_attestationClean)
+                    _attestationClean = true;
+                _tokens = tokens;
+                TokenStore.Save(tokens);
+                _unlocked = true;
             }
             NoteSuccess();
             return new AuthResult(true, null);
@@ -725,12 +765,20 @@ internal sealed class AuthService
         return new AuthResult(true, null);
     }
 
+    /// <summary>
+    /// The session ended — sign-out, dead refresh token, etc. The shell
+    /// hooks this to close the dashboard/flyout/wizard: an open window
+    /// must not keep mutating after its authorization died.
+    /// </summary>
+    public event Action? SessionEnded;
+
     /// <summary>Best-effort remote logout; the local session always ends.</summary>
     public async Task<AuthResult> SignOut()
     {
         AuthTokens? tokens;
         lock (_sync) { tokens = _tokens; _tokens = null; _unlocked = false; }
         TokenStore.Clear();
+        SessionEnded?.Invoke();
         if (Configured && tokens?.AccessToken is { Length: > 0 } access)
         {
             try

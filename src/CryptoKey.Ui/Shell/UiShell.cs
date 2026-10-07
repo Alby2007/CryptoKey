@@ -31,6 +31,16 @@ internal sealed class UiShell : IDisposable
     {
         _client = client;
         _host = host;
+        // The session's death closes every authorized surface — an open
+        // dashboard/flyout/wizard must not keep running its mutators after
+        // sign-out or a dead refresh token. The auth window survives (it's
+        // the way back in). May arrive on any thread — marshal to the UI.
+        AuthService.Current.SessionEnded += () => UiRuntime.Post(() =>
+        {
+            _window?.Close();
+            _flyout?.Hide();
+            _wizard?.Close();
+        });
         bool mac = host.Capabilities.PlatformName == "macOS";
         _notes = new NotificationCenter(anchorTop: mac);
         Motion.Configure(client.Settings.Guard.Animations, !host.OsPrefersReducedMotion);
@@ -303,7 +313,9 @@ internal sealed class UiShell : IDisposable
     {
         if (_client.Snapshot.State == GuardState.Locked)
             return;
-        _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit);
+        // Read-only surfaces stay open — the mutators inside (pause,
+        // resume, quit, vault mount) wrap themselves in the auth gate.
+        _flyout ??= new TrayFlyout(_client, _host, OpenWindow, Quit, EnsureAuth);
         _flyout.ShowNear();
     }
 

@@ -97,6 +97,19 @@ internal sealed class GuardClient : IDisposable
 
     // ---------------------------------------------------------- UI → engine
 
+    /// <summary>
+    /// The app-side session check — the UI's hard gate. Named mutators
+    /// refuse when the account session died (signed out, refresh token
+    /// rejected, attestation dirty): an already-open window must not keep
+    /// mutating. Pre-account installs pass unconditionally (<c>!Gating</c>
+    /// — no credential exists to check). Lock/reads stay open.
+    /// </summary>
+    private static bool SessionOk()
+    {
+        var auth = AuthService.Current;
+        return auth.Authorized || !auth.Gating;
+    }
+
     /// <summary>Run <paramref name="work"/> on the engine thread; result back as a Task.</summary>
     public Task<T> Query<T>(Func<GuardService, KeyConfig, T> work)
         => Task.Run(() => _engine.Send(() =>
@@ -116,41 +129,54 @@ internal sealed class GuardClient : IDisposable
     /// motion, vault enablement). Returns null on success or the error.
     /// </summary>
     public Task<string?> UpdateSettings(Action<GuardSettings> mutate)
-        => Query<string?>((svc, cfg) =>
-        {
-            GuardSettings before = cfg.Guard.Clone();
-            mutate(cfg.Guard);
-            try
+        => SessionOk()
+            ? Query<string?>((svc, cfg) =>
             {
-                ConfigStore.Save(cfg);
-            }
-            catch (Exception ex)
-            {
-                return $"Save failed: {ex.Message}";
-            }
-            // Covered-field saves trip the keyfile's config attestation —
-            // flag it so the next verify re-binds quietly instead of
-            // announcing a tamper event we caused ourselves.
-            svc.MarkConfigDirty();
-            GuardSettings after = cfg.Guard;
-            if (after.PollIntervalMs != before.PollIntervalMs)
-                svc.ApplyPollInterval(after.PollIntervalMs);
-            if (after.Animations != before.Animations)
-                svc.ApplyMotion(after.Animations);
-            if (after.VaultEnabled != before.VaultEnabled)
-                svc.Vault.ReloadConfig();
-            return null;
-        });
+                GuardSettings before = cfg.Guard.Clone();
+                mutate(cfg.Guard);
+                try
+                {
+                    ConfigStore.Save(cfg);
+                }
+                catch (Exception ex)
+                {
+                    return $"Save failed: {ex.Message}";
+                }
+                // Covered-field saves trip the keyfile's config attestation —
+                // flag it so the next verify re-binds quietly instead of
+                // announcing a tamper event we caused ourselves.
+                svc.MarkConfigDirty();
+                GuardSettings after = cfg.Guard;
+                if (after.PollIntervalMs != before.PollIntervalMs)
+                    svc.ApplyPollInterval(after.PollIntervalMs);
+                if (after.Animations != before.Animations)
+                    svc.ApplyMotion(after.Animations);
+                if (after.VaultEnabled != before.VaultEnabled)
+                    svc.Vault.ReloadConfig();
+                return null;
+            })
+            : Task.FromResult<string?>(
+                "Session locked — sign in again on the Account page.");
 
     public void Lock() => _ = Run((s, _) => s.RequestLock());
 
     public Task<string?> Pause(int minutes)
-        => Query<string?>((s, _) => s.Pause(minutes, out string err) ? null : err);
+        => SessionOk()
+            ? Query<string?>((s, _) => s.Pause(minutes, out string err) ? null : err)
+            : Task.FromResult<string?>(
+                "Session locked — sign in again on the Account page.");
 
-    public void Resume() => _ = Run((s, _) => s.Resume());
+    public void Resume()
+    {
+        if (SessionOk())
+            _ = Run((s, _) => s.Resume());
+    }
 
     /// <summary>Quit is refused while locked (quitting = unlocking).</summary>
-    public Task<bool> RequestQuit() => Query((s, _) => s.RequestQuit());
+    public Task<bool> RequestQuit()
+        => SessionOk()
+            ? Query((s, _) => s.RequestQuit())
+            : Task.FromResult(false);
 
     /// <summary>Same dispatch table the IPC pipe and CLI use.</summary>
     public Task<string> Dispatch(string command) => Query((s, _) => s.DispatchCommand(command));

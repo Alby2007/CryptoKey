@@ -16,6 +16,7 @@ internal sealed class TrayFlyout : Window
 {
     private readonly GuardClient _client;
     private readonly IUiHost _host;
+    private readonly Action<Action> _ensureAuth;
     private readonly KeyVisual _key = new() { Height = 92, ShowEngraving = false };
     private readonly TextBlock _word = new() { FontSize = 24, FontWeight = FontWeight.Black, LetterSpacing = 1 };
     private readonly TextBlock _reason = Kit.Txt("", "caption", "dim");
@@ -27,10 +28,12 @@ internal sealed class TrayFlyout : Window
     private readonly Button _vaultBtn;
     private DateTime _shownAt;
 
-    public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open, Action quit)
+    public TrayFlyout(GuardClient client, IUiHost host, Action<Route> open,
+        Action quit, Action<Action> ensureAuth)
     {
         _client = client;
         _host = host;
+        _ensureAuth = ensureAuth;
         SystemDecorations = SystemDecorations.None;
         Topmost = true;
         ShowInTaskbar = false;
@@ -43,7 +46,8 @@ internal sealed class TrayFlyout : Window
 
         _lock = Kit.Btn("Lock now", IconData.Lock, "lock", () => { _client.Lock(); Hide(); });
         _lock.HorizontalAlignment = HorizontalAlignment.Stretch;
-        _resume = Kit.Btn("Resume protection", IconData.Play, "primary", () => _client.Resume());
+        _resume = Kit.Btn("Resume protection", IconData.Play, "primary",
+            () => _ensureAuth(() => _client.Resume()));
         _resume.HorizontalAlignment = HorizontalAlignment.Stretch;
 
         _pauseRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -52,15 +56,17 @@ internal sealed class TrayFlyout : Window
         foreach (int mins in new[] { 5, 15, 60 })
         {
             int m = mins;
-            _pauseRow.Children.Add(Kit.Btn(m == 60 ? "1 h" : $"{m} min", null, "chip", async () =>
-            {
-                string? err = await _client.Pause(m);
-                if (err != null)
-                    _reason.Text = err;
-            }));
+            _pauseRow.Children.Add(Kit.Btn(m == 60 ? "1 h" : $"{m} min", null, "chip",
+                () => _ensureAuth(async () =>
+                {
+                    string? err = await _client.Pause(m);
+                    if (err != null)
+                        _reason.Text = err;
+                })));
         }
 
-        _vaultBtn = Kit.Btn("Open", IconData.Folder, "small", VaultAction);
+        _vaultBtn = Kit.Btn("Open", IconData.Folder, "small",
+            () => _ensureAuth(VaultAction));
         var vaultGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 10 };
         vaultGrid.Children.Add(new Icon(IconData.Vault, 16) { Foreground = Palette.Signal, VerticalAlignment = VerticalAlignment.Center });
         Grid.SetColumn(_vaultChip, 1);
@@ -84,7 +90,7 @@ internal sealed class TrayFlyout : Window
         var quitBtn = new Button { Classes = { "ghost", "small" }, Content = new Icon(IconData.Quit, 16) };
         ToolTip.SetTip(quitBtn, "Quit CryptoKey");
         Kit.AutomationName(quitBtn, "Quit CryptoKey");
-        quitBtn.Click += (_, _) => { Hide(); quit(); };
+        quitBtn.Click += (_, _) => { Hide(); _ensureAuth(quit); };
         Grid.SetColumn(quitBtn, 2);
         footer.Children.Add(quitBtn);
 

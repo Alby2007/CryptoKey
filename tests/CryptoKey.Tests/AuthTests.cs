@@ -68,12 +68,12 @@ public class AuthTests : IDisposable
     }
 
     private static string TokenJson(string access = "acc-1", string refresh = "ref-1",
-        string id = "user-1", string email = "a@b.c")
+        string id = "user-1", string email = "a@b.c", int expiresIn = 3600)
         => JsonSerializer.Serialize(new
         {
             access_token = access,
             refresh_token = refresh,
-            expires_in = 3600,
+            expires_in = expiresIn,
             user = new { id, email },
         });
 
@@ -359,6 +359,74 @@ public class AuthTests : IDisposable
         AuthResult r = await auth.SignIn("foreign@x.y", "their-pw");
         Assert.False(r.Ok);
         Assert.Equal(boundHash, auth.Record!.VerifierHash);
+    }
+
+    [Fact]
+    public async Task Dirty_attestation_locks_every_path_until_relink()
+    {
+        // A grafted/edited account record sets _attestationClean=false on
+        // the next key verify (engine side). While dirty, NOTHING may
+        // authorize — not the offline verifier, not a live online sign-in,
+        // not a previously-armed session.
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        AuthService.SetCurrent(auth);
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.True(auth.Authorized);
+
+        auth.SetAttestationClean(false); // what the engine does on a Mismatch
+        Assert.False(auth.Authorized);   // live session no longer counts
+        Assert.False(auth.TryUnlockOffline("pw-123456").Ok);
+        Assert.False(auth.Authorize("pw-123456", out _));
+
+        // Online sign-in is refused too — the graft could be laundering.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        Assert.False((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.False(auth.Authorized);
+
+        // The key-fenced relink path is the way back — and the write it
+        // performs IS the heal, so the flag lifts on success.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456", relink: true)).Ok);
+        Assert.True(auth.Authorized);
+    }
+
+    [Fact]
+    public async Task Signout_and_dead_refresh_end_the_session_event()
+    {
+        var handler = new ScriptHandler();
+        handler.Enqueue(HttpStatusCode.OK, TokenJson());
+        var auth = new AuthService(Cfg, handler);
+        int ended = 0;
+        auth.SessionEnded += () => ended++;
+
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        Assert.Equal(0, ended);
+        await auth.SignOut();
+        Assert.Equal(1, ended);
+        Assert.False(auth.Authorized);
+
+        // A rejected refresh does NOT end the session while the offline
+        // verifier still authorizes the run (documented offline grace).
+        // The expired access token makes Refresh actually post.
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(access: "dead", expiresIn: -1));
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456")).Ok);
+        handler.Enqueue(HttpStatusCode.BadRequest, """{"error":"invalid_grant"}""");
+        Assert.False((await auth.Refresh()).Ok);
+        Assert.Equal(1, ended);          // verifier still covers — session lives
+        Assert.True(auth.Authorized);
+
+        // ...but with the attestation dirty, a dead refresh leaves nothing
+        // authorized — now the session truly ends.
+        auth.SetAttestationClean(false);
+        handler.Enqueue(HttpStatusCode.OK, TokenJson(id: "user-1"));
+        Assert.True((await auth.SignIn("a@b.c", "pw-123456", relink: true)).Ok);
+        auth.SetAttestationClean(false); // dirty again post-relink
+        handler.Enqueue(HttpStatusCode.BadRequest, """{"error":"invalid_grant"}""");
+        Assert.False((await auth.Refresh()).Ok);
+        Assert.Equal(2, ended);
+        Assert.False(auth.Authorized);
     }
 
     [Fact]
