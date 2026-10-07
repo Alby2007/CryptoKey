@@ -603,6 +603,8 @@ internal sealed class GuardService : IDisposable
         if (State == GuardState.Locked)
             return "err locked — unlock first (removing the key there " +
                 "is just an unlock bypass)";
+        if (!_config.Enrolled)
+            return "err no key enrolled — nothing to remove";
         if (_vault.ImageExists)
             return "err a vault image exists — its content is keyed to this " +
                 "enrollment; remove the vault first";

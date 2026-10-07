@@ -51,10 +51,12 @@ internal sealed class KeyConfig
     /// serial is the unenrolled sentinel: `unenroll` clears the key material
     /// but keeps everything else (account, phrase, settings, vault epoch), so
     /// a present-but-unenrolled config is the dormant state — NOT first-run
-    /// (first-run is still a null config).
+    /// (first-run is still a null config). Null-safe: a crafted config can
+    /// deserialize these to null and must read as unenrolled, not crash.
     /// </summary>
     [JsonIgnore]
-    public bool Enrolled => DeviceSerial.Length > 0 && SecretHash.Length > 0;
+    public bool Enrolled =>
+        !string.IsNullOrEmpty(DeviceSerial) && !string.IsNullOrEmpty(SecretHash);
 }
 
 internal enum SecretMatch

@@ -27,10 +27,13 @@ internal interface IUsbEnumerator
 
 internal static class UsbEnumeratorExtensions
 {
-    /// <summary>The enrolled device, if currently attached.</summary>
+    /// <summary>The enrolled device, if currently attached. An empty serial
+    /// (dormant config) never matches — blank-serial drives report "" too —
+    /// and skips the enumeration entirely.</summary>
     public static UsbDisk? FindDisk(this IUsbEnumerator usb, string serial)
-        => usb.Enumerate().FirstOrDefault(d =>
-            string.Equals(d.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
+        => string.IsNullOrEmpty(serial) ? null
+            : usb.Enumerate().FirstOrDefault(d =>
+                string.Equals(d.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
 }
 
 /// <summary>Live presence watch for the enrolled key — events fire on the UI thread.</summary>

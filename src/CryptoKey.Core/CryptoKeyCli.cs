@@ -272,9 +272,8 @@ internal static class CryptoKeyCli
         }
 
         // No live guard — the same mutation standalone (mirrors vault's
-        // standalone ops): account gate → phrase → strip → delete keyfile.
-        if (!RequireAccountAuth())
-            return 1;
+        // standalone ops): no-op checks first so they never bait a password
+        // prompt, then account gate → phrase → strip → delete keyfile.
         if (!TryLoadConfig(out KeyConfig? config))
             return 1;
         if (config == null)
@@ -287,6 +286,8 @@ internal static class CryptoKeyCli
             Console.WriteLine("No key enrolled — nothing to remove.");
             return 0;
         }
+        if (!RequireAccountAuth())
+            return 1;
         string imagePath = string.IsNullOrWhiteSpace(config.Guard.VaultImagePath)
             ? VaultService.DefaultImagePath : config.Guard.VaultImagePath;
         if (File.Exists(imagePath))

@@ -203,6 +203,54 @@ public class UnenrollTests : IDisposable
     }
 
     [Fact]
+    public void Unenroll_on_a_dormant_config_refuses_honestly()
+    {
+        // Second run of the verb is not a silent "ok" — there was nothing
+        // to remove and the reply says so.
+        KeyConfig cfg = FreshCfg();
+        cfg.DeviceSerial = "";
+        cfg.SecretSalt = "";
+        cfg.SecretHash = "";
+        using var svc = new GuardService(cfg, devMode: false, forceClassic: false);
+
+        Assert.StartsWith("err no key enrolled", svc.Unenroll("passphrase-ok"));
+        Assert.False(cfg.Enrolled);
+    }
+
+    [Fact]
+    public void Null_key_fields_deserialize_as_unenrolled_not_a_crash()
+    {
+        // A crafted/hand-edited config can put JSON null in the string
+        // fields — Enrolled must read false, never throw, everywhere it's
+        // consulted (Start, Snapshot, status, every auto-lock funnel).
+        File.WriteAllText(ConfigStore.ConfigPath,
+            """{"DeviceSerial": null, "SecretSalt": null, "SecretHash": null}""");
+        try
+        {
+            KeyConfig? loaded = ConfigStore.Load();
+            Assert.NotNull(loaded);
+            Assert.False(loaded!.Enrolled);
+        }
+        finally
+        {
+            File.Delete(ConfigStore.ConfigPath);
+            File.Delete(ConfigStore.BackupPath);
+        }
+    }
+
+    [Fact]
+    public void Empty_serial_never_matches_a_blank_serial_disk()
+    {
+        // The dormant sentinel is "" — a drive that reports a blank serial
+        // satisfies `SerialNumber == ""` if FindDisk doesn't refuse first.
+        string dir = TestDisk.TempDir();
+        TestPlatform.TestUsbEnumerator.Disks.Add(
+            new UsbDisk("TEST\\DISK", "", "Blank-serial drive", [dir]));
+
+        Assert.Null(Platform.Services.Usb.FindDisk(""));
+    }
+
+    [Fact]
     public void Reenroll_from_unenrolled_keeps_settings_account_and_epoch()
     {
         // `unenroll` leaves a present-but-dormant config; enrolling a fresh
