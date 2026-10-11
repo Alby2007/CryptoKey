@@ -56,6 +56,22 @@ wizard; the config, account, and settings carry over there too.
 the enrolled device since startup — a machine booted without the key
 doesn't instantly lock itself while WMI enumerates.
 
+Marginal-drive hysteresis: a suspended enclosure (selective suspend, HDD
+spin-down, flaky hubs) can drop the device node and re-enumerate inside a
+second, or report the disk while its volume still stalls — locking on the
+first signal ping-pongs the desktop. Two dampers keep fail-closed without
+the flicker:
+
+- a **removal event** arms a ~1.5 s confirm instead of locking; at the
+  deadline a fresh `FindDisk` must still report absent or the lock is
+  cancelled — a real pull locks ~1.5 s late, a re-attach flap never locks;
+- a **verify failure while unlocked** (disk enumerated but the keyfile
+  won't read) needs two consecutive strikes to lock — one transient
+  `io:`/timeout/`missing` read clears itself on the next poll.
+
+Startup absence and resume still fail closed immediately — there is no
+trusted prior session to protect on those edges.
+
 Idle lock (`Guard.IdleLockMinutes`, default 0 = off): the ~5 s slow tick
 (the watchdog timer) reads `GetLastInputInfo`; when idle exceeds the
 threshold it locks on the UI thread with reason `idle N min`. Fires only

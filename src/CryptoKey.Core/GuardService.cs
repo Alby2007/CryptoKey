@@ -31,6 +31,8 @@ internal sealed class GuardService : IDisposable
     private int _phraseTicket;   // bumped per attempt + per session — orphans stale results
     private StatusSnapshot? _lastSnapshot;
     private bool _verifiedEdge;
+    private DateTime _absentSinceUtc;   // removal event pending re-confirm — a re-attach cancels it
+    private int _verifyFailStreak;      // consecutive Match==None polls while unlocked
     private DateTime _lastRotateAttemptUtc = DateTime.MinValue;
     private bool _reattestPending;      // an in-app save changed a covered field
     private DateTime _lastReattestUtc = DateTime.MinValue;
@@ -1086,12 +1088,55 @@ internal sealed class GuardService : IDisposable
             Platform.Services.SystemActions.LockScreen();
     }
 
-    // Removal locks instantly (when armed). Arrival deliberately does nothing
-    // here — OnPresenceChecked re-verifies on every poll, which covers the lag
-    // between the device node arriving and its volume mounting.
+    /// <summary>
+    /// Removal events re-confirm after this window — a sleeping enclosure that
+    /// drops the device node and re-enumerates inside it cancels the lock
+    /// entirely; a real pull locks ~this late. Internal so tests can shrink it.
+    /// </summary>
+    internal TimeSpan RemovalConfirm = TimeSpan.FromMilliseconds(1500);
+    private const int VerifyFailStrikes = 2;
+
+    // Removal doesn't lock on the event itself: a suspended drive can drop
+    // off the bus and re-enumerate inside a second, which ping-ponged the
+    // desktop lock. Mark the absence and re-confirm once the churn settles.
+    // Arrival deliberately does nothing else — OnPresenceChecked re-verifies
+    // on every poll, which covers the lag between the device node arriving
+    // and its volume mounting.
     private void OnPresenceChanged(bool present)
     {
-        if (!present)
+        _verifyFailStreak = 0; // a bus transition ends the read-failure streak
+        if (present)
+        {
+            _absentSinceUtc = default;
+            return;
+        }
+        if (_absentSinceUtc != default)
+            return; // already pending — one confirm covers the storm
+        _absentSinceUtc = DateTime.UtcNow;
+        TimeSpan delay = RemovalConfirm;
+        _ = Task.Delay(delay).ContinueWith(
+            _ => _ui.Post(ConfirmAbsentLock), TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Post-window removal check: locks only when the drive is still
+    /// genuinely absent. A re-enumerated device skips the lock entirely —
+    /// the next poll's verify owns that state.
+    /// </summary>
+    private void ConfirmAbsentLock()
+    {
+        if (_absentSinceUtc == default)
+            return;
+        _absentSinceUtc = default;
+        if (State != GuardState.Unlocked)
+            return;
+        UsbDisk? disk = null;
+        try { disk = Platform.Services.Usb.FindDisk(_config.DeviceSerial); }
+        catch (Exception ex)
+        {
+            Log($"Removal re-check failed ({ex.Message}) — confirming absent.");
+        }
+        if (disk == null)
             MaybeAutoLock("key removed");
     }
 
@@ -1109,12 +1154,15 @@ internal sealed class GuardService : IDisposable
             return;
         }
         _lastDisk = disk;
+        if (disk != null)
+            _absentSinceUtc = default; // the poll saw it — no pending removal
         CheckPauseExpiry();
         if (disk == null)
         {
             _verifiedEdge = false;
             _tamperNote = null;
             _keyVerifiedNow = false;
+            _verifyFailStreak = 0;
             _staleKeyPresent = false;
             _reattestPending = false; // key left — a pending re-attest dies with it
             _vault.KeyGone();
@@ -1138,6 +1186,7 @@ internal sealed class GuardService : IDisposable
             // Strict tamper: a stale secret never counts as the key factor.
             _keyVerifiedNow = !stale || !strict;
             _lastVerifyFailure = null;
+            _verifyFailStreak = 0;
             bool edgeFlip = !_verifiedEdge;
             uint gen = (uint)(stale ? Math.Max(1, _config.RotationCount - 1)
                                     : _config.RotationCount);
@@ -1362,7 +1411,12 @@ internal sealed class GuardService : IDisposable
             {
                 if (changed)
                     Log($"Key stopped verifying ({check.Detail}).");
-                MaybeAutoLock("key unverified");
+                // An enumerating/suspended drive can report the device node
+                // while its volume still stalls — one transient read error
+                // isn't grounds to slam the desktop. Consecutive failures
+                // lock; a real pull goes through the removal confirm.
+                if (++_verifyFailStreak >= VerifyFailStrikes)
+                    MaybeAutoLock("key unverified");
             }
             else if (changed)
             {
